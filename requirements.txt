@@ -1,0 +1,10 @@
+# Все библиотеки бесплатные и open-source
+PySide6>=6.6          # интерфейс: трей, окно настроек (LGPL)
+mss>=9.0              # список мониторов и их координаты (MIT)
+pynput>=1.7.6         # положение мыши, клики, горячие клавиши (LGPL)
+numpy>=1.26           # сравнение миниатюр кадров (BSD)
+platformdirs>=4.0     # правильные папки для настроек на каждой ОС (MIT)
+psutil>=5.9           # имя программы активного окна (BSD)
+jeepney>=0.8 ; sys_platform == "linux"                  # D-Bus для порталов Wayland (MIT)
+python-xlib>=0.33 ; sys_platform == "linux"             # активное окно на X11 (LGPL)
+pyobjc-framework-Cocoa>=10.0 ; sys_platform == "darwin" # активное окно на macOS (MIT)

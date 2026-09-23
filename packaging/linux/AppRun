@@ -1,0 +1,4 @@
+#!/bin/sh
+# Точка входа AppImage: запускает собранную PyInstaller программу
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/Worklapse/Worklapse" "$@"
