@@ -146,7 +146,9 @@ def test_export_with_framing(tmp_path):
 @pytest.fixture(scope="module")
 def qt_app():
     import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import sys
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
 
@@ -178,6 +180,12 @@ def test_export_with_text(tmp_path, qt_app, anim):
     p.text_style = {"bg": False, "color": "#ffffff", "size": 0.2, "anim": anim}
     p.texts = [TextItem("x", "ТЕКСТ", 0.5, 1.2)]
     layers = render_text_layers(p, tmp_path / "layers")
+    from PySide6.QtGui import QImage
+    png = QImage(str(layers[0].png))
+    opaque = [png.pixelColor(x, y) for x in range(png.width()) for y in range(png.height())
+              if png.pixelColor(x, y).alpha() > 200]
+    assert len(opaque) > 100, "текст не нарисовался в PNG"
+    assert sum(c.lightness() for c in opaque) / len(opaque) > 200, "текст в PNG не белый"
     out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder(), text_layers=layers)
 
     def brightness(ts):
@@ -185,7 +193,8 @@ def test_export_with_text(tmp_path, qt_app, anim):
                               "-vf", "scale=32:18,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
         return sum(raw) / max(1, len(raw))
     assert brightness(0.2) < 2           # до появления — чёрный кадр
-    assert brightness(1.1) > 3           # текст виден
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
+    assert brightness(1.1) > 3, (layers[0], info[-600:])   # текст виден
     assert brightness(1.9) < 2           # после — снова пусто
 
 

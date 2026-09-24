@@ -94,7 +94,7 @@ def add_font(path: Path) -> str | None:
     """Скопировать файл шрифта в папку программы и подключить. Возвращает название семейства."""
     dest = fonts_dir() / path.name
     if not dest.exists():
-        shutil.copy2(path, dest)
+        shutil.copyfile(path, dest)   # только содержимое: системные флаги файла (macOS) не копируем
     fid = QFontDatabase.addApplicationFont(str(dest))
     if fid < 0:
         return None

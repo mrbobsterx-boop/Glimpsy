@@ -191,7 +191,7 @@ class Project:
             dest = media / f"{path.stem}_{n}{path.suffix}"
             n += 1
         if not dest.exists():
-            shutil.copy2(path, dest)
+            shutil.copyfile(path, dest)   # только содержимое: системные флаги файла (macOS) не копируем
         rel = dest.relative_to(self.dir).as_posix()
         if info.is_image:
             return Clip(new_id(), "image", rel, IMAGE_MAX_S, 0.0, IMAGE_DEFAULT_S,
