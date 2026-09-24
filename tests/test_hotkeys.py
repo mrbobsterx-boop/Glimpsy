@@ -22,3 +22,9 @@ def test_normalize():
 def test_invalid(bad):
     with pytest.raises(hf.HotkeyError):
         hf.parse(bad)
+
+
+def test_win32_codes():
+    assert hf.to_win32("Ctrl+Alt+S") == (0x2 | 0x1, ord("S"))
+    assert hf.to_win32("Ctrl+Shift+F9") == (0x2 | 0x4, 0x78)
+    assert hf.to_win32("Win+Alt+1") == (0x8 | 0x1, ord("1"))

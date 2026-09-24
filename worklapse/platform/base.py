@@ -114,4 +114,5 @@ class PlatformServices:
     active_window: ActiveWindowProbe
     hotkeys: HotkeyBackend
     input_events_supported: bool          # можно ли слушать мышь/клавиатуру глобально
+    input_backend: str = "pynput"         # как именно: pynput (хуки) или win32poll (опрос)
     limitations: list[str] = field(default_factory=list)   # понятные сообщения пользователю

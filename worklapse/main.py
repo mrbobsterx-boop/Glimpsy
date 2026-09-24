@@ -45,6 +45,10 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)     # программа живёт в трее
     app.setWindowIcon(state_icon("recording"))
 
+    # Программа уже запущена? Тогда просим её показаться и выходим — две копии не нужны
+    if _notify_running_instance():
+        sys.exit(0)
+
     ffmpeg = paths.find_executable("ffmpeg")
     if not ffmpeg:
         QMessageBox.critical(None, APP_NAME, "Не найден FFmpeg.\n\nВ готовой сборке он встроен. При запуске из "
@@ -67,6 +71,7 @@ def main() -> None:
 
     engine = RecorderEngine(settings, services, ffmpeg)
     tray = TrayController(app, settings, services, engine)
+    server = _listen_for_second_launch(tray)  # noqa: F841 — держим ссылку, пока программа работает
 
     # Один раз показываем, что на этой системе ограничено и почему
     new_limits = [x for x in services.limitations if x not in settings.shown_limitations]
@@ -78,6 +83,13 @@ def main() -> None:
     if not _handle_unfinished(engine) and settings.autostart_recording:
         engine.start_session()
 
+    if not settings.welcome_shown:
+        tray.show_welcome()
+        settings.welcome_shown = True
+        save_settings(settings)
+    else:
+        tray.show_message("Worklapse запущен", "Значок — в трее возле часов. Запись идёт в фоне.")
+
     # Ctrl+C в терминале корректно закрывает программу (удобно при разработке)
     signal.signal(signal.SIGINT, lambda *_: tray.quit())
     timer = QTimer()
@@ -85,6 +97,36 @@ def main() -> None:
     timer.timeout.connect(lambda: None)
 
     sys.exit(app.exec())
+
+
+def _instance_name() -> str:
+    import getpass
+
+    return f"{APP_NAME}-{getpass.getuser()}"
+
+
+def _notify_running_instance() -> bool:
+    from PySide6.QtNetwork import QLocalSocket
+
+    sock = QLocalSocket()
+    sock.connectToServer(_instance_name())
+    if not sock.waitForConnected(300):
+        return False
+    sock.write(b"show")
+    sock.waitForBytesWritten(300)
+    sock.disconnectFromServer()
+    return True
+
+
+def _listen_for_second_launch(tray: TrayController):
+    from PySide6.QtNetwork import QLocalServer
+
+    server = QLocalServer()
+    QLocalServer.removeServer(_instance_name())   # хвост от аварийно закрытой копии
+    if not server.listen(_instance_name()):
+        log.warning("Не удалось включить защиту от второй копии: %s", server.errorString())
+    server.newConnection.connect(lambda: (server.nextPendingConnection(), tray.show_already_running()))
+    return server
 
 
 def _handle_unfinished(engine: RecorderEngine) -> bool:

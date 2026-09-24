@@ -226,7 +226,7 @@ class RecorderEngine(QObject):
             (self.session_dir / "session.json").write_text(json.dumps({"start": self.session_start}))
         shutil.rmtree(self.session_dir / "buffer", ignore_errors=True)  # старый буфер не нужен
         self.pool = CandidatePool(self.session_dir)
-        self.activity = ActivityTracker(self.services.input_events_supported)
+        self.activity = ActivityTracker(self.services.input_events_supported, self.services.input_backend)
         for err in self.activity.start():
             self.notify.emit("Worklapse", err)
 

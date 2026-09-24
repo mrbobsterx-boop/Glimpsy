@@ -63,6 +63,7 @@ class Settings:
     wayland_restore_token: str = ""    # чтобы Wayland не спрашивал разрешение каждый раз
     keep_project_for_editor: bool = True
     shown_limitations: list[str] = field(default_factory=list)
+    welcome_shown: bool = False
 
     def validate(self) -> "Settings":
         """Приводит значения в разумные рамки, чтобы опечатка не сломала запись."""
