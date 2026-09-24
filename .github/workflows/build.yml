@@ -108,10 +108,22 @@ jobs:
             dist/*.AppImage
           if-no-files-found: error
 
+      # Номер версии берём из worklapse/__init__.py
+      - name: Номер версии
+        id: ver
+        shell: bash
+        run: echo "tag=v$(python -c 'import worklapse; print(worklapse.__version__)')" >> "$GITHUB_OUTPUT"
+
+      # Релиз создаётся при обновлении main (или при ручном теге vX.Y.Z).
+      # Если релиз этой версии уже есть — файлы в нём обновляются.
       - name: Выложить в Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Worklapse ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          overwrite_files: true
           files: |
             dist/*.zip
             dist/*.exe
