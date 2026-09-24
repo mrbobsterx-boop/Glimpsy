@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write   # нужно, чтобы выкладывать файлы в Releases
 
+env:
+  # Консоль Windows по умолчанию не понимает кириллицу — включаем UTF-8 для Python
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -34,9 +39,9 @@ jobs:
             os: ubuntu-22.04   # старая Ubuntu → AppImage запустится на большинстве дистрибутивов
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
