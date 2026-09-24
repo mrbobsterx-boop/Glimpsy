@@ -33,6 +33,8 @@ class TrayController(QObject):
                              "needed": engine.plan.clips_needed}
         self._last_video: Path | None = None
         self._settings_open = False
+        self._sessions = None
+        self._editors: list = []
 
         self.menu = QMenu()
         self.a_status = self.menu.addAction("…")
@@ -49,8 +51,7 @@ class TrayController(QObject):
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
         self.menu.addAction("Настройки…", self.open_settings)
         self.menu.addAction("Открыть папку с роликами", lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
-        a_editor = self.menu.addAction("Редактор (появится на этапе 2)")
-        a_editor.setEnabled(False)
+        self.menu.addAction("🎞 Редактор роликов…", self.open_editor)
         self.menu.addSeparator()
         self.menu.addAction("Выход", self.quit)
 
@@ -205,6 +206,44 @@ class TrayController(QObject):
         s.monitor_mode, s.manual_monitor = mode, index
         self._apply(s)
 
+    def open_editor(self) -> None:
+        """Список сессий → выбранная открывается в редакторе."""
+        from worklapse.editor.sessions import SessionsDialog
+
+        if self._sessions is None:
+            self._sessions = SessionsDialog(self.engine.ffmpeg, self._open_project)
+        else:
+            self._sessions.reload()
+        self._sessions.show()
+        self._sessions.raise_()
+        self._sessions.activateWindow()
+
+    def _open_project(self, project_dir: Path) -> None:
+        from worklapse.editor.window import EditorWindow
+
+        for w in list(self._editors):          # уже открыт — просто показываем
+            if w.project.dir == project_dir and w.isVisible():
+                w.raise_()
+                w.activateWindow()
+                return
+        self._editors = [w for w in self._editors if w.isVisible()]
+        try:
+            w = EditorWindow(project_dir, self.engine.ffmpeg, self._encoder_for_export, Path(self.s.output_dir))
+        except Exception as e:
+            log.exception("Редактор не открылся")
+            QMessageBox.warning(None, "Worklapse", f"Не удалось открыть проект:\n{e}")
+            return
+        w.setWindowIcon(state_icon(State.RECORDING))
+        self._editors.append(w)
+        w.show()
+        if self._sessions:
+            self._sessions.close()
+
+    def _encoder_for_export(self):
+        from worklapse.recorder.encoder import pick_encoder
+
+        return self.engine.encoder or pick_encoder(self.engine.ffmpeg, self.s.encoder, self.s.fps)
+
     def open_settings(self) -> None:
         if self._settings_open:
             return
@@ -259,6 +298,7 @@ class TrayController(QObject):
                          ("⭐ Важный момент", self.engine.mark_important),
                          ("🎬 Собрать ролик", self._finish),
                          ("▶ Начать запись", self.engine.start_session),
+                         ("🎞 Редактор роликов…", self.open_editor),
                          ("Настройки…", self.open_settings),
                          ("Выход", self.quit)):
             b = QPushButton(text)

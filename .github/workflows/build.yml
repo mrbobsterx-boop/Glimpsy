@@ -124,8 +124,15 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Worklapse ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
           overwrite_files: true
+          # одинаковый текст от всех четырёх сборок — чтобы описание не повторялось
+          body: |
+            Скачайте файл для своей системы:
+            * **Windows** — `Worklapse-Windows-x64-portable.exe` (один файл) или `Worklapse-Windows-x64.zip`
+            * **Mac на M1–M4** — `Worklapse-macOS-arm64.zip`, **Mac на Intel** — `Worklapse-macOS-x86_64.zip`
+            * **Linux** — `Worklapse-x86_64.AppImage`
+
+            Подробности — в [README](https://github.com/${{ github.repository }}#readme).
           files: |
             dist/*.zip
             dist/*.exe
             dist/*.AppImage
-          generate_release_notes: true

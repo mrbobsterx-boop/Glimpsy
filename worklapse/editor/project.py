@@ -1,0 +1,279 @@
+"""Проект редактора: список фрагментов и всё, что с ними сделали.
+
+Каждая записанная сессия — отдельный проект в папке данных программы
+(projects/project_ГГГГММДД_ЧЧММСС). Там лежат:
+  * piece_XXXX.mp4 — фрагменты, из которых собран исходный ролик;
+  * project.json   — как их собрал автомат (этап 1, не меняется);
+  * edit.json      — ваши правки в редакторе (сохраняются автоматически);
+  * media/         — копии видео и фото, которые вы вставили.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import shutil
+import time
+import uuid
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+
+ASPECTS = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
+MIN_CLIP_S = 0.2          # короче фрагмент не сделать
+IMAGE_DEFAULT_S = 3.0     # сколько по умолчанию показывается вставленное фото
+IMAGE_MAX_S = 3600.0
+MAX_SPEED = 10.0
+MIN_SPEED = 0.25
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex[:10]
+
+
+@dataclass
+class Clip:
+    id: str
+    kind: str                 # "video" или "image"
+    src: str                  # путь к файлу (относительный — внутри папки проекта)
+    src_duration: float       # длина исходного файла, с (для фото — IMAGE_MAX_S)
+    in_s: float = 0.0         # откуда начинаем внутри файла
+    out_s: float = 0.0        # где заканчиваем
+    speed: float = 1.0
+    muted: bool = False
+    has_audio: bool = False
+    width: int = 0
+    height: int = 0
+    label: str = ""
+    priority: bool = False
+    recorded_at: float | None = None
+    cursor: list = field(default_factory=list)
+
+    @property
+    def duration(self) -> float:
+        """Сколько фрагмент длится в готовом ролике (с учётом скорости)."""
+        return max(0.0, (self.out_s - self.in_s) / self.speed)
+
+
+@dataclass
+class Project:
+    dir: Path
+    name: str
+    clips: list[Clip] = field(default_factory=list)
+    aspect: str = "16:9"
+    fps: int = 30
+    source_video: str = ""    # исходный ролик из этапа 1 (рядом с ним сохраняется правка)
+    created: float = 0.0
+    version: int = 1
+
+    # ---------- время ----------
+
+    @property
+    def total(self) -> float:
+        return sum(c.duration for c in self.clips)
+
+    def start_of(self, index: int) -> float:
+        return sum(c.duration for c in self.clips[:index])
+
+    def locate(self, t: float) -> tuple[int | None, float]:
+        """Какой фрагмент играет в момент t и сколько секунд от его начала."""
+        acc = 0.0
+        for i, c in enumerate(self.clips):
+            if t < acc + c.duration or i == len(self.clips) - 1:
+                return i, min(max(0.0, t - acc), c.duration)
+            acc += c.duration
+        return None, 0.0
+
+    def path_of(self, clip: Clip) -> Path:
+        p = Path(clip.src)
+        return p if p.is_absolute() else self.dir / p
+
+    def index_of(self, clip_id: str) -> int:
+        return next((i for i, c in enumerate(self.clips) if c.id == clip_id), -1)
+
+    # ---------- правки ----------
+
+    def delete(self, index: int) -> None:
+        del self.clips[index]
+
+    def move(self, src: int, dst: int) -> None:
+        """Переставить фрагмент src так, чтобы он оказался на позиции dst."""
+        clip = self.clips.pop(src)
+        if dst > src:
+            dst -= 1
+        self.clips.insert(max(0, min(dst, len(self.clips))), clip)
+
+    def split(self, t: float) -> int | None:
+        """Разрезать фрагмент под курсором. Возвращает индекс правой половины."""
+        idx, local = self.locate(t)
+        if idx is None:
+            return None
+        c = self.clips[idx]
+        if local < MIN_CLIP_S or c.duration - local < MIN_CLIP_S:
+            return None
+        cut = c.in_s + local * c.speed
+        right = copy.deepcopy(c)
+        right.id = new_id()
+        right.in_s = cut
+        c.out_s = cut
+        self.clips.insert(idx + 1, right)
+        return idx + 1
+
+    def trim(self, index: int, in_s: float, out_s: float) -> None:
+        c = self.clips[index]
+        min_src = MIN_CLIP_S * c.speed
+        in_s = max(0.0, min(in_s, c.src_duration - min_src))
+        out_s = max(in_s + min_src, min(out_s, c.src_duration))
+        c.in_s, c.out_s = in_s, out_s
+
+    def set_speed(self, index: int, speed: float) -> None:
+        self.clips[index].speed = max(MIN_SPEED, min(MAX_SPEED, float(speed)))
+
+    def insert(self, index: int, clips: list[Clip]) -> None:
+        for k, c in enumerate(clips):
+            self.clips.insert(index + k, c)
+
+    # ---------- файлы ----------
+
+    def import_file(self, path: Path, info) -> Clip:
+        """Копирует вставленный файл в папку проекта (чтобы проект не сломался,
+        если оригинал удалят) и создаёт для него фрагмент."""
+        media = self.dir / "media"
+        media.mkdir(parents=True, exist_ok=True)
+        dest = media / path.name
+        n = 2
+        while dest.exists() and not _same_file(dest, path):
+            dest = media / f"{path.stem}_{n}{path.suffix}"
+            n += 1
+        if not dest.exists():
+            shutil.copy2(path, dest)
+        rel = dest.relative_to(self.dir).as_posix()
+        if info.is_image:
+            return Clip(new_id(), "image", rel, IMAGE_MAX_S, 0.0, IMAGE_DEFAULT_S,
+                        width=info.width, height=info.height, label=path.name)
+        return Clip(new_id(), "video", rel, info.duration, 0.0, info.duration,
+                    has_audio=info.has_audio, width=info.width, height=info.height, label=path.name)
+
+    # ---------- сохранение ----------
+
+    def to_dict(self) -> dict:
+        return {
+            "version": self.version, "name": self.name, "aspect": self.aspect, "fps": self.fps,
+            "source_video": self.source_video, "created": self.created,
+            "clips": [asdict(c) for c in self.clips],
+        }
+
+    def restore(self, data: dict) -> None:
+        """Вернуть состояние из словаря (для отмены/повтора)."""
+        self.aspect = data.get("aspect", "16:9")
+        known = {f.name for f in fields(Clip)}
+        self.clips = [Clip(**{k: v for k, v in c.items() if k in known}) for c in data.get("clips", [])]
+
+    def save(self) -> None:
+        tmp = self.dir / "edit.json.tmp"
+        tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(self.dir / "edit.json")
+
+    @property
+    def edited(self) -> bool:
+        return (self.dir / "edit.json").exists()
+
+    @classmethod
+    def load(cls, directory: Path) -> "Project":
+        directory = Path(directory)
+        edit = directory / "edit.json"
+        if edit.exists():
+            data = json.loads(edit.read_text(encoding="utf-8"))
+            p = cls(directory, data.get("name", directory.name), fps=int(data.get("fps", 30)),
+                    source_video=data.get("source_video", ""), created=float(data.get("created", 0)))
+            p.restore(data)
+            return p
+        return cls._from_recording(directory)
+
+    @classmethod
+    def _from_recording(cls, directory: Path) -> "Project":
+        """Первое открытие: берём фрагменты, которые автоматически собрал этап 1."""
+        meta = json.loads((directory / "project.json").read_text(encoding="utf-8"))
+        clips = []
+        for c in meta.get("clips", []):
+            when = c.get("recorded_at")
+            label = time.strftime("%H:%M:%S", time.localtime(when)) if when else c["file"]
+            if c.get("monitor"):
+                label += f" · монитор {c['monitor']}"
+            w, h = (c.get("source_size") or [0, 0])[:2]
+            dur = float(c.get("duration", 0))
+            # Фрагменты уже ускорены при автосборке, поэтому здесь их скорость — ×1
+            clips.append(Clip(new_id(), "video", c["file"], dur, 0.0, dur, width=w, height=h,
+                              label=label, priority=bool(c.get("priority")), recorded_at=when,
+                              cursor=c.get("cursor", [])))
+        output = meta.get("output", "")
+        try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
+            created = time.mktime(time.strptime(directory.name.split("_", 1)[1], "%Y%m%d_%H%M%S"))
+        except (IndexError, ValueError):
+            created = directory.stat().st_mtime
+        name = Path(output).stem if output else directory.name
+        return cls(directory, name, clips, fps=int(meta.get("fps", 30)), source_video=output, created=created)
+
+
+class History:
+    """Отмена и повтор. Храним снимки проекта до каждой правки.
+
+    Если одно и то же поле меняется много раз подряд (например, крутят скорость),
+    это считается одной правкой — чтобы Ctrl+Z не приходилось жать 20 раз.
+    """
+
+    LIMIT = 200
+    MERGE_WINDOW_S = 1.5
+
+    def __init__(self) -> None:
+        self._undo: list[dict] = []
+        self._redo: list[dict] = []
+        self._last_key: str | None = None
+        self._last_time = 0.0
+
+    def push(self, state: dict, key: str | None = None) -> None:
+        now = time.monotonic()
+        if key and key == self._last_key and now - self._last_time < self.MERGE_WINDOW_S:
+            self._last_time = now
+            return
+        self._undo.append(copy.deepcopy(state))
+        del self._undo[:-self.LIMIT]
+        self._redo.clear()
+        self._last_key, self._last_time = key, now
+
+    def undo(self, current: dict) -> dict | None:
+        if not self._undo:
+            return None
+        self._redo.append(copy.deepcopy(current))
+        self._last_key = None
+        return self._undo.pop()
+
+    def redo(self, current: dict) -> dict | None:
+        if not self._redo:
+            return None
+        self._undo.append(copy.deepcopy(current))
+        self._last_key = None
+        return self._redo.pop()
+
+    @property
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    @property
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+
+def list_projects(root: Path) -> list[Path]:
+    """Все проекты, новые сверху."""
+    if not root.exists():
+        return []
+    dirs = [d for d in root.iterdir() if d.is_dir() and ((d / "project.json").exists() or (d / "edit.json").exists())]
+    return sorted(dirs, key=lambda d: d.name, reverse=True)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Файл с тем же именем и размером уже скопирован — второй раз не копируем."""
+    try:
+        return a.stat().st_size == b.stat().st_size
+    except OSError:
+        return False

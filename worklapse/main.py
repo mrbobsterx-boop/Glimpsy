@@ -46,7 +46,7 @@ def main() -> None:
     app.setWindowIcon(state_icon("recording"))
 
     # Программа уже запущена? Тогда просим её показаться и выходим — две копии не нужны
-    if _notify_running_instance():
+    if _notify_running_instance(b"editor" if "--editor" in sys.argv else b"show"):
         sys.exit(0)
 
     ffmpeg = paths.find_executable("ffmpeg")
@@ -88,7 +88,11 @@ def main() -> None:
         settings.welcome_shown = True
         save_settings(settings)
     else:
-        tray.show_message("Worklapse запущен", "Значок — в трее возле часов. Запись идёт в фоне.")
+        tray.show_message("Worklapse запущен", "Значок — в трее возле часов." +
+                          (" Запись идёт в фоне." if engine.running else ""))
+
+    if "--editor" in sys.argv:        # ярлык «Worklapse — редактор»
+        tray.open_editor()
 
     # Ctrl+C в терминале корректно закрывает программу (удобно при разработке)
     signal.signal(signal.SIGINT, lambda *_: tray.quit())
@@ -105,14 +109,14 @@ def _instance_name() -> str:
     return f"{APP_NAME}-{getpass.getuser()}"
 
 
-def _notify_running_instance() -> bool:
+def _notify_running_instance(command: bytes = b"show") -> bool:
     from PySide6.QtNetwork import QLocalSocket
 
     sock = QLocalSocket()
     sock.connectToServer(_instance_name())
     if not sock.waitForConnected(300):
         return False
-    sock.write(b"show")
+    sock.write(command)
     sock.waitForBytesWritten(300)
     sock.disconnectFromServer()
     return True
@@ -125,7 +129,15 @@ def _listen_for_second_launch(tray: TrayController):
     QLocalServer.removeServer(_instance_name())   # хвост от аварийно закрытой копии
     if not server.listen(_instance_name()):
         log.warning("Не удалось включить защиту от второй копии: %s", server.errorString())
-    server.newConnection.connect(lambda: (server.nextPendingConnection(), tray.show_already_running()))
+    def on_connection() -> None:
+        conn = server.nextPendingConnection()
+        conn.waitForReadyRead(300)
+        if bytes(conn.readAll()) == b"editor":
+            tray.open_editor()
+        else:
+            tray.show_already_running()
+
+    server.newConnection.connect(on_connection)
     return server
 
 
