@@ -226,7 +226,7 @@ class RecorderEngine(QObject):
             (self.session_dir / "session.json").write_text(json.dumps({"start": self.session_start}))
         shutil.rmtree(self.session_dir / "buffer", ignore_errors=True)  # старый буфер не нужен
         self.pool = CandidatePool(self.session_dir)
-        self.activity = ActivityTracker(self.services.input_events_supported)
+        self.activity = ActivityTracker(self.services.input_events_supported, self.services.input_backend)
         for err in self.activity.start():
             self.notify.emit("Worklapse", err)
 
@@ -300,10 +300,12 @@ class RecorderEngine(QObject):
         if now - self._privacy_at >= PRIVACY_CHECK_EVERY:
             self._privacy_at = now
             win = self.services.active_window.active()
-            private = bool(win and win.matches(self.s.blacklist))
+            hit = win.matched(self.s.blacklist) if win else None
+            private = hit is not None
             if private != self._private:
                 self._private = private
-                log.info("Приватное окно: %s (%s)", private, win.app if win else "")
+                log.info("Приватное окно: %s (%s)%s", private, win.app if win else "",
+                         f" — совпало со словом «{hit}» из чёрного списка" if hit else "")
         if self._private:
             self._close_run()     # в буфер не попадает ни одного кадра приватного окна
             self._set_state(State.PRIVATE)
@@ -335,6 +337,9 @@ class RecorderEngine(QObject):
             return
         self.run.poll()
         self.run.trim(self.s.buffer_s + 2)
+        if not self.run.segments and now - self.run.started_at > 8:
+            self._no_segments()   # запись идёт, но на кусочки не режется — буфер бесполезен
+            return
         if self._fail_count and now - self.run.started_at > 10:
             self._fail_count = 0
 
@@ -429,6 +434,21 @@ class RecorderEngine(QObject):
             self.notify.emit("Worklapse", "Аппаратный кодек сбоит, переключаюсь на программный.")
         elif self._fail_count >= 5:
             self._fail("Запись экрана не запускается. Подробности — в журнале.\n" + err[-300:], now)
+
+    def _no_segments(self) -> None:
+        """Страховка: кодек пишет видео одним куском (не делает ключевых кадров).
+        Переходим на программный кодек, который гарантированно режется посекундно."""
+        run = self.run
+        log.warning("За 8 с не появилось ни одного кусочка буфера (кодек %s)\n%s",
+                    self.encoder.name if self.encoder else "?", run.error_text() if run else "")
+        self._deferred.clear()
+        self._close_run()
+        if self.encoder and self.encoder.hw:
+            self.encoder = software_encoder()
+            self.notify.emit("Worklapse", "Аппаратный кодек не подошёл для буфера, "
+                                          "переключаюсь на программный.")
+        else:
+            self._fail("Запись не делится на кусочки. Подробности — в журнале.", time.time())
 
     def _fail(self, message: str, now: float) -> None:
         self._error = message

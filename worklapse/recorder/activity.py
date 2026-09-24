@@ -40,8 +40,9 @@ class SecondStats:
 
 
 class ActivityTracker:
-    def __init__(self, listen_input: bool) -> None:
+    def __init__(self, listen_input: bool, backend: str = "pynput") -> None:
         self.listen_input = listen_input
+        self.backend = backend   # "pynput" (хуки) или "win32poll" (опрос без хуков, Windows)
         self._bins: dict[int, SecondStats] = {}
         self._lock = threading.Lock()
         self._last_mouse: tuple[float, float] | None = None
@@ -55,6 +56,13 @@ class ActivityTracker:
     def start(self) -> list[str]:
         """Запускает глобальные слушатели мыши и клавиатуры. Возвращает список ошибок."""
         if not self.listen_input:
+            return []
+        if self.backend == "win32poll":
+            from worklapse.platform.windows_input import WindowsInputPoller
+
+            poller = WindowsInputPoller(self._record, self._mark_input)
+            poller.start()
+            self._listeners = [poller]
             return []
         try:
             from pynput import keyboard, mouse
@@ -115,6 +123,9 @@ class ActivityTracker:
             b = self._bin(now)
             setattr(b, kind, getattr(b, kind) + amount)
         self.last_input_time = now
+
+    def _mark_input(self, t: float) -> None:
+        self.last_input_time = t
 
     def add_frame_diff(self, diff: float, t: float) -> None:
         with self._lock:

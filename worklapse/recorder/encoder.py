@@ -11,7 +11,9 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from worklapse.paths import subprocess_flags
 
@@ -50,7 +52,14 @@ class Encoder:
                  "-crf", "26" if fast else "20"]
             if fast:
                 a += ["-tune", "zerolatency"]
-        # ключевой кадр каждую секунду — чтобы буфер можно было резать посекундно
+        # Ключевой кадр каждую секунду — чтобы буфер можно было резать посекундно.
+        # Важно: аппаратные кодеки NVIDIA/Intel/AMD по умолчанию делают «принудительные»
+        # ключевые кадры неполноценными (I, а не IDR) — тогда FFmpeg не может резать
+        # видео на кусочки и буфер пишется одним сплошным файлом. forced_idr это чинит.
+        if n == "h264_nvenc":
+            a += ["-forced-idr", "1"]
+        elif n in ("h264_qsv", "h264_amf"):
+            a += ["-forced_idr", "1"]
         return a + ["-g", str(fps), "-bf", "0" if fast else "2"]
 
 
@@ -76,17 +85,37 @@ def candidates() -> list[Encoder]:
 
 
 def test_encoder(ffmpeg: str, enc: Encoder, fps: int = 30) -> bool:
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", *enc.global_args,
-           "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate={fps}", "-t", "0.5",
-           "-vf", enc.filter_suffix, *enc.args("buffer", fps), "-f", "null", "-"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, timeout=20, **subprocess_flags())
+    """Кодек подходит, только если он работает И умеет резать видео на секундные кусочки.
+
+    Кодируем 3 секунды тестового видео тем же способом, что и настоящий буфер,
+    и проверяем, что получилось несколько кусочков, а не один сплошной файл.
+    """
+    with tempfile.TemporaryDirectory(prefix="worklapse_enc_") as tmp:
+        seg_list = Path(tmp) / "list.csv"
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", *enc.global_args,
+               "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate={fps}", "-t", "3",
+               "-vf", enc.filter_suffix, *enc.args("buffer", fps),
+               "-force_key_frames", "expr:gte(t,n_forced*1)",
+               "-f", "segment", "-segment_time", "1", "-segment_format", "mpegts",
+               "-segment_list", str(seg_list), "-segment_list_type", "csv",
+               str(Path(tmp) / "s_%03d.ts")]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=30, **subprocess_flags())
+        except Exception:
+            log.info("Кодек %s недоступен", enc.name, exc_info=True)
+            return False
         if r.returncode != 0:
             log.info("Кодек %s недоступен: %s", enc.name, r.stderr.decode(errors="replace")[-300:])
-        return r.returncode == 0
-    except Exception:
-        log.info("Кодек %s недоступен", enc.name, exc_info=True)
-        return False
+            return False
+        try:
+            segments = [x for x in seg_list.read_text().splitlines() if x.strip()]
+        except OSError:
+            segments = []
+        if len(segments) < 2:
+            log.warning("Кодек %s работает, но не делает ключевые кадры по запросу "
+                        "(кусочков: %s) — не подходит для буфера", enc.name, len(segments))
+            return False
+        return True
 
 
 def pick_encoder(ffmpeg: str, preferred: str = "auto", fps: int = 30) -> Encoder:

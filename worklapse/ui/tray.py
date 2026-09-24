@@ -29,7 +29,8 @@ class TrayController(QObject):
         self.s = settings
         self.services = services
         self.engine = engine
-        self.status: dict = {"state": State.STOPPED, "label": "Запись остановлена"}
+        self.status: dict = {"state": State.STOPPED, "label": "Запись остановлена",
+                             "needed": engine.plan.clips_needed}
         self._last_video: Path | None = None
         self._settings_open = False
 
@@ -133,6 +134,39 @@ class TrayController(QObject):
             self.tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information, 6000)
         elif self.window:
             self._win_status.setText(f"{title}\n{text}")
+
+    def show_welcome(self) -> None:
+        """Первый запуск: объясняем, что программа живёт в трее и где её искать."""
+        where = ("в правом нижнем углу, возле часов. Если его не видно — нажмите стрелку «^» "
+                 "рядом с часами. Чтобы значок был виден всегда, перетащите его из этого "
+                 "меню на панель задач." if paths.IS_WINDOWS else
+                 "в строке меню вверху экрана." if paths.IS_MAC else "в системном трее.")
+        box = QMessageBox()
+        box.setWindowTitle("Worklapse")
+        box.setIconPixmap(state_icon(State.RECORDING).pixmap(48, 48))
+        box.setText("<b>Worklapse запущен и записывает экран в фоне.</b>")
+        box.setInformativeText(
+            f"У программы нет большого окна — только значок {where}\n\n"
+            "Нажмите на значок правой кнопкой: там пауза, настройки и сборка ролика.\n\n"
+            f"Горячие клавиши:\n"
+            f"  {self.s.hotkey_important} — важный момент\n"
+            f"  {self.s.hotkey_pause} — пауза / продолжить\n"
+            f"  {self.s.hotkey_finish} — завершить и собрать ролик")
+        b_settings = box.addButton("Открыть настройки", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Понятно", QMessageBox.ButtonRole.AcceptRole)
+        box.exec()
+        if box.clickedButton() == b_settings:
+            self.open_settings()
+
+    def show_already_running(self) -> None:
+        """Пользователь запустил программу ещё раз — показываем, что она уже работает."""
+        self.show_message("Worklapse уже запущен", "Значок — в трее возле часов. Открываю настройки.")
+        if self.window:
+            self.window.showNormal()
+            self.window.raise_()
+            self.window.activateWindow()
+        else:
+            self.open_settings()
 
     # ---------- действия ----------
 

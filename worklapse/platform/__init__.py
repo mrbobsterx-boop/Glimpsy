@@ -44,13 +44,16 @@ def build_services(ffmpeg: str, capture_backend: str = "auto", wayland_token: st
 def _windows(ffmpeg: str, backend: str) -> PlatformServices:
     from worklapse.platform.active_window import WindowsActiveWindow
     from worklapse.platform.capture import DdaGrabCapture, GdiGrabCapture
-    from worklapse.platform.common import PynputCursor, PynputHotkeys
+    from worklapse.platform.common import PynputCursor
+    from worklapse.platform.windows_input import WindowsHotkeys
 
     capture = GdiGrabCapture() if backend == "gdigrab" else DdaGrabCapture(ffmpeg)
+    # На Windows никаких глобальных хуков клавиатуры/мыши: горячие клавиши — через
+    # RegisterHotKey, активность — опросом (см. windows_input.py)
     return PlatformServices(
         os_name="windows", display_server="windows", capture=capture,
-        cursor=PynputCursor(), active_window=WindowsActiveWindow(), hotkeys=PynputHotkeys(),
-        input_events_supported=True,
+        cursor=PynputCursor(), active_window=WindowsActiveWindow(), hotkeys=WindowsHotkeys(),
+        input_events_supported=True, input_backend="win32poll",
     )
 
 

@@ -61,6 +61,10 @@ def extract(data: bytes, url: str, member_suffix: str, out: Path) -> None:
 
 
 def main() -> None:
+    # На Windows консоль может быть не в UTF-8 — чтобы русский текст не ронял скрипт
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     DEST.mkdir(parents=True, exist_ok=True)
     url, member = source()
     exe = DEST / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")

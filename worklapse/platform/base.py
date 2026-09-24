@@ -49,9 +49,13 @@ class WindowInfo:
     app: str = ""
     title: str = ""
 
-    def matches(self, patterns: list[str]) -> bool:
+    def matched(self, patterns: list[str]) -> str | None:
+        """Какое слово из чёрного списка нашлось в названии программы или заголовке окна."""
         hay = f"{self.app}\n{self.title}".lower()
-        return any(p.lower() in hay for p in patterns if p)
+        return next((p for p in patterns if p and p.lower() in hay), None)
+
+    def matches(self, patterns: list[str]) -> bool:
+        return self.matched(patterns) is not None
 
 
 class CursorTracker(ABC):
@@ -114,4 +118,5 @@ class PlatformServices:
     active_window: ActiveWindowProbe
     hotkeys: HotkeyBackend
     input_events_supported: bool          # можно ли слушать мышь/клавиатуру глобально
+    input_backend: str = "pynput"         # как именно: pynput (хуки) или win32poll (опрос)
     limitations: list[str] = field(default_factory=list)   # понятные сообщения пользователю
