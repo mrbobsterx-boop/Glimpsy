@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from worklapse.assembler import unique_path
-from worklapse.editor.project import ASPECTS, Clip, Project
+from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, Clip, Project
 from worklapse.paths import subprocess_flags
 from worklapse.recorder.encoder import Encoder, software_encoder
 
@@ -47,19 +47,23 @@ def atempo_chain(speed: float) -> list[str]:
     return parts
 
 
-def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str) -> str:
-    """Граф фильтров для картинки одного фрагмента."""
+def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "") -> str:
+    """Граф фильтров для картинки одного фрагмента (с учётом кадрирования)."""
     head = f"[0:v]setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
+    zoom, fx, fy = clip.frame_for(aspect) if aspect else DEFAULT_FRAME
     src_ar = (clip.width / clip.height) if clip.width and clip.height else W / H
-    if abs(src_ar - W / H) < 0.02:
+    if (zoom, fx, fy) == DEFAULT_FRAME and abs(src_ar - W / H) < 0.02:
         return f"{head},scale={W}:{H},setsar=1,{encoder_suffix}[v]"
     bw, bh = max(2, W // BG_BLUR_DIV // 2 * 2), max(2, H // BG_BLUR_DIV // 2 * 2)
+    # Размер кадра считает сам FFmpeg по реальному размеру видео (iw, ih) — так точнее
+    s = f"min({W}/iw,{H}/ih)*{zoom:.5f}"
     return (
         f"{head},split[a][b];"
         f"[a]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
         f"gblur=sigma=6,eq=brightness=-0.06,scale={W}:{H}[bg];"
-        f"[b]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,{encoder_suffix}[v]"
+        f"[b]scale=w='2*trunc(iw*{s}/2)':h='2*trunc(ih*{s}/2)'[fg];"
+        f"[bg][fg]overlay=x='(W-w)/2+{fx * W:.2f}':y='(H-h)/2+{fy * H:.2f}',"
+        f"setsar=1,{encoder_suffix}[v]"
     )
 
 
@@ -76,7 +80,7 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
     use_audio = clip.kind == "video" and clip.has_audio and not clip.muted
     if not use_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur_out:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    graph = video_filter(clip, W, H, fps, enc.filter_suffix)
+    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect)
     if use_audio:
         graph += ";[0:a]asetpts=PTS-STARTPTS," + ",".join(atempo_chain(clip.speed)) + "[a]"
         amap = "[a]"

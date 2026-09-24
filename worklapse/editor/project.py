@@ -24,6 +24,8 @@ IMAGE_DEFAULT_S = 3.0     # сколько по умолчанию показы�
 IMAGE_MAX_S = 3600.0
 MAX_SPEED = 10.0
 MIN_SPEED = 0.25
+MIN_ZOOM, MAX_ZOOM = 0.2, 5.0
+DEFAULT_FRAME = (1.0, 0.0, 0.0)   # масштаб, сдвиг по X и по Y (в долях ширины/высоты кадра ролика)
 
 
 def new_id() -> str:
@@ -47,11 +49,47 @@ class Clip:
     priority: bool = False
     recorded_at: float | None = None
     cursor: list = field(default_factory=list)
+    # Кадрирование — отдельно для каждого формата: {"9:16": [масштаб, x, y]}
+    frames: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
         """Сколько фрагмент длится в готовом ролике (с учётом скорости)."""
         return max(0.0, (self.out_s - self.in_s) / self.speed)
+
+    def frame_for(self, aspect: str) -> tuple[float, float, float]:
+        f = self.frames.get(aspect)
+        return (float(f[0]), float(f[1]), float(f[2])) if f else DEFAULT_FRAME
+
+    def set_frame(self, aspect: str, zoom: float, x: float, y: float) -> None:
+        zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
+        x, y = max(-1.5, min(1.5, x)), max(-1.5, min(1.5, y))
+        if (zoom, x, y) == DEFAULT_FRAME:
+            self.frames.pop(aspect, None)
+        else:
+            self.frames[aspect] = [round(zoom, 4), round(x, 4), round(y, 4)]
+
+
+def frame_rect(src_w: float, src_h: float, W: float, H: float,
+               frame: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """Где окажется кадр внутри ролика W×H: (x, y, ширина, высота).
+
+    Масштаб 1 — кадр целиком вписан по центру. Сдвиг x/y — в долях ширины/высоты ролика.
+    Одна и та же формула используется и в окне просмотра, и при экспорте.
+    """
+    zoom, fx, fy = frame
+    if src_w <= 0 or src_h <= 0:
+        src_w, src_h = W, H
+    s = min(W / src_w, H / src_h) * zoom
+    w, h = src_w * s, src_h * s
+    return (W - w) / 2 + fx * W, (H - h) / 2 + fy * H, w, h
+
+
+def cover_zoom(src_w: float, src_h: float, W: float, H: float) -> float:
+    """Масштаб, при котором кадр заполняет весь экран без полей."""
+    if src_w <= 0 or src_h <= 0:
+        return 1.0
+    return max(W / src_w, H / src_h) / min(W / src_w, H / src_h)
 
 
 @dataclass

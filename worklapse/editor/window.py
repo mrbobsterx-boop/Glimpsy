@@ -30,7 +30,7 @@ from worklapse.editor.inspector import Inspector
 from worklapse.editor.media import IMAGE_EXT, VIDEO_EXT, MediaError, Thumbnailer, is_supported, probe
 from worklapse.editor.player import TimelinePlayer
 from worklapse.editor.preview import PreviewWidget
-from worklapse.editor.project import History, Project
+from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, Clip, History, Project, cover_zoom
 from worklapse.editor.timeline import TimelineWidget, fmt_time
 from worklapse.recorder.encoder import Encoder
 
@@ -136,6 +136,11 @@ class EditorWindow(QMainWindow):
         self.timeline.changed.connect(self._changed)
         self.timeline.files_dropped.connect(self.insert_files)
         self.inspector.edited.connect(self._on_inspector)
+        self._frame_start: dict = {}
+        self.preview.edit_started.connect(self._on_frame_edit_start)
+        self.preview.frame_delta.connect(self._on_frame_delta)
+        self.preview.edit_finished.connect(self._changed)
+        self.preview.wheel_zoom.connect(self._on_wheel_zoom)
 
         self._save_timer = QTimer(self, singleShot=True, interval=500)
         self._save_timer.timeout.connect(self._save)
@@ -193,20 +198,41 @@ class EditorWindow(QMainWindow):
     def _on_position(self, t: float) -> None:
         self.timeline.set_playhead(t, follow=self.player.playing)
         self.time_lbl.setText(f"{fmt_time(t, True)} / {fmt_time(self.project.total, True)}")
+        self._sync_preview()
 
-    def _on_select(self, clip_id) -> None:
-        idx = self.project.index_of(clip_id) if clip_id else -1
-        self.inspector.set_clip(self.project.clips[idx] if idx >= 0 else None)
+    def _sync_preview(self) -> None:
+        """Окну просмотра — кадрирование показанного фрагмента и можно ли его править."""
+        c = self._shown_clip()
+        if c is None:
+            self.preview.set_frame(DEFAULT_FRAME, False)
+        else:
+            self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
+
+    def _shown_clip(self) -> Clip | None:
+        idx = self.player.idx
+        return self.project.clips[idx] if idx is not None and 0 <= idx < len(self.project.clips) else None
+
+    def _selected_clips(self) -> list[Clip]:
+        ids = set(self.timeline.selection)
+        return [c for c in self.project.clips if c.id in ids]
+
+    def _refresh_inspector(self) -> None:
+        sel = self.project.index_of(self.timeline.selected) if self.timeline.selected else -1
+        self.inspector.set_clip(self.project.clips[sel] if sel >= 0 else None, self.project.aspect,
+                                max(1, len(self.timeline.selection)))
+
+    def _on_select(self, _clip_id) -> None:
+        self._refresh_inspector()
+        self._sync_preview()
         self._update_actions()
 
     def _changed(self) -> None:
         """После любой правки: перерисовать, обновить просмотр, автосохранение."""
-        if self.timeline.selected and self.project.index_of(self.timeline.selected) < 0:
-            self.timeline.select(None)
+        self.timeline.prune_selection()
         self.timeline.update()
         self.player.refresh()
-        sel = self.project.index_of(self.timeline.selected) if self.timeline.selected else -1
-        self.inspector.set_clip(self.project.clips[sel] if sel >= 0 else None)
+        self._refresh_inspector()
+        self._sync_preview()
         self._update_actions()
         self._save_timer.start()
 
@@ -217,26 +243,86 @@ class EditorWindow(QMainWindow):
             log.exception("Не удалось сохранить проект")
 
     def _on_inspector(self, clip_id: str, what: str, value) -> None:
-        idx = self.project.index_of(clip_id)
-        if idx < 0:
-            return
         if what == "delete":
-            self.timeline.select(clip_id)
             self.delete_selected()
             return
-        self.history.push(self.project.to_dict(), key=f"{what}:{clip_id}")
-        c = self.project.clips[idx]
-        if what == "speed":
-            self.project.set_speed(idx, value)
-        elif what == "muted":
-            c.muted = bool(value)
-        elif what == "in_s":
-            self.project.trim(idx, value, c.out_s)
-        elif what == "out_s":
-            self.project.trim(idx, c.in_s, value)
-        elif what == "photo_duration":
-            c.out_s = c.in_s + float(value)
+        targets = self._selected_clips() or [c for c in self.project.clips if c.id == clip_id]
+        if not targets:
+            return
+        aspect = self.project.aspect
+        W, H = ASPECTS[aspect]
+        if what == "frame_all":
+            src = next((c for c in self.project.clips if c.id == clip_id), None)
+            if src is None:
+                return
+            self.history.push(self.project.to_dict())
+            for c in self.project.clips:
+                c.set_frame(aspect, *src.frame_for(aspect))
+            self.statusBar().showMessage("Кадрирование применено ко всем фрагментам", 3000)
+            self._changed()
+            return
+        self.history.push(self.project.to_dict(), key=f"{what}:{','.join(c.id for c in targets)}")
+        for c in targets:
+            idx = self.project.index_of(c.id)
+            z, x, y = c.frame_for(aspect)
+            if what == "speed" and c.kind == "video":
+                self.project.set_speed(idx, value)
+            elif what == "muted" and c.kind == "video":
+                c.muted = bool(value)
+            elif what == "in_s" and c.id == clip_id:
+                self.project.trim(idx, value, c.out_s)
+            elif what == "out_s" and c.id == clip_id:
+                self.project.trim(idx, c.in_s, value)
+            elif what == "photo_duration" and c.kind == "image":
+                c.out_s = c.in_s + float(value)
+            elif what == "frame_zoom":
+                c.set_frame(aspect, value, x, y)
+            elif what == "frame_x":
+                c.set_frame(aspect, z, value, y)
+            elif what == "frame_y":
+                c.set_frame(aspect, z, x, value)
+            elif what == "frame_fit":
+                c.set_frame(aspect, *DEFAULT_FRAME)
+            elif what == "frame_fill":
+                c.set_frame(aspect, cover_zoom(c.width or W, c.height or H, W, H), 0.0, 0.0)
         self._changed()
+
+    # ---------- кадрирование мышью в окне просмотра ----------
+
+    def _on_frame_edit_start(self) -> None:
+        shown = self._shown_clip()
+        if shown is None:
+            return
+        self.player.pause()
+        if shown.id not in self.timeline.selection:
+            self.timeline.select(shown.id)       # щелчок по кадру выбирает этот фрагмент
+        self.history.push(self.project.to_dict())
+        self._frame_start = {c.id: c.frame_for(self.project.aspect) for c in self._selected_clips()}
+        self._sync_preview()
+
+    def _on_frame_delta(self, zm: float, dx: float, dy: float) -> None:
+        aspect = self.project.aspect
+        for c in self._selected_clips():
+            z0, x0, y0 = self._frame_start.get(c.id, c.frame_for(aspect))
+            c.set_frame(aspect, z0 * zm, x0 + dx, y0 + dy)
+        self._refresh_inspector()
+        self._save_timer.start()
+
+    def _on_wheel_zoom(self, factor: float) -> None:
+        shown = self._shown_clip()
+        if shown is None:
+            return
+        if shown.id not in self.timeline.selection:
+            self.timeline.select(shown.id)
+        targets = self._selected_clips()
+        self.history.push(self.project.to_dict(), key="wheel:" + ",".join(c.id for c in targets))
+        aspect = self.project.aspect
+        for c in targets:
+            z, x, y = c.frame_for(aspect)
+            c.set_frame(aspect, z * factor, x, y)
+        self._refresh_inspector()
+        self._sync_preview()
+        self._save_timer.start()
 
     def _on_aspect(self) -> None:
         value = self.aspect_box.currentData()
@@ -278,12 +364,15 @@ class EditorWindow(QMainWindow):
         self._changed()
 
     def delete_selected(self) -> None:
-        idx = self.project.index_of(self.timeline.selected) if self.timeline.selected else -1
-        if idx < 0:
+        ids = set(self.timeline.selection)
+        indices = [i for i, c in enumerate(self.project.clips) if c.id in ids]
+        if not indices:
             return
         self.history.push(self.project.to_dict())
-        self.project.delete(idx)
-        nxt = self.project.clips[min(idx, len(self.project.clips) - 1)].id if self.project.clips else None
+        for i in reversed(indices):
+            self.project.delete(i)
+        first = indices[0]
+        nxt = self.project.clips[min(first, len(self.project.clips) - 1)].id if self.project.clips else None
         self.timeline.select(nxt)
         self._changed()
 
@@ -372,6 +461,9 @@ class EditorWindow(QMainWindow):
                 return True
             if letter == "b":
                 self.split()
+                return True
+            if letter == "a" and not typing:
+                self.timeline.select_all()
                 return True
             if letter == "v" and not typing:
                 self.paste()

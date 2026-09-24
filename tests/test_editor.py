@@ -109,3 +109,34 @@ def test_real_export_both_formats(tmp_path):
         assert size in info and "Audio: aac" in info
         dur = parse_probe(info).duration
         assert abs(dur - (1.0 + 2.0 + 1.5)) < 0.3, dur
+
+
+def test_frame_geometry():
+    from worklapse.editor.project import cover_zoom, frame_rect
+    # горизонтальное видео в вертикальном кадре: вписано по центру
+    x, y, w, h = frame_rect(1920, 1080, 1080, 1920, (1.0, 0.0, 0.0))
+    assert (round(w), round(h), round(x)) == (1080, 608, 0) and abs(y - (1920 - 607.5) / 2) < 1
+    z = cover_zoom(1920, 1080, 1080, 1920)
+    _, _, w, h = frame_rect(1920, 1080, 1080, 1920, (z, 0.0, 0.0))
+    assert round(h) == 1920 and w > 1080          # «заполнить» — без полей
+    c = Clip("a", "video", "a.mp4", 1, 0, 1)
+    c.set_frame("9:16", 2.0, 0.1, -0.2)
+    assert c.frame_for("9:16") == (2.0, 0.1, -0.2) and c.frame_for("16:9") == (1.0, 0.0, 0.0)
+    c.set_frame("9:16", 1.0, 0.0, 0.0)
+    assert c.frames == {}
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_export_with_framing(tmp_path):
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=white:size=640x360:rate=30", "-t", "1", "-c:v", "libx264", str(tmp_path / "w.mp4")],
+                   check=True)
+    c = Clip("a", "video", "w.mp4", 1, 0, 1, width=640, height=360)
+    c.set_frame("9:16", 1.0, 0.0, -0.3)          # белый кадр поднят вверх
+    p = Project(tmp_path, "t", [c], aspect="9:16")
+    out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder())
+    raw = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(out), "-frames:v", "1", "-vf", "scale=9:16,format=gray",
+                          "-f", "rawvideo", "-"], capture_output=True).stdout
+    rows = [sum(raw[r * 9:(r + 1) * 9]) / 9 for r in range(16)]
+    brightest = rows.index(max(rows))
+    assert brightest < 6, rows                    # белая полоса — в верхней части, а не по центру

@@ -55,7 +55,8 @@ class TimelineWidget(QWidget):
         self.pps = 60.0              # пикселей на секунду
         self.offset = 0.0            # прокрутка, пикс.
         self.playhead = 0.0
-        self.selected: str | None = None
+        self.selected: str | None = None       # главный выбранный фрагмент
+        self.selection: list[str] = []          # все выбранные (Shift/Ctrl+щелчок)
         self._mode: str | None = None  # playhead / trim_l / trim_r / press / drag
         self._press: QPointF | None = None
         self._drag_idx = -1
@@ -185,8 +186,8 @@ class TimelineWidget(QWidget):
         p.drawText(QRectF(r.left() + 5, r.bottom() - 16, r.width() - 10, 16),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, f"{c.duration:.1f} с")
         p.restore()
-        if c.id == self.selected:
-            p.setPen(QPen(COL_SELECT, 2))
+        if c.id in self.selection:
+            p.setPen(QPen(COL_SELECT if c.id == self.selected else COL_DROP, 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 6, 6)
             # «ручки» обрезки
@@ -224,6 +225,10 @@ class TimelineWidget(QWidget):
             self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
             return
         c = self.project.clips[idx]
+        if e.modifiers() & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
+            self._toggle(c.id)
+            self._mode = None
+            return
         self._select(c.id)
         self._drag_idx = idx
         if part in ("trim_l", "trim_r"):
@@ -277,10 +282,36 @@ class TimelineWidget(QWidget):
         return len(self.project.clips)
 
     def _select(self, clip_id: str | None) -> None:
-        if clip_id != self.selected:
-            self.selected = clip_id
+        changed = clip_id != self.selected or self.selection != ([clip_id] if clip_id else [])
+        self.selected = clip_id
+        self.selection = [clip_id] if clip_id else []
+        if changed:
             self.selection_changed.emit(clip_id)
         self.update()
+
+    def _toggle(self, clip_id: str) -> None:
+        """Shift/Ctrl+щелчок: добавить фрагмент к выбранным или убрать из них."""
+        if clip_id in self.selection:
+            self.selection.remove(clip_id)
+            self.selected = self.selection[-1] if self.selection else None
+        else:
+            self.selection.append(clip_id)
+            self.selected = clip_id
+        self.selection_changed.emit(self.selected)
+        self.update()
+
+    def select_all(self) -> None:
+        self.selection = [c.id for c in self.project.clips]
+        self.selected = self.selection[-1] if self.selection else None
+        self.selection_changed.emit(self.selected)
+        self.update()
+
+    def prune_selection(self) -> None:
+        """Убрать из выбора фрагменты, которых больше нет (после удаления/отмены)."""
+        ids = {c.id for c in self.project.clips}
+        self.selection = [i for i in self.selection if i in ids]
+        if self.selected not in ids:
+            self.selected = self.selection[-1] if self.selection else None
 
     def select(self, clip_id: str | None) -> None:
         self._select(clip_id)
