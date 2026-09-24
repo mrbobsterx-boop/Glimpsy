@@ -52,6 +52,7 @@ class TrayController(QObject):
         self.menu.addAction("Настройки…", self.open_settings)
         self.menu.addAction("Открыть папку с роликами", lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
         self.menu.addAction("🎞 Редактор роликов…", self.open_editor)
+        self.menu.addAction("🧹 Очистить кэш…", self.clear_cache)
         self.menu.addSeparator()
         self.menu.addAction("Выход", self.quit)
 
@@ -239,6 +240,38 @@ class TrayController(QObject):
         if self._sessions:
             self._sessions.close()
 
+    def clear_cache(self) -> None:
+        """Удалить фрагменты проектов и временные файлы. Готовые ролики остаются."""
+        from worklapse import cache
+
+        keep = self.engine.session_dir if self.engine.running else None
+        report = cache.scan(keep, Path(self.s.output_dir))
+        if report.total_bytes == 0:
+            QMessageBox.information(None, "Worklapse", "Кэш уже пуст.")
+            return
+        box = QMessageBox()
+        box.setWindowTitle("Очистить кэш")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Освободится {cache.human(report.total_bytes)}.")
+        box.setInformativeText(
+            f"• Проекты редактора: {report.projects} (фрагменты и правки, {cache.human(report.project_bytes)}). "
+            f"После очистки их нельзя будет открыть в редакторе.\n"
+            f"• Миниатюры и временные файлы: {cache.human(report.other_bytes)}.\n\n"
+            f"Готовые и экспортированные ролики в папке «{self.s.output_dir}» останутся."
+            + ("\n\nИдущая сейчас запись не затрагивается." if keep else ""))
+        b_ok = box.addButton("Очистить", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() != b_ok:
+            return
+        for w in self._editors:        # открытые проекты сначала закрываем (файлы заняты плеером)
+            w.close()
+        self._editors = []
+        if self._sessions is not None:
+            self._sessions.close()
+        freed = cache.clear(report)
+        self.show_message("Кэш очищен", f"Освобождено {cache.human(freed)}.")
+
     def _encoder_for_export(self):
         from worklapse.recorder.encoder import pick_encoder
 
@@ -299,6 +332,7 @@ class TrayController(QObject):
                          ("🎬 Собрать ролик", self._finish),
                          ("▶ Начать запись", self.engine.start_session),
                          ("🎞 Редактор роликов…", self.open_editor),
+                         ("🧹 Очистить кэш…", self.clear_cache),
                          ("Настройки…", self.open_settings),
                          ("Выход", self.quit)):
             b = QPushButton(text)
