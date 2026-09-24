@@ -14,7 +14,10 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+import json
+
 from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, frame_rect
+from worklapse.editor.text import anim_state, placement, render_text
 
 HANDLE = 10        # размер уголка, пикс.
 SNAP = 0.015       # насколько близко к центру кадр «прилипает»
@@ -25,6 +28,8 @@ class PreviewWidget(QWidget):
     frame_delta = Signal(float, float, float)   # множитель масштаба, сдвиг X, сдвиг Y (от начала жеста)
     edit_finished = Signal()
     wheel_zoom = Signal(float)
+    text_pressed = Signal(str)                   # щёлкнули по тексту
+    text_moved = Signal(str, float, float)       # новый центр текста (доли кадра)
 
     def __init__(self) -> None:
         super().__init__()
@@ -37,6 +42,11 @@ class PreviewWidget(QWidget):
         self._press = QPointF()
         self._start_frame = DEFAULT_FRAME
         self._guides = (False, False)
+        self.texts: list = []          # [(TextItem, стиль)] — видимые сейчас
+        self.t = 0.0
+        self.selected_text: str | None = None
+        self._text_cache: dict[str, QImage] = {}
+        self._text_drag: tuple[str, float, float] | None = None   # id, центр x, y в начале
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 220)
         self.setMouseTracking(True)
@@ -60,6 +70,57 @@ class PreviewWidget(QWidget):
             self.frame = frame
         self.editable = editable
         self.update()
+
+    def set_texts(self, texts: list, t: float, selected: str | None) -> None:
+        self.texts, self.t, self.selected_text = texts, t, selected
+        self.update()
+
+    def _text_image(self, item, style) -> QImage:
+        c = self.canvas_rect()
+        key = json.dumps([item.text, style, int(c.width()), int(c.height())], sort_keys=True, ensure_ascii=False)
+        img = self._text_cache.get(key)
+        if img is None:
+            if len(self._text_cache) > 200:
+                self._text_cache.clear()
+            img = self._text_cache[key] = render_text(item.text, style, int(c.width()), int(c.height()))
+        return img
+
+    def _text_rect(self, item, style) -> QRectF:
+        c = self.canvas_rect()
+        img = self._text_image(item, style)
+        x, y = placement(img.width(), img.height(), item.pos_for(self.aspect), int(c.width()), int(c.height()))
+        return QRectF(c.x() + x, c.y() + y, img.width(), img.height())
+
+    def _paint_texts(self, p: QPainter) -> None:
+        canvas = self.canvas_rect()
+        p.save()
+        p.setClipRect(canvas)
+        for item, style in self.texts:
+            if not item.text.strip():
+                continue
+            img = self._text_image(item, style)
+            r = self._text_rect(item, style)
+            op, dy, sc = anim_state(style.get("anim", "fade"), self.t - item.start, item.duration)
+            if item.id == self.selected_text:
+                op, dy, sc = 1.0, 0.0, 1.0      # выбранный текст показываем целиком, без анимации
+            p.save()
+            p.setOpacity(op)
+            center = r.center()
+            p.translate(center.x(), center.y() + dy * canvas.height())
+            p.scale(sc, sc)
+            p.drawImage(QRectF(-r.width() / 2, -r.height() / 2, r.width(), r.height()), img)
+            p.restore()
+            if item.id == self.selected_text:
+                p.setPen(QPen(QColor("#ffd166"), 1, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(r.adjusted(-2, -2, 2, 2))
+        p.restore()
+
+    def _hit_text(self, pos: QPointF):
+        for item, style in reversed(self.texts):
+            if item.text.strip() and self._text_rect(item, style).contains(pos):
+                return item
+        return None
 
     # ---------- геометрия ----------
 
@@ -91,6 +152,7 @@ class PreviewWidget(QWidget):
         if img.isNull():
             p.setPen(QColor("#777"))
             p.drawText(canvas, Qt.AlignmentFlag.AlignCenter, "Нет кадра")
+            self._paint_texts(p)
             return
         fr = self._frame_rect()
         if not fr.contains(canvas.adjusted(1, 1, -1, -1)):
@@ -110,7 +172,8 @@ class PreviewWidget(QWidget):
         p.setClipRect(canvas)
         p.drawImage(fr, img)
         p.restore()
-        if self.editable:
+        self._paint_texts(p)
+        if self.editable and self.selected_text is None:
             # рамка и уголки выбранного фрагмента (за пределами экрана видны пунктиром)
             p.setPen(QPen(QColor("#ffffff"), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -119,12 +182,13 @@ class PreviewWidget(QWidget):
             p.setBrush(QColor("#ffffff"))
             for c in self._corners(fr):
                 p.drawRect(QRectF(c.x() - HANDLE / 2, c.y() - HANDLE / 2, HANDLE, HANDLE))
-            gx, gy = self._guides
-            p.setPen(QPen(QColor("#ff4fa3"), 1))
-            if gx:
-                p.drawLine(QPointF(canvas.center().x(), canvas.top()), QPointF(canvas.center().x(), canvas.bottom()))
-            if gy:
-                p.drawLine(QPointF(canvas.left(), canvas.center().y()), QPointF(canvas.right(), canvas.center().y()))
+        # направляющие «прилипания» к центру
+        gx, gy = self._guides
+        p.setPen(QPen(QColor("#ff4fa3"), 1))
+        if gx:
+            p.drawLine(QPointF(canvas.center().x(), canvas.top()), QPointF(canvas.center().x(), canvas.bottom()))
+        if gy:
+            p.drawLine(QPointF(canvas.left(), canvas.center().y()), QPointF(canvas.right(), canvas.center().y()))
 
     # ---------- мышь ----------
 
@@ -133,9 +197,18 @@ class PreviewWidget(QWidget):
                    for c in self._corners(self._frame_rect()))
 
     def mousePressEvent(self, e) -> None:
-        if e.button() != Qt.MouseButton.LeftButton or self.image.isNull():
+        if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
+        hit = self._hit_text(pos)
+        if hit is not None:                 # тексты лежат поверх видео — они в приоритете
+            self.text_pressed.emit(hit.id)
+            self._press = pos
+            x, y = hit.pos_for(self.aspect)
+            self._text_drag = (hit.id, x, y)
+            return
+        if self.image.isNull():
+            return
         if not self.canvas_rect().contains(pos) and not self._hit_corner(pos):
             return
         self.edit_started.emit()          # окно выберет показанный фрагмент и запомнит «до»
@@ -145,7 +218,19 @@ class PreviewWidget(QWidget):
 
     def mouseMoveEvent(self, e) -> None:
         pos = e.position()
+        if self._text_drag is not None:
+            tid, x0, y0 = self._text_drag
+            c = self.canvas_rect()
+            nx = x0 + (pos.x() - self._press.x()) / c.width()
+            ny = y0 + (pos.y() - self._press.y()) / c.height()
+            snap = abs(nx - 0.5) < SNAP
+            self._guides = (snap, False)
+            self.text_moved.emit(tid, 0.5 if snap else nx, ny)
+            return
         if self._drag is None:
+            if self._hit_text(pos) is not None:
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                return
             self.setCursor(Qt.CursorShape.SizeFDiagCursor if self.editable and self._hit_corner(pos)
                            else Qt.CursorShape.OpenHandCursor if self.canvas_rect().contains(pos)
                            else Qt.CursorShape.ArrowCursor)
@@ -169,6 +254,12 @@ class PreviewWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _e) -> None:
+        if self._text_drag is not None:
+            self._text_drag = None
+            self._guides = (False, False)
+            self.edit_finished.emit()
+            self.update()
+            return
         if self._drag is not None:
             self._drag = None
             self._guides = (False, False)

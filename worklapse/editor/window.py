@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -19,18 +20,20 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStyle,
+    QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
     QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
 
 from worklapse import paths
 from worklapse.editor import keys
-from worklapse.editor.export import ExportCancelled, default_output, export_project
+from worklapse.editor.export import ExportCancelled, default_output, export_project, render_text_layers
 from worklapse.editor.inspector import Inspector
 from worklapse.editor.media import IMAGE_EXT, VIDEO_EXT, MediaError, Thumbnailer, is_supported, probe
 from worklapse.editor.player import TimelinePlayer
 from worklapse.editor.preview import PreviewWidget
-from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, Clip, History, Project, cover_zoom
+from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, Clip, History, Project, cover_zoom, new_id
+from worklapse.editor.text import TextItem, effective_style, load_custom_fonts
+from worklapse.editor.text_panel import TextPanel
 from worklapse.editor.timeline import TimelineWidget, fmt_time
 from worklapse.recorder.encoder import Encoder
 
@@ -55,6 +58,7 @@ class EditorWindow(QMainWindow):
         self.project = Project.load(project_dir)
         self.history = History()
         self.thumbs = Thumbnailer(ffmpeg)
+        load_custom_fonts()                 # свои шрифты, добавленные раньше
         self.player = TimelinePlayer(self.project)
         self._export_cancel: threading.Event | None = None
 
@@ -66,6 +70,10 @@ class EditorWindow(QMainWindow):
         self.preview.set_aspect(self.project.aspect)
         self.timeline = TimelineWidget(self.project, self.thumbs)
         self.inspector = Inspector()
+        self.text_panel = TextPanel()
+        self.side = QStackedWidget()        # справа: свойства фрагмента или текста
+        self.side.addWidget(self.inspector)
+        self.side.addWidget(self.text_panel)
 
         self.play_btn = QPushButton()
         self.play_btn.setFixedWidth(44)
@@ -108,9 +116,9 @@ class EditorWindow(QMainWindow):
         lv.addLayout(transport)
         top = QSplitter(Qt.Orientation.Horizontal)
         top.addWidget(left)
-        top.addWidget(self.inspector)
+        top.addWidget(self.side)
         top.setStretchFactor(0, 1)
-        top.setSizes([960, 320])
+        top.setSizes([930, 350])
         root = QSplitter(Qt.Orientation.Vertical)
         root.addWidget(top)
         root.addWidget(self.timeline)
@@ -141,6 +149,10 @@ class EditorWindow(QMainWindow):
         self.preview.frame_delta.connect(self._on_frame_delta)
         self.preview.edit_finished.connect(self._changed)
         self.preview.wheel_zoom.connect(self._on_wheel_zoom)
+        self.timeline.text_selected.connect(self._on_text_select)
+        self.text_panel.edited.connect(self._on_text_edit)
+        self.preview.text_pressed.connect(self._on_text_pressed)
+        self.preview.text_moved.connect(self._on_text_moved)
 
         self._save_timer = QTimer(self, singleShot=True, interval=500)
         self._save_timer.timeout.connect(self._save)
@@ -162,12 +174,13 @@ class EditorWindow(QMainWindow):
         self.a_undo = QAction("↶ Отменить", self, triggered=self.undo, toolTip="Ctrl+Z")
         self.a_redo = QAction("↷ Повторить", self, triggered=self.redo, toolTip="Ctrl+Shift+Z / Ctrl+Y")
         a_add = QAction("＋ Добавить медиа", self, triggered=self.add_media_dialog, toolTip="Видео или фото (Ctrl+V)")
+        a_text = QAction("T  Текст", self, triggered=self.add_text, toolTip="Добавить текст в месте курсора (Ctrl+T)")
         self.a_split = QAction("✂ Разрезать", self, triggered=self.split, toolTip="Ctrl+B — по курсору")
         self.a_delete = QAction("🗑 Удалить", self, triggered=self.delete_selected, toolTip="Delete")
         for a in (self.a_undo, self.a_redo):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (a_add, self.a_split, self.a_delete):
+        for a in (a_add, a_text, self.a_split, self.a_delete):
             tb.addAction(a)
         tb.addSeparator()
         tb.addWidget(QLabel(" Формат: "))
@@ -207,6 +220,10 @@ class EditorWindow(QMainWindow):
             self.preview.set_frame(DEFAULT_FRAME, False)
         else:
             self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
+        t = self.player.t
+        visible = [x for x in self.project.texts if x.start <= t < x.end or x.id == self.timeline.selected_text]
+        self.preview.set_texts([(x, effective_style(x, self.project.text_style)) for x in visible], t,
+                               self.timeline.selected_text)
 
     def _shown_clip(self) -> Clip | None:
         idx = self.player.idx
@@ -232,6 +249,9 @@ class EditorWindow(QMainWindow):
         self.timeline.update()
         self.player.refresh()
         self._refresh_inspector()
+        item = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
+        if item is not None:
+            self.text_panel.set_item(item, effective_style(item, self.project.text_style))
         self._sync_preview()
         self._update_actions()
         self._save_timer.start()
@@ -363,7 +383,85 @@ class EditorWindow(QMainWindow):
         self.timeline.select(self.project.clips[right].id)
         self._changed()
 
+    # ---------- тексты ----------
+
+    def add_text(self) -> None:
+        self.player.pause()
+        total = self.project.total
+        start = min(self.player.t, max(0.0, total - 0.5))
+        item = TextItem(new_id(), "Текст", round(start, 2), round(min(2.5, max(0.5, total - start)), 2))
+        self.history.push(self.project.to_dict())
+        self.project.texts.append(item)
+        self.timeline.select_text(item.id)
+        self._text_changed()
+        self.text_panel.focus_text()
+
+    def _on_text_select(self, text_id) -> None:
+        item = self.project.text_by_id(text_id) if text_id else None
+        if item is None:
+            self.side.setCurrentWidget(self.inspector)
+        else:
+            self.player.pause()
+            if not (item.start <= self.player.t < item.end):
+                self.player.seek(item.start + min(0.5, item.duration / 2))
+            self.text_panel.set_item(item, effective_style(item, self.project.text_style))
+            self.side.setCurrentWidget(self.text_panel)
+        self._sync_preview()
+        self._update_actions()
+
+    def _text_changed(self) -> None:
+        """Правка текста — без перемотки видео, только перерисовка и сохранение."""
+        self.timeline.prune_selection()
+        self.timeline.update()
+        item = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
+        if item is not None:
+            self.text_panel.set_item(item, effective_style(item, self.project.text_style))
+        self._sync_preview()
+        self._update_actions()
+        self._save_timer.start()
+
+    def _on_text_edit(self, text_id: str, what: str, value) -> None:
+        item = self.project.text_by_id(text_id)
+        if item is None:
+            return
+        if what == "delete":
+            self.history.push(self.project.to_dict())
+            self.project.texts.remove(item)
+            self.timeline.select_text(None)
+            self._text_changed()
+            return
+        self.history.push(self.project.to_dict(), key=f"text-{what}:{text_id}")
+        if what == "text":
+            item.text = value
+        elif what == "start":
+            item.start = max(0.0, float(value))
+        elif what == "duration":
+            item.duration = max(0.2, float(value))
+        elif what == "own_style":
+            item.style = dict(effective_style(item, self.project.text_style)) if value else None
+        elif what == "pos_preset":
+            item.set_pos(self.project.aspect, 0.5, float(value))
+        else:
+            # свой стиль — меняем только этот текст, иначе общий стиль всех текстов
+            target = item.style if item.style is not None else self.project.text_style
+            target[what] = value
+        self._text_changed()
+
+    def _on_text_pressed(self, text_id: str) -> None:
+        self.timeline.select_text(text_id)
+        self.history.push(self.project.to_dict())
+
+    def _on_text_moved(self, text_id: str, x: float, y: float) -> None:
+        item = self.project.text_by_id(text_id)
+        if item is not None:
+            item.set_pos(self.project.aspect, x, y)
+            self._sync_preview()
+            self._save_timer.start()
+
     def delete_selected(self) -> None:
+        if self.timeline.selected_text:
+            self._on_text_edit(self.timeline.selected_text, "delete", None)
+            return
         ids = set(self.timeline.selection)
         indices = [i for i, c in enumerate(self.project.clips) if c.id in ids]
         if not indices:
@@ -462,6 +560,9 @@ class EditorWindow(QMainWindow):
             if letter == "b":
                 self.split()
                 return True
+            if letter == "t":
+                self.add_text()
+                return True
             if letter == "a" and not typing:
                 self.timeline.select_all()
                 return True
@@ -527,11 +628,14 @@ class EditorWindow(QMainWindow):
         snapshot = Project(self.project.dir, self.project.name, fps=self.project.fps,
                            source_video=self.project.source_video)
         snapshot.restore(self.project.to_dict())    # копия — можно продолжать править во время экспорта
+        # тексты рисуются в основном потоке (так надёжнее для шрифтов), дальше — FFmpeg в фоне
+        layers_dir = paths.temp_root() / f"text_{int(time.time())}"
+        text_layers = render_text_layers(snapshot, layers_dir)
 
         def work() -> None:
             try:
                 enc = self.encoder_getter()
-                path = export_project(self.ffmpeg, snapshot, out, enc,
+                path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
                                       progress=lambda f, t: bridge.progress.emit(f, t), cancel=cancel)
                 bridge.done.emit(str(path))
             except ExportCancelled:
@@ -539,6 +643,8 @@ class EditorWindow(QMainWindow):
             except Exception as e:
                 log.exception("Экспорт не удался")
                 bridge.failed.emit(str(e))
+            finally:
+                shutil.rmtree(layers_dir, ignore_errors=True)
 
         threading.Thread(target=work, daemon=True, name="export").start()
         dlg.show()

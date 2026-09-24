@@ -102,6 +102,8 @@ class Project:
     source_video: str = ""    # исходный ролик из этапа 1 (рядом с ним сохраняется правка)
     created: float = 0.0
     version: int = 1
+    texts: list = field(default_factory=list)       # TextItem — тексты поверх ролика
+    text_style: dict = field(default_factory=dict)  # общий стиль текстов (отличия от стандартного)
 
     # ---------- время ----------
 
@@ -127,6 +129,12 @@ class Project:
 
     def index_of(self, clip_id: str) -> int:
         return next((i for i, c in enumerate(self.clips) if c.id == clip_id), -1)
+
+    def text_by_id(self, text_id: str):
+        return next((t for t in self.texts if t.id == text_id), None)
+
+    def texts_at(self, t: float) -> list:
+        return [x for x in self.texts if x.start <= t < x.end]
 
     # ---------- правки ----------
 
@@ -198,6 +206,8 @@ class Project:
             "version": self.version, "name": self.name, "aspect": self.aspect, "fps": self.fps,
             "source_video": self.source_video, "created": self.created,
             "clips": [asdict(c) for c in self.clips],
+            "texts": [asdict(t) for t in self.texts],
+            "text_style": copy.deepcopy(self.text_style),
         }
 
     def restore(self, data: dict) -> None:
@@ -205,6 +215,11 @@ class Project:
         self.aspect = data.get("aspect", "16:9")
         known = {f.name for f in fields(Clip)}
         self.clips = [Clip(**{k: v for k, v in c.items() if k in known}) for c in data.get("clips", [])]
+        from worklapse.editor.text import TextItem
+
+        tknown = {f.name for f in fields(TextItem)}
+        self.texts = [TextItem(**{k: v for k, v in t.items() if k in tknown}) for t in data.get("texts", [])]
+        self.text_style = copy.deepcopy(data.get("text_style", {}))
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"

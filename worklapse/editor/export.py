@@ -12,6 +12,7 @@ import logging
 import shutil
 import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -92,6 +93,38 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
     return cmd
 
 
+@dataclass
+class TextLayer:
+    """Заранее нарисованный текст: картинка + где и когда её показать."""
+    png: Path
+    item: object
+    style: dict
+    x: float
+    y: float
+    w: int
+    h: int
+
+
+def render_text_layers(project: Project, out_dir: Path) -> list[TextLayer]:
+    """Нарисовать все тексты в PNG. Вызывать из основного потока (нужен Qt)."""
+    from worklapse.editor.text import effective_style, placement, render_text
+
+    W, H = ASPECTS[project.aspect]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    layers = []
+    total = project.total
+    for i, t in enumerate(sorted(project.texts, key=lambda x: x.start)):
+        if not t.text.strip() or t.start >= total:
+            continue
+        style = effective_style(t, project.text_style)
+        img = render_text(t.text, style, W, H)
+        png = out_dir / f"text_{i:03d}.png"
+        img.save(str(png))
+        x, y = placement(img.width(), img.height(), t.pos_for(project.aspect), W, H)
+        layers.append(TextLayer(png, t, style, x, y, img.width(), img.height()))
+    return layers
+
+
 def default_output(project: Project, fallback_dir: Path) -> Path:
     suffix = "_edit" if project.aspect == "16:9" else "_edit_9x16"
     if project.source_video:
@@ -102,7 +135,8 @@ def default_output(project: Project, fallback_dir: Path) -> Path:
 
 def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
                    progress: Callable[[float, str], None] | None = None,
-                   cancel: threading.Event | None = None) -> Path:
+                   cancel: threading.Event | None = None,
+                   text_layers: list[TextLayer] | None = None) -> Path:
     progress = progress or (lambda f, t: None)
     cancel = cancel or threading.Event()
     clips = [c for c in project.clips if c.duration > 0.05]
@@ -133,13 +167,38 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         lst.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = work / "final.mp4"
+        joined = work / "joined.mp4" if text_layers else tmp
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
-              "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(tmp)], cancel)
+              "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)], cancel)
+        if text_layers:
+            progress(len(clips) / (len(clips) + 1), "Тексты")
+            _overlay_texts(ffmpeg, project, joined, tmp, text_layers, enc, cancel)
         shutil.move(str(tmp), out)
         progress(1.0, "Готово")
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _overlay_texts(ffmpeg: str, project: Project, src: Path, out: Path, layers: list[TextLayer],
+                   enc: Encoder, cancel: threading.Event) -> None:
+    from worklapse.editor.text import ffmpeg_overlay
+
+    W, H = ASPECTS[project.aspect]
+    total = project.total
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *enc.global_args, "-i", str(src)]
+    for layer in layers:
+        cmd += ["-loop", "1", "-framerate", str(project.fps), "-t", f"{total:.3f}", "-i", str(layer.png)]
+    parts, prev = [], "0:v"
+    for i, layer in enumerate(layers, start=1):
+        label = f"v{i}"
+        parts.append(ffmpeg_overlay(i, prev, label, layer.item, layer.style, layer.x, layer.y,
+                                    layer.w, layer.h, H))
+        prev = label
+    graph = ";".join(parts) + f";[{prev}]{enc.filter_suffix}[vout]"
+    cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", "0:a?", "-c:a", "copy",
+            *enc.args("final", project.fps), "-t", f"{total:.3f}", "-movflags", "+faststart", str(out)]
+    _run(cmd, cancel)
 
 
 def _run(cmd: list[str], cancel: threading.Event) -> None:

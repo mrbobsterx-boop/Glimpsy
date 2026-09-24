@@ -3,6 +3,7 @@
 import json
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -140,3 +141,73 @@ def test_export_with_framing(tmp_path):
     rows = [sum(raw[r * 9:(r + 1) * 9]) / 9 for r in range(16)]
     brightest = rows.index(max(rows))
     assert brightest < 6, rows                    # белая полоса — в верхней части, а не по центру
+
+
+@pytest.fixture(scope="module")
+def qt_app():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def test_text_style_and_anim(qt_app):
+    from worklapse.editor.text import TextItem, anim_state, effective_style, placement, render_text
+    t = TextItem("t1", "Скетч", 1.0, 2.0)
+    st = effective_style(t, {"color": "#ff0000"})
+    assert st["color"] == "#ff0000" and st["bold"]           # общий стиль + стандартные значения
+    t.style = {"color": "#00ff00"}
+    assert effective_style(t, {"color": "#ff0000"})["color"] == "#00ff00"   # свой стиль важнее
+    img = render_text("Скетч\nвторая строка", st, 1080, 1920)
+    assert img.width() > 100 and img.height() > 100
+    x, y = placement(img.width(), img.height(), (0.5, 0.99), 1080, 1920)
+    assert y + img.height() <= 1920                            # не вылезает за край
+    assert anim_state("fade", 0.0, 2.0)[0] == 0 and anim_state("fade", 1.0, 2.0)[0] == 1
+    assert anim_state("slide", 0.0, 2.0)[1] > 0 and anim_state("pop", 0.0, 2.0)[2] < 1
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+@pytest.mark.parametrize("anim", ["fade", "slide", "pop", "none"])
+def test_export_with_text(tmp_path, qt_app, anim):
+    from worklapse.editor.export import render_text_layers
+    from worklapse.editor.text import TextItem
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:size=640x360:rate=30", "-t", "2", "-c:v", "libx264", str(tmp_path / "b.mp4")],
+                   check=True)
+    p = Project(tmp_path, "t", [Clip("a", "video", "b.mp4", 2, 0, 2, width=640, height=360)])
+    p.text_style = {"bg": False, "color": "#ffffff", "size": 0.2, "anim": anim}
+    p.texts = [TextItem("x", "ТЕКСТ", 0.5, 1.2)]
+    layers = render_text_layers(p, tmp_path / "layers")
+    out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder(), text_layers=layers)
+
+    def brightness(ts):
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", str(ts), "-i", str(out), "-frames:v", "1",
+                              "-vf", "scale=32:18,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
+        return sum(raw) / max(1, len(raw))
+    assert brightness(0.2) < 2           # до появления — чёрный кадр
+    assert brightness(1.1) > 3           # текст виден
+    assert brightness(1.9) < 2           # после — снова пусто
+
+
+def test_text_not_cut_off(qt_app):
+    """Регрессия: второе слово не должно пропадать (раньше Qt переносил его на невидимую строку)."""
+    from worklapse.editor.text import DEFAULT_STYLE, render_text
+    style = dict(DEFAULT_STYLE, bg=False, color="#ffffff", size=0.08)
+    img = render_text("Скетч логотипа", style, 1920, 1080)
+    right = sum(1 for x in range(img.width() * 3 // 4, img.width()) for y in range(img.height())
+                if img.pixelColor(x, y).alpha() > 128)
+    assert right > 50
+
+
+def test_custom_font(qt_app, tmp_path, monkeypatch):
+    import glob
+    from worklapse import paths as wpaths
+    from worklapse.editor import text as textmod
+    fonts = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True) + glob.glob("C:/Windows/Fonts/*.ttf") \
+        + glob.glob("/System/Library/Fonts/*.ttf")
+    if not fonts:
+        pytest.skip("в системе нет .ttf")
+    monkeypatch.setattr(wpaths, "data_dir", lambda: tmp_path)
+    family = textmod.add_font(Path(fonts[0]))
+    assert family and (tmp_path / "fonts" / Path(fonts[0]).name).exists()
+    assert family in textmod.load_custom_fonts()
