@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from worklapse import paths
-from worklapse.editor import keys
+from worklapse.editor import keys, motion
 from worklapse.editor.export import (
     ExportCancelled, default_output, export_project, render_overlay_layers, render_text_layers,
 )
@@ -81,6 +81,7 @@ class EditorWindow(QMainWindow):
         self.side.addWidget(self.text_panel)
         self.side.addWidget(self.overlay_panel)
         self._ov_images: dict[str, QImage] = {}
+        self._motion_cache: dict = {}
 
         self.play_btn = QPushButton()
         self.play_btn.setFixedWidth(44)
@@ -236,6 +237,7 @@ class EditorWindow(QMainWindow):
             self.preview.set_frame(DEFAULT_FRAME, False)
         else:
             self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
+        self.preview.set_src_crop(self._motion_crop(c))
         t = self.player.t
         visible = [x for x in self.project.texts if x.start <= t < x.end or x.id == self.timeline.selected_text]
         self.preview.set_texts([(x, effective_style(x, self.project.text_style)) for x in visible], t,
@@ -254,6 +256,33 @@ class EditorWindow(QMainWindow):
             return img
         local = max(0.0, min(o.duration, t - o.start))
         return self.thumbs.get(path, float(round(o.in_s + local)), 360)
+
+    def _motion_crop(self, c: Clip | None) -> tuple[float, float, float, float]:
+        """Какую часть кадра показать сейчас (автозум или слежение за курсором)."""
+        full = (0.0, 0.0, 1.0, 1.0)
+        if c is None:
+            return full
+        mode = c.motion_for(self.project.aspect)
+        if mode == "none":
+            return full
+        idx, local = self.project.locate(self.player.t)
+        if idx is None or self.project.clips[idx].id != c.id:
+            return full
+        t_src = c.in_s + local * c.speed
+        key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), c.width, c.height)
+        track = self._motion_cache.get(key)
+        if track is None:
+            if mode == "autozoom":
+                track = motion.autozoom_track(c.cursor, c.src_duration, c.zoom_strength)
+            else:
+                track = motion.follow_track(c.cursor, c.src_duration, c.width, c.height)
+            self._motion_cache[key] = track
+        if mode == "autozoom":
+            z, cx, cy = motion.value_at(track, t_src)
+            return cx - 0.5 / z, cy - 0.5 / z, 1 / z, 1 / z
+        band = motion.follow_band(c.width, c.height)
+        (cx,) = motion.value_at(track, t_src)
+        return cx - band / 2, 0.0, band, 1.0
 
     def _shown_clip(self) -> Clip | None:
         idx = self.player.idx
@@ -334,6 +363,10 @@ class EditorWindow(QMainWindow):
                 c.set_frame(aspect, z, value, y)
             elif what == "frame_y":
                 c.set_frame(aspect, z, x, value)
+            elif what == "motion" and c.kind == "video":
+                c.motion = value
+            elif what == "zoom_strength" and c.kind == "video":
+                c.zoom_strength = float(value)
             elif what == "frame_fit":
                 c.set_frame(aspect, *DEFAULT_FRAME)
             elif what == "frame_fill":

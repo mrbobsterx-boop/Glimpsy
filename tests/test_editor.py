@@ -265,3 +265,38 @@ def test_export_with_overlays(tmp_path, qt_app):
         a = array.array("h", raw[: len(raw) // 2 * 2])
         return max((abs(x) for x in a), default=0)
     assert loud(0.5) < 100 and loud(2.1) > 1000
+
+
+def test_autozoom_track_zooms_on_still_cursor():
+    from worklapse.editor import motion
+    # первые 2 с курсор «рисует» в маленькой области справа вверху, потом мечется по экрану
+    cursor = [[t / 10, 0.8 + 0.01 * (t % 3), 0.2] for t in range(0, 20)]
+    cursor += [[2 + t / 10, (t * 0.37) % 1, (t * 0.61) % 1] for t in range(0, 20)]
+    track = motion.autozoom_track(cursor, 4.0, 2.0)
+    z_mid, cx_mid, cy_mid = motion.value_at(track, 1.3)
+    z_end = motion.value_at(track, 4.0)[0]
+    assert z_mid > 1.6 and cx_mid > 0.65 and cy_mid < 0.35      # приблизились к месту работы
+    assert z_end < 1.3                                          # потом отдалились
+    assert all(abs(b[1] - a[1]) < 0.3 for a, b in zip(track, track[1:]))   # плавно, без скачков
+
+
+def test_piecewise_expression():
+    from worklapse.editor import motion
+    expr = motion.piecewise([(0, 1.0), (1, 2.0), (2, 2.0)], 1)
+    assert expr.startswith("if(lt(it,1.000)")
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+@pytest.mark.parametrize("mode,aspect", [("autozoom", "16:9"), ("follow", "9:16")])
+def test_export_with_motion(tmp_path, mode, aspect):
+    # слева чёрное, справа белое; курсор всё время справа → кадр должен «уехать» вправо
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:size=640x360:rate=30,drawbox=x=320:y=0:w=320:h=360:color=white:t=fill",
+                    "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp_path / "s.mp4")], check=True)
+    cursor = [[t / 10, 0.85, 0.5] for t in range(31)]
+    c = Clip("a", "video", "s.mp4", 3, 0, 3, width=640, height=360, cursor=cursor, motion=mode, zoom_strength=2.5)
+    p = Project(tmp_path, "t", [c], aspect=aspect)
+    out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder())
+    raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", "2.5", "-i", str(out), "-frames:v", "1",
+                          "-vf", "scale=16:16,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
+    assert sum(raw) / len(raw) > 200, "в кадре должна остаться только белая (правая) часть"

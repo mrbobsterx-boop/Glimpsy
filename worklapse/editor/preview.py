@@ -41,6 +41,7 @@ class PreviewWidget(QWidget):
         self.aspect = "16:9"
         self.frame = DEFAULT_FRAME
         self.editable = False
+        self.src_crop = (0.0, 0.0, 1.0, 1.0)   # какая часть исходного кадра видна (автозум/слежение)
         self._bg_cache: tuple[int, QImage] | None = None
         self._drag: str | None = None      # move / scale
         self._press = QPointF()
@@ -72,6 +73,11 @@ class PreviewWidget(QWidget):
     def set_aspect(self, aspect: str) -> None:
         self.aspect = aspect
         self.update()
+
+    def set_src_crop(self, crop: tuple[float, float, float, float]) -> None:
+        if crop != self.src_crop:
+            self.src_crop = crop
+            self.update()
 
     def set_frame(self, frame: tuple[float, float, float], editable: bool) -> None:
         if self._drag is None:          # во время перетаскивания рамку ведёт мышь
@@ -189,6 +195,7 @@ class PreviewWidget(QWidget):
     def _frame_rect(self, frame=None) -> QRectF:
         canvas = self.canvas_rect()
         iw, ih = (self.image.width(), self.image.height()) if not self.image.isNull() else (16, 9)
+        iw, ih = iw * self.src_crop[2], ih * self.src_crop[3]      # движение по курсору: видна часть кадра
         x, y, w, h = frame_rect(iw, ih, canvas.width(), canvas.height(), frame or self.frame)
         return QRectF(canvas.x() + x, canvas.y() + y, w, h)
 
@@ -227,7 +234,8 @@ class PreviewWidget(QWidget):
             p.restore()
         p.save()
         p.setClipRect(canvas)
-        p.drawImage(fr, img)
+        sx, sy, sw, sh = self.src_crop
+        p.drawImage(fr, img, QRectF(sx * img.width(), sy * img.height(), sw * img.width(), sh * img.height()))
         p.restore()
         self._paint_overlays(p)
         self._paint_texts(p)

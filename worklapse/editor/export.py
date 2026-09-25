@@ -48,11 +48,31 @@ def atempo_chain(speed: float) -> list[str]:
     return parts
 
 
-def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "") -> str:
-    """Граф фильтров для картинки одного фрагмента (с учётом кадрирования)."""
-    head = f"[0:v]setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
+def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> tuple[str, float | None]:
+    """Фильтр движения по курсору и новое соотношение сторон кадра (если меняется)."""
+    from worklapse.editor import motion
+
+    mode = clip.motion_for(aspect)
+    if mode == "none" or not src_w or not src_h:
+        return "", None
+    dur = clip.src_duration
+    if mode == "autozoom":
+        track = motion.autozoom_track(clip.cursor, dur, clip.zoom_strength)
+        return motion.autozoom_filter(track, clip.in_s, clip.out_s, src_w, src_h, fps) + ",", None
+    track = motion.follow_track(clip.cursor, dur, src_w, src_h)
+    band_w = int(min(src_w, src_h * 9 / 16)) // 2 * 2
+    return motion.follow_filter(track, clip.in_s, clip.out_s, src_w, src_h) + ",", band_w / (src_h // 2 * 2)
+
+
+def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "",
+                 src_size: tuple[int, int] | None = None) -> str:
+    """Граф фильтров для картинки одного фрагмента (движение по курсору, скорость, кадрирование)."""
+    moving, new_ar = ("", None)
+    if aspect and src_size:
+        moving, new_ar = motion_filter(clip, aspect, src_size[0], src_size[1], fps)
+    head = f"[0:v]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
     zoom, fx, fy = clip.frame_for(aspect) if aspect else DEFAULT_FRAME
-    src_ar = (clip.width / clip.height) if clip.width and clip.height else W / H
+    src_ar = new_ar or ((clip.width / clip.height) if clip.width and clip.height else W / H)
     if (zoom, fx, fy) == DEFAULT_FRAME and abs(src_ar - W / H) < 0.02:
         return f"{head},scale={W}:{H},setsar=1,{encoder_suffix}[v]"
     bw, bh = max(2, W // BG_BLUR_DIV // 2 * 2), max(2, H // BG_BLUR_DIV // 2 * 2)
@@ -81,7 +101,13 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
     use_audio = clip.kind == "video" and clip.has_audio and not clip.muted
     if not use_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur_out:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect)
+    src_size = None
+    if clip.motion_for(project.aspect) != "none":
+        # для движения по курсору нужен настоящий размер кадра файла (он может быть уменьшен при записи)
+        from worklapse.editor.media import probe
+        info = probe(ffmpeg, src)
+        src_size = (info.width, info.height)
+    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size)
     if use_audio:
         graph += ";[0:a]asetpts=PTS-STARTPTS," + ",".join(atempo_chain(clip.speed)) + "[a]"
         amap = "[a]"

@@ -51,6 +51,16 @@ class Clip:
     cursor: list = field(default_factory=list)
     # Кадрирование — отдельно для каждого формата: {"9:16": [масштаб, x, y]}
     frames: dict = field(default_factory=dict)
+    motion: str = "none"          # none / autozoom / follow — движение кадра по курсору
+    zoom_strength: float = 1.8    # во сколько раз приближать при автозуме
+
+    def motion_for(self, aspect: str) -> str:
+        """Режим движения с учётом формата: «следовать» имеет смысл только для 9:16."""
+        if not self.cursor or self.kind != "video":
+            return "none"
+        if self.motion == "follow" and aspect != "9:16":
+            return "none"
+        return self.motion
 
     @property
     def duration(self) -> float:

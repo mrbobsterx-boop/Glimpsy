@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
     QWidget,
 )
 
+from worklapse.editor.motion import MODES
 from worklapse.editor.project import MAX_SPEED, MAX_ZOOM, MIN_SPEED, MIN_ZOOM, Clip
 
 SPEED_PRESETS = (0.5, 1, 2, 4, 10)
@@ -56,6 +57,21 @@ class Inspector(QWidget):
         self.photo_dur.valueChanged.connect(lambda v: self._emit("photo_duration", v))
 
         # --- кадр (масштаб и положение внутри ролика) ---
+        # --- движение кадра по курсору (этап 3) ---
+        self.motion_title = QLabel("Движение кадра")
+        self.motion_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
+        self.motion = QComboBox()
+        for key, label in MODES.items():
+            self.motion.addItem(label, key)
+        self.motion.currentIndexChanged.connect(lambda _: self._emit("motion", self.motion.currentData()))
+        self.strength = QDoubleSpinBox(minimum=1.2, maximum=4.0, singleStep=0.1, decimals=1, suffix=" ×")
+        self.strength.valueChanged.connect(lambda v: self._emit("zoom_strength", v))
+        self.motion_hint = QLabel()
+        self.motion_hint.setWordWrap(True)
+        self.motion_hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        # у переносимых подписей в QFormLayout Qt иногда занижает высоту — задаём её явно
+        self.motion_hint.setMinimumHeight(self.motion_hint.fontMetrics().lineSpacing() * 3 + 4)
+
         self.frame_title = QLabel()
         self.frame_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
         self.zoom = QDoubleSpinBox(minimum=MIN_ZOOM * 100, maximum=MAX_ZOOM * 100, singleStep=5, decimals=0,
@@ -90,6 +106,10 @@ class Inspector(QWidget):
         self.form.addRow("Начало в файле:", self.in_s)
         self.form.addRow("Конец в файле:", self.out_s)
         self.form.addRow("Показывать фото:", self.photo_dur)
+        self.form.addRow(self.motion_title)
+        self.form.addRow("Режим:", self.motion)
+        self.form.addRow("Сила зума:", self.strength)
+        self.form.addRow(self.motion_hint)
         self.form.addRow(self.frame_title)
         self.form.addRow("Масштаб:", self.zoom)
         self.form.addRow("Сдвиг влево/вправо:", self.pos_x)
@@ -115,13 +135,14 @@ class Inspector(QWidget):
         self.set_clip(None)
 
     FRAME_ROWS = ("frame_title", "zoom", "pos_x", "pos_y", "frame_btns")
+    MOTION_ROWS = ("motion_title", "motion", "strength", "motion_hint")
 
     def set_clip(self, clip: Clip | None, aspect: str = "16:9", count: int = 1) -> None:
         """Показать свойства фрагмента. count > 1 — выбрано несколько: правки идут во все."""
         self.clip, self.aspect, self.count = clip, aspect, count
         self._loading = True
         all_rows = [self.speed, self.presets, self.sound, self.in_s, self.out_s, self.photo_dur] + \
-                   [getattr(self, n) for n in self.FRAME_ROWS]
+                   [getattr(self, n) for n in self.FRAME_ROWS + self.MOTION_ROWS]
         if clip is None:
             self.title.setText("Выберите фрагмент на ленте")
             self.info.setText("Щёлкните по фрагменту внизу, чтобы изменить скорость, звук, длину и кадр.")
@@ -157,6 +178,23 @@ class Inspector(QWidget):
         self.in_s.setValue(clip.in_s)
         self.out_s.setValue(clip.out_s)
         self.photo_dur.setValue(clip.out_s - clip.in_s)
+        has_cursor = is_video and bool(clip.cursor)
+        self.motion.setCurrentIndex(max(0, self.motion.findData(clip.motion)))
+        self.motion.setEnabled(has_cursor)
+        follow_item = self.motion.model().item(self.motion.findData("follow"))
+        if follow_item is not None:
+            follow_item.setEnabled(aspect == "9:16")
+        self.strength.setValue(clip.zoom_strength)
+        self.strength.setEnabled(has_cursor and clip.motion == "autozoom")
+        if not has_cursor:
+            self.motion_hint.setText("Только для записей экрана Worklapse — в них сохранено, где был курсор.")
+        elif clip.motion == "follow" and aspect != "9:16":
+            self.motion_hint.setText("«Следовать за курсором» работает в формате 9:16.")
+        else:
+            self.motion_hint.setText("Кадр плавно приближается туда, где работает курсор. "
+                                     "Ctrl+A — включить сразу для всех фрагментов.")
+        for n in self.MOTION_ROWS:
+            self._set_row_visible(getattr(self, n), is_video)
         z, x, y = clip.frame_for(aspect)
         self.frame_title.setText(f"Кадр в формате {aspect}")
         self.zoom.setValue(z * 100)
