@@ -423,14 +423,12 @@ class EditorWindow(QMainWindow):
             if mode == "autozoom":
                 track = motion.autozoom_track(c.cursor, c.src_duration, c.zoom_strength, c.clicks)
             else:
-                track = motion.follow_track(c.cursor, c.src_duration, c.width, c.height)
+                track = motion.follow_track(c.cursor, c.src_duration, c.width, c.height, mode)
             self._motion_cache[key] = track
         if mode == "autozoom":
             z, cx, cy = motion.value_at(track, t_src)
             return cx - 0.5 / z, cy - 0.5 / z, 1 / z, 1 / z
-        band = motion.follow_band(c.width, c.height)
-        (cx,) = motion.value_at(track, t_src)
-        return cx - band / 2, 0.0, band, 1.0
+        return motion.follow_crop(track, t_src, c.width, c.height)
 
     def _shown_clip(self) -> Clip | None:
         idx = self.player.idx

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
-    QWidget,
+    QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
-from glimpsy.editor.motion import MODES
+from glimpsy.editor.motion import is_follow
 from glimpsy.editor.project import MAX_SPEED, MAX_ZOOM, MIN_SPEED, MIN_ZOOM, Clip
 
 SPEED_PRESETS = (0.5, 1, 2, 4, 10)
@@ -60,10 +60,33 @@ class Inspector(QWidget):
         # --- движение кадра по курсору (этап 3) ---
         self.motion_title = QLabel("Движение кадра")
         self.motion_title.setProperty("role", "section")
-        self.motion = QComboBox()
-        for key, label in MODES.items():
-            self.motion.addItem(label, key)
-        self.motion.currentIndexChanged.connect(lambda _: self._emit("motion", self.motion.currentData()))
+        # все режимы — отдельными кнопками, чтобы переключать одним щелчком
+        self.motion = QWidget()
+        grid = QGridLayout(self.motion)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        self.motion_group = QButtonGroup(self)
+        self.motion_btns: dict[str, QPushButton] = {}
+        layout = (("none", "Без движения", 0, 0, 3, "Кадр стоит на месте"),
+                  ("autozoom", "Автозум к курсору", 1, 0, 3, "Приближение к кликам и туда, где работает курсор (Z)"),
+                  ("follow_hard", "Жёстко", 3, 0, 1, "Курсор всегда в центре кадра — кадр едет сразу за ним"),
+                  ("follow", "Плавно", 3, 1, 1, "Кадр мягко догоняет курсор и стоит, пока курсор в середине"),
+                  ("follow_zoom", "Зона + зум", 3, 2, 1, "Крупнее (×1.5), едет и вверх-вниз, большая «мёртвая зона»"))
+        for key, text, row, col, span, tip in layout:
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setMinimumWidth(0)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setProperty("motion", key)
+            self.motion_group.addButton(b)
+            self.motion_btns[key] = b
+            grid.addWidget(b, row, col, 1, span)
+        self.follow_label = QLabel("За курсором — для Reels (9:16):")
+        self.follow_label.setProperty("role", "hint")
+        grid.addWidget(self.follow_label, 2, 0, 1, 3)
+        self.motion_group.buttonClicked.connect(lambda b: self._emit("motion", b.property("motion")))
         self.strength = QDoubleSpinBox(minimum=1.2, maximum=4.0, singleStep=0.1, decimals=1, suffix=" ×")
         self.strength.valueChanged.connect(lambda v: self._emit("zoom_strength", v))
         self.click_fx = QCheckBox("Подсвечивать клики")
@@ -110,7 +133,7 @@ class Inspector(QWidget):
         self.form.addRow("Конец в файле", self.out_s)
         self.form.addRow("Показывать фото", self.photo_dur)
         self.form.addRow(self.motion_title)
-        self.form.addRow("Режим", self.motion)
+        self.form.addRow(self.motion)
         self.form.addRow("Сила зума", self.strength)
         self.form.addRow(self.click_fx)
         self.form.addRow(self.motion_hint)
@@ -182,11 +205,11 @@ class Inspector(QWidget):
         self.out_s.setValue(clip.out_s)
         self.photo_dur.setValue(clip.out_s - clip.in_s)
         has_cursor = is_video and bool(clip.cursor)
-        self.motion.setCurrentIndex(max(0, self.motion.findData(clip.motion)))
+        (self.motion_btns.get(clip.motion) or self.motion_btns["none"]).setChecked(True)
         self.motion.setEnabled(has_cursor)
-        follow_item = self.motion.model().item(self.motion.findData("follow"))
-        if follow_item is not None:
-            follow_item.setEnabled(aspect == "9:16")
+        for key, b in self.motion_btns.items():
+            if is_follow(key):
+                b.setEnabled(has_cursor and aspect == "9:16")
         self.strength.setValue(clip.zoom_strength)
         self.click_fx.setChecked(clip.click_fx and bool(clip.clicks))
         self.click_fx.setEnabled(bool(clip.clicks) or count > 1)
@@ -195,8 +218,12 @@ class Inspector(QWidget):
         self.strength.setEnabled(has_cursor and clip.motion == "autozoom")
         if not has_cursor:
             self.motion_hint.setText("Только для записей экрана Glimpsy — в них сохранено, где был курсор.")
-        elif clip.motion == "follow" and aspect != "9:16":
-            self.motion_hint.setText("«Следовать за курсором» работает в формате 9:16.")
+        elif aspect != "9:16":
+            self.motion_hint.setText("Кадр плавно приближается к кликам и туда, где работает курсор. "
+                                     "«За курсором» — в формате 9:16 (переключатель вверху).")
+        elif is_follow(clip.motion):
+            self.motion_hint.setText("Узкий кадр 9:16 едет за курсором — важное не уходит за край. "
+                                     "Ctrl+A — выбрать все фрагменты и включить сразу для всех.")
         else:
             self.motion_hint.setText("Кадр плавно приближается к кликам и туда, где работает курсор. "
                                      "Ctrl+A — включить сразу для всех фрагментов.")

@@ -290,7 +290,7 @@ class TimelineWidget(QWidget):
         if abs(c.speed - 1.0) > 1e-3:
             badges += f"×{c.speed:g} · "
         if c.motion != "none" and c.cursor:
-            badges += "зум · "
+            badges += "за курсором · " if c.motion.startswith("follow") else "зум · "
         top = badges + (c.label or "")
         for text, right in ((top, False), (f"{c.duration:.1f} с", True)):
             w = min(r.width() - 8, fm.horizontalAdvance(text) + 12)

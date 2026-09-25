@@ -59,9 +59,10 @@ def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> 
     if mode == "autozoom":
         track = motion.autozoom_track(clip.cursor, dur, clip.zoom_strength, clip.clicks)
         return motion.autozoom_filter(track, clip.in_s, clip.out_s, src_w, src_h, fps) + ",", None
-    track = motion.follow_track(clip.cursor, dur, src_w, src_h)
-    band_w = int(min(src_w, src_h * 9 / 16)) // 2 * 2
-    return motion.follow_filter(track, clip.in_s, clip.out_s, src_w, src_h) + ",", band_w / (src_h // 2 * 2)
+    track = motion.follow_track(clip.cursor, dur, src_w, src_h, mode)
+    z = track[0][3]
+    band_w, band_h = int(min(src_w, src_h * 9 / 16) / z) // 2 * 2, int(src_h / z) // 2 * 2
+    return motion.follow_filter(track, clip.in_s, clip.out_s, src_w, src_h) + ",", band_w / band_h
 
 
 def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "",

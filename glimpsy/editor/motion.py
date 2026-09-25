@@ -5,8 +5,9 @@
   * «Автозум к курсору» — когда курсор работает в небольшой области (рисуете, правите
     слой, двигаете точки), кадр плавно приближается к этому месту. Когда курсор уходит
     далеко (переключаетесь между панелями) — плавно отдаляется.
-  * «Следовать за курсором» (для 9:16) — из горизонтальной записи вырезается
-    вертикальная полоса, которая плавно едет за курсором.
+  * «За курсором» (для 9:16) — из горизонтальной записи вырезается вертикальная полоса,
+    которая едет за курсором. Три варианта: жёстко (курсор всегда в центре), плавно
+    (с «мёртвой зоной») и «зона + зум» (крупнее, едет и по вертикали).
 
 Идея взята у открытых программ вроде Recordly и Open Recorder (группировать движения,
 плавные переезды, без дёрганья за каждым движением), код — свой.
@@ -27,7 +28,8 @@ PAN_TAU = 0.35              # плавность переезда
 FOLLOW_TAU = 0.5
 TIGHT, LOOSE = 0.12, 0.25   # «курсор в небольшой области»: разброс в долях экрана
 
-MODES = {"none": "Без движения", "autozoom": "Автозум к курсору", "follow": "Следовать за курсором (9:16)"}
+MODES = {"none": "Без движения", "autozoom": "Автозум к курсору", "follow_hard": "За курсором: жёстко (9:16)",
+         "follow": "За курсором: плавно (9:16)", "follow_zoom": "За курсором: зона + зум (9:16)"}
 
 
 def samples(cursor: list, duration: float) -> list[tuple[float, float, float]]:
@@ -91,26 +93,47 @@ def autozoom_track(cursor: list, duration: float, strength: float,
     return out
 
 
-def follow_track(cursor: list, duration: float, src_w: int, src_h: int) -> list[tuple[float, float]]:
-    """[(t, центр x)] для вертикальной полосы 9:16, которая едет за курсором."""
+# Варианты «за курсором» (9:16): (плавность, «мёртвая зона» в долях полосы, приближение)
+FOLLOW_VARIANTS = {
+    "follow_hard": (0.12, 0.0, 1.0),     # курсор всегда в центре, кадр едет сразу за ним
+    "follow": (FOLLOW_TAU, 0.25, 1.0),   # плавно; пока курсор в середине полосы — кадр стоит
+    "follow_zoom": (0.6, 0.3, 1.5),      # крупнее (×1.5), едет и по вертикали, большая «мёртвая зона»
+}
+
+
+def is_follow(mode: str) -> bool:
+    return mode in FOLLOW_VARIANTS
+
+
+def follow_track(cursor: list, duration: float, src_w: int, src_h: int,
+                 mode: str = "follow") -> list[tuple[float, float, float, float]]:
+    """[(t, центр x, центр y, приближение)] для вертикальной полосы 9:16, которая едет за курсором."""
+    tau, dead, zoom = FOLLOW_VARIANTS.get(mode, FOLLOW_VARIANTS["follow"])
+    band = follow_band(src_w, src_h)
+    half_x, half_y = band / zoom / 2, 0.5 / zoom
     pts = samples(cursor, duration)
-    band = min(1.0, (src_h * 9 / 16) / src_w) if src_w and src_h else 0.316
-    half = band / 2
     if not pts or duration <= 0:
-        return [(0.0, 0.5), (max(duration, STEP), 0.5)]
+        return [(0.0, 0.5, 0.5, zoom), (max(duration, STEP), 0.5, 0.5, zoom)]
+
+    def clamp(v: float, h: float) -> float:
+        return min(max(v, h), 1 - h)
+
     out = []
-    cx = min(max(pts[0][1], half), 1 - half)
+    cx, cy = clamp(pts[0][1], half_x), clamp(pts[0][2], half_y)
+    tx, ty = cx, cy
     t, j = 0.0, 0
-    target = cx
     while t <= duration + 1e-6:
         while j < len(pts) - 1 and pts[j + 1][0] <= t:
             j += 1
-        x = pts[j][1]
-        # «мёртвая зона»: пока курсор внутри середины полосы, кадр не двигается
-        if abs(x - target) > band * 0.25:
-            target = x
-        cx = _smooth(cx, target, STEP, FOLLOW_TAU)
-        out.append((round(t, 3), min(max(cx, half), 1 - half)))
+        x, y = pts[j][1], pts[j][2]
+        # «мёртвая зона»: пока курсор внутри середины кадра, кадр не двигается
+        if abs(x - tx) > band / zoom * dead:
+            tx = x
+        if zoom > 1 and abs(y - ty) > 1 / zoom * dead:
+            ty = y
+        cx = _smooth(cx, tx, STEP, tau)
+        cy = _smooth(cy, ty, STEP, tau) if zoom > 1 else 0.5
+        out.append((round(t, 3), clamp(cx, half_x), clamp(cy, half_y), zoom))
         t += STEP
     return out
 
@@ -118,6 +141,13 @@ def follow_track(cursor: list, duration: float, src_w: int, src_h: int) -> list[
 def follow_band(src_w: int, src_h: int) -> float:
     """Ширина вертикальной полосы в долях ширины кадра."""
     return min(1.0, (src_h * 9 / 16) / src_w) if src_w and src_h else 0.316
+
+
+def follow_crop(track: list, t: float, src_w: int, src_h: int) -> tuple[float, float, float, float]:
+    """Какая часть кадра видна в момент t (доли: x, y, ширина, высота) — для просмотра."""
+    cx, cy, z = value_at(track, t)
+    bw, bh = follow_band(src_w, src_h) / z, 1 / z
+    return cx - bw / 2, cy - bh / 2, bw, bh
 
 
 # ---------------- значения в момент времени (для просмотра) ----------------
@@ -170,6 +200,9 @@ def autozoom_filter(track: list, in_s: float, out_s: float, w: int, h: int, fps:
 
 def follow_filter(track: list, in_s: float, out_s: float, w: int, h: int) -> str:
     keys = _keys(track, in_s, out_s)
-    cx = piecewise(keys, 1, "t")
-    bw = int(min(w, h * 9 / 16)) // 2 * 2
-    return f"setpts=PTS-STARTPTS,crop=w={bw}:h={h // 2 * 2}:x='max(0,min(iw-{bw},({cx})*iw-{bw}/2))':y=0"
+    zoom = keys[0][3] if keys and len(keys[0]) > 3 else 1.0
+    cx, cy = piecewise(keys, 1, "t"), piecewise(keys, 2, "t")
+    bw = int(min(w, h * 9 / 16) / zoom) // 2 * 2
+    bh = int(h / zoom) // 2 * 2
+    y = "0" if zoom <= 1 else f"'max(0,min(ih-{bh},({cy})*ih-{bh}/2))'"
+    return f"setpts=PTS-STARTPTS,crop=w={bw}:h={bh}:x='max(0,min(iw-{bw},({cx})*iw-{bw}/2))':y={y}"

@@ -277,7 +277,8 @@ def test_piecewise_expression():
 
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
-@pytest.mark.parametrize("mode,aspect", [("autozoom", "16:9"), ("follow", "9:16")])
+@pytest.mark.parametrize("mode,aspect", [("autozoom", "16:9"), ("follow", "9:16"), ("follow_hard", "9:16"),
+                                         ("follow_zoom", "9:16")])
 def test_export_with_motion(tmp_path, mode, aspect):
     # слева чёрное, справа белое; курсор всё время справа → кадр должен «уехать» вправо
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
@@ -395,3 +396,20 @@ def test_editor_single_key_shortcuts(tmp_path, qt_app):
     finally:
         w.player.shutdown()
         w.close()
+
+
+def test_follow_variants_differ():
+    from glimpsy.editor import motion
+
+    # курсор перескакивает из левой части в правую на 1-й секунде и там немного «гуляет»
+    cursor = [[t / 10, 0.2 if t < 10 else 0.8 + 0.03 * ((t % 4) - 2), 0.5 if t < 10 else 0.8] for t in range(40)]
+    hard = motion.follow_track(cursor, 4.0, 1920, 1080, "follow_hard")
+    soft = motion.follow_track(cursor, 4.0, 1920, 1080, "follow")
+    zoom = motion.follow_track(cursor, 4.0, 1920, 1080, "follow_zoom")
+    # жёстко — догоняет быстрее всех
+    assert motion.value_at(hard, 1.4)[0] > motion.value_at(soft, 1.4)[0] > 0.3
+    # «зона + зум» — крупнее и едет вниз за курсором; остальные по вертикали стоят
+    assert zoom[0][3] == 1.5 and motion.value_at(zoom, 3.9)[1] > 0.6
+    assert motion.value_at(soft, 3.9)[1] == 0.5
+    x, y, w, h = motion.follow_crop(zoom, 3.9, 1920, 1080)
+    assert 0 <= x and x + w <= 1.0001 and 0 <= y and y + h <= 1.0001 and abs(h - 1 / 1.5) < 1e-6
