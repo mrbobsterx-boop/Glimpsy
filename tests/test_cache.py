@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from worklapse import cache, paths
+from glimpsy import cache, paths
 
 
 def test_clear_keeps_videos_and_current_session(tmp_path, monkeypatch):
@@ -15,7 +15,7 @@ def test_clear_keeps_videos_and_current_session(tmp_path, monkeypatch):
     (temp / "thumbs" / "a.jpg").write_bytes(b"t" * 10)
     (temp / "session_old" / "cand.ts").write_bytes(b"c" * 100)
     (temp / "session_now" / "cand.ts").write_bytes(b"n")
-    (videos / "Worklapse_edit.mp4").write_bytes(b"v")
+    (videos / "Glimpsy_edit.mp4").write_bytes(b"v")
 
     report = cache.scan(keep=temp / "session_now", output_dir=videos)
     assert report.projects == 1 and report.project_bytes == 1000 and report.other_bytes == 110
@@ -24,7 +24,7 @@ def test_clear_keeps_videos_and_current_session(tmp_path, monkeypatch):
     assert not (data / "projects" / "project_1").exists()
     assert (data / "fonts" / "my.ttf").exists()                 # шрифты остаются
     assert (temp / "session_now" / "cand.ts").exists()          # идущая запись не тронута
-    assert (videos / "Worklapse_edit.mp4").exists()             # готовые ролики на месте
+    assert (videos / "Glimpsy_edit.mp4").exists()             # готовые ролики на месте
 
 
 def test_output_inside_cache_is_protected(tmp_path, monkeypatch):

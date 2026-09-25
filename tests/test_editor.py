@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from worklapse import paths
-from worklapse.editor.export import atempo_chain, default_output, export_project
-from worklapse.editor.media import parse_probe
-from worklapse.editor.project import Clip, History, Project, list_projects
-from worklapse.recorder.encoder import software_encoder
+from glimpsy import paths
+from glimpsy.editor.export import atempo_chain, default_output, export_project
+from glimpsy.editor.media import parse_probe
+from glimpsy.editor.project import Clip, History, Project, list_projects
+from glimpsy.recorder.encoder import software_encoder
 
 FFMPEG = paths.find_executable("ffmpeg")
 
@@ -65,7 +65,7 @@ def test_undo_redo_and_merge(tmp_path):
 
 def test_load_stage1_project_and_save(tmp_path):
     (tmp_path / "project.json").write_text(json.dumps({
-        "output": str(tmp_path / "Worklapse_2026-09-24_10-00.mp4"), "fps": 30,
+        "output": str(tmp_path / "Glimpsy_2026-09-24_10-00.mp4"), "fps": 30,
         "clips": [{"file": "piece_0000.mp4", "duration": 3.5, "speed": 1.25, "recorded_at": time.time(),
                    "monitor": 2, "source_size": [1920, 1080], "priority": True, "cursor": []}]}))
     p = Project.load(tmp_path)
@@ -75,7 +75,7 @@ def test_load_stage1_project_and_save(tmp_path):
     again = Project.load(tmp_path)
     assert again.clips[0].speed == 2 and again.edited
     assert tmp_path in list_projects(tmp_path.parent)
-    assert default_output(p, tmp_path).name == "Worklapse_2026-09-24_10-00_edit.mp4"
+    assert default_output(p, tmp_path).name == "Glimpsy_2026-09-24_10-00_edit.mp4"
 
 
 def test_atempo():
@@ -113,7 +113,7 @@ def test_real_export_both_formats(tmp_path):
 
 
 def test_frame_geometry():
-    from worklapse.editor.project import cover_zoom, frame_rect
+    from glimpsy.editor.project import cover_zoom, frame_rect
     # горизонтальное видео в вертикальном кадре: вписано по центру
     x, y, w, h = frame_rect(1920, 1080, 1080, 1920, (1.0, 0.0, 0.0))
     assert (round(w), round(h), round(x)) == (1080, 608, 0) and abs(y - (1920 - 607.5) / 2) < 1
@@ -143,18 +143,8 @@ def test_export_with_framing(tmp_path):
     assert brightest < 6, rows                    # белая полоса — в верхней части, а не по центру
 
 
-@pytest.fixture(scope="module")
-def qt_app():
-    import os
-    import sys
-    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
-
-
 def test_text_style_and_anim(qt_app):
-    from worklapse.editor.text import TextItem, anim_state, effective_style, placement, render_text
+    from glimpsy.editor.text import TextItem, anim_state, effective_style, placement, render_text
     t = TextItem("t1", "Скетч", 1.0, 2.0)
     st = effective_style(t, {"color": "#ff0000"})
     assert st["color"] == "#ff0000" and st["bold"]           # общий стиль + стандартные значения
@@ -171,8 +161,8 @@ def test_text_style_and_anim(qt_app):
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 @pytest.mark.parametrize("anim", ["fade", "slide", "pop", "none"])
 def test_export_with_text(tmp_path, qt_app, anim):
-    from worklapse.editor.export import render_text_layers
-    from worklapse.editor.text import TextItem
+    from glimpsy.editor.export import render_text_layers
+    from glimpsy.editor.text import TextItem
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     "color=c=black:size=640x360:rate=30", "-t", "2", "-c:v", "libx264", str(tmp_path / "b.mp4")],
                    check=True)
@@ -200,7 +190,7 @@ def test_export_with_text(tmp_path, qt_app, anim):
 
 def test_text_not_cut_off(qt_app):
     """Регрессия: второе слово не должно пропадать (раньше Qt переносил его на невидимую строку)."""
-    from worklapse.editor.text import DEFAULT_STYLE, render_text
+    from glimpsy.editor.text import DEFAULT_STYLE, render_text
     style = dict(DEFAULT_STYLE, bg=False, color="#ffffff", size=0.08)
     img = render_text("Скетч логотипа", style, 1920, 1080)
     right = sum(1 for x in range(img.width() * 3 // 4, img.width()) for y in range(img.height())
@@ -210,8 +200,8 @@ def test_text_not_cut_off(qt_app):
 
 def test_custom_font(qt_app, tmp_path, monkeypatch):
     import glob
-    from worklapse import paths as wpaths
-    from worklapse.editor import text as textmod
+    from glimpsy import paths as wpaths
+    from glimpsy.editor import text as textmod
     fonts = glob.glob("/usr/share/fonts/**/*.ttf", recursive=True) + glob.glob("C:/Windows/Fonts/*.ttf") \
         + glob.glob("/System/Library/Fonts/*.ttf")
     if not fonts:
@@ -224,8 +214,8 @@ def test_custom_font(qt_app, tmp_path, monkeypatch):
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 def test_export_with_overlays(tmp_path, qt_app):
-    from worklapse.editor.export import render_overlay_layers
-    from worklapse.editor.overlay import OverlayItem
+    from glimpsy.editor.export import render_overlay_layers
+    from glimpsy.editor.overlay import OverlayItem
 
     def gen(args, name):
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args, str(tmp_path / name)], check=True)
@@ -268,7 +258,7 @@ def test_export_with_overlays(tmp_path, qt_app):
 
 
 def test_autozoom_track_zooms_on_still_cursor():
-    from worklapse.editor import motion
+    from glimpsy.editor import motion
     # первые 2 с курсор «рисует» в маленькой области справа вверху, потом мечется по экрану
     cursor = [[t / 10, 0.8 + 0.01 * (t % 3), 0.2] for t in range(0, 20)]
     cursor += [[2 + t / 10, (t * 0.37) % 1, (t * 0.61) % 1] for t in range(0, 20)]
@@ -281,7 +271,7 @@ def test_autozoom_track_zooms_on_still_cursor():
 
 
 def test_piecewise_expression():
-    from worklapse.editor import motion
+    from glimpsy.editor import motion
     expr = motion.piecewise([(0, 1.0), (1, 2.0), (2, 2.0)], 1)
     assert expr.startswith("if(lt(it,1.000)")
 
@@ -305,7 +295,7 @@ def test_export_with_motion(tmp_path, mode, aspect):
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 @pytest.mark.parametrize("duck", [True, False])
 def test_export_with_music(tmp_path, duck):
-    from worklapse.editor.music import MusicTrack, probe_audio
+    from glimpsy.editor.music import MusicTrack, probe_audio
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     "color=c=black:size=320x180:rate=30", "-t", "4", "-c:v", "libx264", str(tmp_path / "v.mp4")],
                    check=True)
@@ -332,7 +322,7 @@ def test_export_with_music(tmp_path, duck):
 def test_music_in_editor_window(tmp_path, qt_app):
     """Музыку добавляют, правят, отменяют и убирают через окно редактора."""
     import json
-    from worklapse.editor.window import EditorWindow
+    from glimpsy.editor.window import EditorWindow
     proj = tmp_path / "project_20260925_101010"
     proj.mkdir()
     subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
@@ -357,6 +347,51 @@ def test_music_in_editor_window(tmp_path, qt_app):
         assert w.project.music is not None
         w.project.save()
         assert json.loads((proj / "edit.json").read_text())["music"]["src"] == w.project.music.src
+    finally:
+        w.player.shutdown()
+        w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_editor_single_key_shortcuts(tmp_path, qt_app):
+    """Z/C/F/G/S/Delete в редакторе — в английской и в русской раскладке."""
+    import json
+
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.window import EditorWindow
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "3", "-pix_fmt", "yuv420p", str(proj / "piece_0000.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"), "clips": [
+        {"file": "piece_0000.mp4", "duration": 3.0, "cursor": [[0.5, 0.2, 0.2]], "clicks": [[1.0, 0.2, 0.2]]}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    w.isActiveWindow = lambda: True
+    w.show()
+
+    def press(key, text):
+        w.eventFilter(w, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, text))
+    try:
+        c = w.project.clips[0]
+        assert c.motion == "none" and c.click_fx
+        press(Qt.Key.Key_Z, "z")
+        assert c.motion == "autozoom"
+        press(0x44F, "я")                   # «я» — та же клавиша, что Z, в русской раскладке
+        assert c.motion == "none"
+        press(Qt.Key.Key_C, "c")
+        assert not c.click_fx
+        press(Qt.Key.Key_G, "g")
+        assert c.frame_for(w.project.aspect)[0] > 1.0 or w.project.aspect == "16:9"
+        press(Qt.Key.Key_F, "f")
+        assert c.frame_for(w.project.aspect) == (1.0, 0.0, 0.0)
+        w.player.seek(1.5)
+        press(0x44B, "ы")                   # S в русской раскладке — разрезать
+        assert len(w.project.clips) == 2
+        press(Qt.Key.Key_Backspace, "")
+        assert len(w.project.clips) == 1
     finally:
         w.player.shutdown()
         w.close()

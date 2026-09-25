@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from worklapse import paths
-from worklapse.recorder import webcam
-from worklapse.recorder.webcam import CamClip, CamStore, Webcam
+from glimpsy import paths
+from glimpsy.recorder import webcam
+from glimpsy.recorder.webcam import CamClip, CamStore, Webcam
 
 FFMPEG = paths.find_executable("ffmpeg")
 FAKE_CAM = ["-f", "lavfi", "-i", "testsrc2=size=640x480:rate=30"]
@@ -81,8 +81,8 @@ def test_broken_camera_gives_up(tmp_path):
 
 
 def test_place_camera():
-    from worklapse.assembler import Piece, place_camera
-    from worklapse.recorder.candidates import Candidate
+    from glimpsy.assembler import Piece, place_camera
+    from glimpsy.recorder.candidates import Candidate
 
     pieces = []
     for i in range(10):         # 10 кусков по 4 с, сняты с интервалом в минуту
@@ -100,12 +100,12 @@ def test_place_camera():
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 def test_assemble_with_camera(tmp_path):
     """Сборка ролика: окошко с камеры в правом нижнем углу, в проекте редактора — наложение."""
-    from worklapse.assembler import Assembler
-    from worklapse.config import Settings
-    from worklapse.editor.project import Project
-    from worklapse.recorder.candidates import Candidate
-    from worklapse.recorder.encoder import software_encoder
-    from worklapse.recorder.pacing import make_plan
+    from glimpsy.assembler import Assembler
+    from glimpsy.config import Settings
+    from glimpsy.editor.project import Project
+    from glimpsy.recorder.candidates import Candidate
+    from glimpsy.recorder.encoder import software_encoder
+    from glimpsy.recorder.pacing import make_plan
 
     sess = tmp_path / "session_20260925_120000"
     sess.mkdir()

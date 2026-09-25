@@ -1,0 +1,92 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Рецепт сборки PyInstaller для всех трёх систем:
+#   pyinstaller glimpsy.spec --noconfirm
+# Результат: dist/Glimpsy/ (Windows, Linux) или dist/Glimpsy.app (macOS).
+# FFmpeg должен лежать в vendor/ffmpeg/ (см. scripts/fetch_ffmpeg.py).
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(SPECPATH)
+__version__ = re.search(r'__version__ = "(.+?)"', (ROOT / "glimpsy" / "__init__.py").read_text()).group(1)
+IS_WIN = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+ffmpeg = ROOT / "vendor" / "ffmpeg" / ("ffmpeg.exe" if IS_WIN else "ffmpeg")
+if not ffmpeg.exists():
+    raise SystemExit("Нет vendor/ffmpeg — сначала выполните: python scripts/fetch_ffmpeg.py")
+
+# Распознавание речи для автосубтитров (scripts/build_whisper.py). Без него всё остальное работает.
+whisper = ROOT / "vendor" / "whisper" / ("whisper-cli.exe" if IS_WIN else "whisper-cli")
+binaries = [(str(ffmpeg), "ffmpeg")]
+if whisper.exists():
+    binaries.append((str(whisper), "whisper"))
+else:
+    print("ВНИМАНИЕ: нет vendor/whisper — автосубтитры в этой сборке работать не будут")
+
+hidden = [
+    "pynput.keyboard._win32", "pynput.mouse._win32",
+    "pynput.keyboard._darwin", "pynput.mouse._darwin",
+    "pynput.keyboard._xorg", "pynput.mouse._xorg",
+]
+if sys.platform.startswith("linux"):
+    hidden += ["Xlib", "jeepney", "jeepney.io.blocking"]
+
+a = Analysis(
+    [str(ROOT / "glimpsy" / "__main__.py")],
+    pathex=[str(ROOT)],
+    binaries=binaries,
+    datas=[(str(ROOT / "assets" / "icon.png"), "assets")],
+    hiddenimports=hidden,
+    # Лишние модули Qt сильно раздувают сборку — нам они не нужны
+    excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQml",
+              "PySide6.QtQuick", "PySide6.Qt3DCore", "PySide6.QtCharts",
+              "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtSql", "PySide6.QtTest"],
+    noarchive=False,
+)
+# Linux: системные библиотеки C++ берём с компьютера пользователя, а не со сборочной машины.
+# Драйверы видеокарты (Mesa, NVIDIA) собраны под свежую libstdc++ системы; со старой копией из
+# сборки они не загружаются или роняют программу (видео в редакторе, аппаратный кодек).
+if sys.platform.startswith("linux"):
+    SYSTEM_ONLY = ("libstdc++.so", "libgcc_s.so")
+    a.binaries = [b for b in a.binaries if not Path(b[0]).name.startswith(SYSTEM_ONLY)]
+
+pyz = PYZ(a.pure)
+
+icon = str(ROOT / "assets" / "icon.png")
+
+# GLIMPSY_ONEFILE=1 — один переносной файл Glimpsy.exe (удобно, но стартует медленнее:
+# при каждом запуске распаковывается во временную папку). По умолчанию — папка с программой.
+ONEFILE = __import__("os").environ.get("GLIMPSY_ONEFILE") == "1"
+
+if ONEFILE:
+    exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name="Glimpsy", console=False, icon=icon, upx=False)
+else:
+    exe = EXE(
+        pyz, a.scripts, [],
+        exclude_binaries=True,
+        name="Glimpsy",
+        console=False,          # без чёрного окна консоли
+        icon=icon,
+        upx=False,
+    )
+    coll = COLLECT(exe, a.binaries, a.datas, name="Glimpsy", upx=False)
+
+if IS_MAC and not ONEFILE:
+    app = BUNDLE(
+        coll,
+        name="Glimpsy.app",
+        icon=icon,
+        bundle_identifier="io.github.glimpsy",
+        version=__version__,
+        info_plist={
+            "CFBundleName": "Glimpsy",
+            "CFBundleDisplayName": "Glimpsy",
+            "CFBundleShortVersionString": __version__,
+            "LSUIElement": True,             # только иконка в строке меню, без значка в Dock
+            "NSHighResolutionCapable": True,
+            "NSCameraUsageDescription": "Glimpsy может иногда сохранять фрагменты с веб-камеры.",
+            "NSAppleEventsUsageDescription": "Glimpsy проверяет активное приложение для чёрного списка.",
+        },
+    )

@@ -1,4 +1,4 @@
-from worklapse.config import Settings, load_settings, save_settings
+from glimpsy.config import Settings, load_settings, save_settings
 
 
 def test_roundtrip(tmp_path):
@@ -26,7 +26,7 @@ def test_clean_child_environment(monkeypatch):
     """Собранная программа на Linux не должна передавать свои библиотеки FFmpeg и другим программам."""
     import sys
 
-    from worklapse import paths
+    from glimpsy import paths
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     env = {"LD_LIBRARY_PATH": "/tmp/_MEI/_internal", "LD_LIBRARY_PATH_ORIG": "/opt/lib"}
@@ -38,9 +38,24 @@ def test_clean_child_environment(monkeypatch):
 
 
 def test_error_summary():
-    from worklapse.recorder.encoder import error_summary
+    from glimpsy.recorder.encoder import error_summary
     err = ("[VAAPI @ 0x1] libva error: /usr/lib/dri/radeonsi_drv_video.so init failed\n"
            "/tmp/x/libstdc++.so.6: version `GLIBCXX_3.4.32' not found (required by /usr/lib/libSPIRV-Tools.so)\n"
            "Device creation failed: -5.\n")
     s = error_summary(err)
     assert "GLIBCXX_3.4.32" in s and s.startswith("[VAAPI")
+
+
+def test_old_default_hotkeys_migrate():
+    from glimpsy.config import Settings
+    s = Settings(hotkey_important="Ctrl+Alt+S", hotkey_pause="Ctrl+Alt+P", hotkey_finish="Ctrl+Alt+E").validate()
+    assert (s.hotkey_important, s.hotkey_pause, s.hotkey_finish) == ("Ctrl+Alt+1", "Ctrl+Alt+2", "Ctrl+Alt+3")
+    own = Settings(hotkey_important="Ctrl+Alt+S", hotkey_pause="Ctrl+Shift+F9", hotkey_finish="Ctrl+Alt+E").validate()
+    assert own.hotkey_important == "Ctrl+Alt+S"          # свои сочетания пользователя не трогаем
+
+
+def test_digit_hotkeys_formats():
+    from glimpsy.platform import hotkey_format as hf
+    assert hf.to_pynput("Ctrl+Alt+1") == "<ctrl>+<alt>+1"
+    assert hf.to_win32("Ctrl+Alt+3") == (0x2 | 0x1, ord("3"))
+    assert hf.to_portal("Ctrl+Alt+2") == "CTRL+ALT+2"

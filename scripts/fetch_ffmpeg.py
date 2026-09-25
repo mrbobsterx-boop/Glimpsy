@@ -41,7 +41,7 @@ def source() -> tuple[str, str]:
 
 def download(url: str) -> bytes:
     print(f"Скачиваю {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "worklapse-build"})
+    req = urllib.request.Request(url, headers={"User-Agent": "glimpsy-build"})
     with urllib.request.urlopen(req, timeout=300) as r:
         return r.read()
 

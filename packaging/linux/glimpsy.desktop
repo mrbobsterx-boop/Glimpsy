@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Glimpsy
+Comment=Фоновая запись рабочего процесса и автосборка ролика
+Exec=Glimpsy
+Icon=glimpsy
+Categories=AudioVideo;Video;Recorder;
+Terminal=false
+X-GNOME-UsesNotifications=true

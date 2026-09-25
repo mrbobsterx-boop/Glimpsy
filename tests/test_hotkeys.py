@@ -1,6 +1,6 @@
 import pytest
 
-from worklapse.platform import hotkey_format as hf
+from glimpsy.platform import hotkey_format as hf
 
 
 def test_pynput_format():

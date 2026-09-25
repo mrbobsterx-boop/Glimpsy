@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Worklapse
-Comment=Фоновая запись рабочего процесса и автосборка ролика
-Exec=Worklapse
-Icon=worklapse
-Categories=AudioVideo;Video;Recorder;
-Terminal=false
-X-GNOME-UsesNotifications=true

@@ -6,10 +6,10 @@ import subprocess
 import numpy as np
 import pytest
 
-from worklapse import paths
-from worklapse.editor import subtitles as S
-from worklapse.editor.project import Clip, Project
-from worklapse.editor.text import TextItem
+from glimpsy import paths
+from glimpsy.editor import subtitles as S
+from glimpsy.editor.project import Clip, Project
+from glimpsy.editor.text import TextItem
 
 FFMPEG = paths.find_executable("ffmpeg")
 WHISPER = paths.find_executable("whisper-cli")

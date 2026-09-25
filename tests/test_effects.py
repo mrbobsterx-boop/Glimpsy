@@ -5,9 +5,9 @@ import subprocess
 import numpy as np
 import pytest
 
-from worklapse import paths
-from worklapse.editor import clicks, motion
-from worklapse.recorder.activity import ActivityTracker
+from glimpsy import paths
+from glimpsy.editor import clicks, motion
+from glimpsy.recorder.activity import ActivityTracker
 
 FFMPEG = paths.find_executable("ffmpeg")
 

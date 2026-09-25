@@ -11,8 +11,8 @@ import time
 
 import pytest
 
-from worklapse import paths
-from worklapse.config import Settings
+from glimpsy import paths
+from glimpsy.config import Settings
 
 FFMPEG = paths.find_executable("ffmpeg")
 pytestmark = pytest.mark.skipif(
@@ -22,13 +22,13 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_buffer_clip_and_assemble(tmp_path):
-    from worklapse.assembler import Assembler
-    from worklapse.platform.capture import X11GrabCapture
-    from worklapse.recorder.activity import ActivityTracker
-    from worklapse.recorder.candidates import Candidate
-    from worklapse.recorder.encoder import pick_encoder
-    from worklapse.recorder.pacing import make_plan
-    from worklapse.recorder.ring_buffer import BufferRun
+    from glimpsy.assembler import Assembler
+    from glimpsy.platform.capture import X11GrabCapture
+    from glimpsy.recorder.activity import ActivityTracker
+    from glimpsy.recorder.candidates import Candidate
+    from glimpsy.recorder.encoder import pick_encoder
+    from glimpsy.recorder.pacing import make_plan
+    from glimpsy.recorder.ring_buffer import BufferRun
 
     cap = X11GrabCapture()
     mon = cap.monitors()[0]

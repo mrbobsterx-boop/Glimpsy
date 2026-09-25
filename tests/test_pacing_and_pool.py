@@ -1,9 +1,9 @@
 import random
 
-from worklapse.assembler import best_window, select_pieces
-from worklapse.config import Settings
-from worklapse.recorder.candidates import Candidate, CandidatePool
-from worklapse.recorder.pacing import make_plan, save_probability
+from glimpsy.assembler import best_window, select_pieces
+from glimpsy.config import Settings
+from glimpsy.recorder.candidates import Candidate, CandidatePool
+from glimpsy.recorder.pacing import make_plan, save_probability
 
 
 def cand(i, t, score, priority=False, dur=8.0):
