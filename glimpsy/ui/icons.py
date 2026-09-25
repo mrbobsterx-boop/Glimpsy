@@ -10,6 +10,7 @@ COLORS = {
     "idle": "#F5A524",        # жёлтый — автопауза
     "paused": "#8B8D98",      # серый — пауза
     "private": "#8E4EC6",     # фиолетовый — приватное окно
+    "waiting": "#22AEBB",     # бирюзовый — поток ждёт своего окна
     "assembling": "#3E63DD",  # синий — сборка
     "error": "#E5484D",
     "stopped": "#8B8D98",
@@ -41,7 +42,7 @@ def state_icon(state: str, size: int = 64) -> QIcon:
     p.setPen(Qt.PenStyle.NoPen)
     color = QColor(COLORS.get(state, "#8B8D98"))
     p.setBrush(color)
-    if state in ("paused", "idle", "private"):
+    if state in ("paused", "idle", "private", "waiting"):
         w, h = size * 0.08, size * 0.24
         p.drawRoundedRect(QRectF(c - w * 1.5, c - h / 2, w, h), 1.5, 1.5)
         p.drawRoundedRect(QRectF(c + w * 0.5, c - h / 2, w, h), 1.5, 1.5)

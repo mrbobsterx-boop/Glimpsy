@@ -29,6 +29,7 @@ from glimpsy.paths import subprocess_flags
 from glimpsy.recorder.candidates import Candidate
 from glimpsy.recorder.encoder import Encoder, software_encoder
 from glimpsy.recorder.pacing import Plan
+from glimpsy.recorder.streams import crop_filter
 from glimpsy.recorder.webcam import CamClip, load_clips
 
 log = logging.getLogger(__name__)
@@ -186,8 +187,12 @@ class Assembler:
         self.plan = plan
 
     def run(self, session_dir: Path, cands: list[Candidate], session_start: float,
-            progress: Progress | None = None, project_dir: Path | None = None) -> Path:
+            progress: Progress | None = None, project_dir: Path | None = None,
+            name: str = "", shared_dir: Path | None = None) -> Path:
+        """session_dir — где лежат кандидаты; shared_dir — общая папка сессии (камера, статистика),
+        если кандидаты в подпапке потока; name — название потока (добавляется к имени ролика)."""
         progress = progress or (lambda f, t: None)
+        shared_dir = shared_dir or session_dir
         pieces = select_pieces(cands, self.plan, self.s)
         if not pieces:
             raise AssemblyError("Нет подходящих фрагментов: запись была слишком короткой "
@@ -218,18 +223,21 @@ class Assembler:
         progress(len(pieces) / (len(pieces) + 1), "Склейка")
         out_dir = Path(self.s.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        final = unique_path(out_dir / time.strftime("Glimpsy_%Y-%m-%d_%H-%M.mp4", time.localtime(session_start)))
+        stem = time.strftime("Glimpsy_%Y-%m-%d_%H-%M", time.localtime(session_start))
+        if name:
+            stem += "_" + safe_name(name)
+        final = unique_path(out_dir / f"{stem}.mp4")
         list_file = work / "concat.txt"
         list_file.write_text("".join(f"file '{r.name}'\n" for r in rendered), encoding="utf-8")
         tmp_final = work / "final.mp4"
         self._ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy",
                       "-movflags", "+faststart", str(tmp_final)])
-        cams = place_camera(pieces, load_clips(session_dir))
+        cams = place_camera(pieces, load_clips(shared_dir))
         if cams:
             progress(len(pieces) / (len(pieces) + 1), "Окошко с веб-камеры")
             with_cam = work / "final_cam.mp4"
             try:
-                self._add_camera(tmp_final, cams, session_dir / "camera", with_cam)
+                self._add_camera(tmp_final, cams, shared_dir / "camera", with_cam)
                 tmp_final = with_cam
             except AssemblyError:
                 log.exception("Не удалось добавить фрагменты с камеры — ролик без них")
@@ -238,14 +246,14 @@ class Assembler:
 
         if project_dir is not None:
             self._save_project(project_dir, pieces, [clean.get(i, r) for i, r in enumerate(rendered)], final,
-                               cams, session_dir / "camera")
-            stats = session_dir / "stats.json"
+                               cams, shared_dir / "camera", name)
+            stats = shared_dir / "stats.json"
             if stats.exists():                 # статистика дня — для вкладки в редакторе
                 shutil.copy2(stats, project_dir / "stats.json")
         progress(1.0, "Готово")
         return final
 
-    def _effects_graph(self, p: Piece, W: int, H: int, fps: int) -> tuple[str, str]:
+    def _effects_graph(self, p: Piece, W: int, H: int, fps: int, effects: bool = True) -> tuple[str, str]:
         """Круги кликов и приближение к месту работы. Возвращает (граф до ускорения, метку выхода)."""
         from glimpsy.editor import motion
         from glimpsy.editor.clicks import ripple_graph
@@ -253,17 +261,23 @@ class Assembler:
         c = p.cand
         t0, t1 = p.offset, p.offset + p.source_s
         parts, label = [], "0:v"
+        if c.crop:                       # поток «только окно»: сначала вырезаем окно из кадра
+            parts.append(f"[0:v]{crop_filter(c.crop)}[crp]")
+            label = "crp"
         # ширина видео в записи (высокие экраны при записи уменьшаются до record_max_height)
         rh = min(c.height, self.s.record_max_height) if c.height else 0
         stream_w = int(c.width * rh / c.height) if c.height else c.width
-        if self.s.fx_clicks and c.clicks:
-            rip = ripple_graph("0:v", "rip", c.clicks, t0, t1, p.speed, stream_w)
+        if c.crop:
+            stream_w = int(stream_w * c.crop[2])
+        cw, ch = c.size
+        if effects and self.s.fx_clicks and c.clicks:
+            rip = ripple_graph(label, "rip", c.clicks, t0, t1, p.speed, stream_w)
             if rip:
                 parts.append(rip)
                 label = "rip"
-        if self.s.fx_zoom and (c.cursor or c.clicks) and c.width and c.height:
-            k = min(W / c.width, H / c.height)
-            zw, zh = max(2, int(c.width * k) // 2 * 2), max(2, int(c.height * k) // 2 * 2)
+        if effects and self.s.fx_zoom and (c.cursor or c.clicks) and cw and ch:
+            k = min(W / cw, H / ch)
+            zw, zh = max(2, int(cw * k) // 2 * 2), max(2, int(ch * k) // 2 * 2)
             track = motion.autozoom_track(c.cursor, c.duration, self.s.fx_zoom_strength, c.clicks)
             parts.append(f"[{label}]{motion.autozoom_filter(track, t0, t1, zw, zh, fps)}[zm]")
             label = "zm"
@@ -273,7 +287,7 @@ class Assembler:
                       audio: str = "none") -> None:
         """audio: none — без звука; voice — звук только у речи (у остальных тишина); all — звук у всех."""
         W, H, fps = self.s.output_width, self.s.output_height, self.s.fps
-        pre, label = self._effects_graph(p, W, H, fps) if effects else ("", "0:v")
+        pre, label = self._effects_graph(p, W, H, fps, effects)
         vf = [f"setpts=(PTS-STARTPTS)/{p.speed:.4f}", f"fps={fps}",
               f"scale={W}:{H}:force_original_aspect_ratio=decrease",
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114", "setsar=1"]
@@ -315,9 +329,9 @@ class Assembler:
                     self._ffmpeg(cmd(self.encoder))
                     return
                 except AssemblyError:
-                    if not pre:
+                    if not effects or not self._has_effects(p):
                         raise
-            elif not pre:
+            elif not effects or not self._has_effects(p):
                 raise
             log.exception("Эффекты (зум/клики) не получились — фрагмент без них")
             self._render_piece(src, p, out, fade, effects=False, audio=audio)
@@ -370,7 +384,8 @@ class Assembler:
             raise AssemblyError("FFmpeg: " + r.stderr.decode("utf-8", "replace")[-800:])
 
     def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path,
-                      cams: list[CamPlacement] | None = None, cam_dir: Path | None = None) -> None:
+                      cams: list[CamPlacement] | None = None, cam_dir: Path | None = None,
+                      name: str = "") -> None:
         """Сохраняем готовые фрагменты и данные для будущего редактора (этап 2)."""
         project_dir.mkdir(parents=True, exist_ok=True)
         items = []
@@ -385,7 +400,7 @@ class Assembler:
             items.append({
                 "file": dest.name, "duration": round(p.out_s, 3), "speed": p.speed,
                 "recorded_at": c.wall_start + p.offset, "monitor": c.monitor,
-                "source_size": [c.width, c.height], "priority": c.priority, "score": round(c.score, 3),
+                "source_size": list(c.size), "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor, "clicks": clicks,
                 "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id, "voice": c.voice_id,
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
@@ -403,7 +418,16 @@ class Assembler:
                            "width": c.clip.width, "height": c.clip.height, "recorded_at": c.clip.start})
         meta = {"version": 1, "output": str(final), "width": self.s.output_width,
                 "height": self.s.output_height, "fps": self.s.fps, "clips": items, "camera": camera}
+        if name:
+            meta["stream"] = name
         (project_dir / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def safe_name(name: str) -> str:
+    """Название потока → часть имени файла (без символов, запрещённых в Windows)."""
+    bad = '<>:"/\\|?*'
+    out = "".join("_" if ch in bad or ord(ch) < 32 else ch for ch in name).strip(" .")
+    return out[:40] or "поток"
 
 
 def unique_path(p: Path) -> Path:

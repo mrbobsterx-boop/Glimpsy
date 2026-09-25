@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import time
@@ -165,6 +166,9 @@ class SessionsDialog(QDialog):
                 log.exception("Проект %s не читается", d)
                 continue
             when = time.strftime("%d.%m.%Y, %H:%M", time.localtime(p.created or d.stat().st_mtime))
+            stream = _stream_name(d)
+            if stream:                      # запись отдельного окна (поток)
+                when += f" · {stream}"
             info = f"{len(p.clips)} фрагм. · {fmt_time(p.total)}"
             if p.edited:
                 info += " · изменён"
@@ -222,3 +226,10 @@ class SessionsDialog(QDialog):
         if ans == QMessageBox.StandardButton.Yes:
             shutil.rmtree(d, ignore_errors=True)
             self.reload()
+
+
+def _stream_name(d: Path) -> str:
+    try:
+        return str(json.loads((d / "project.json").read_text(encoding="utf-8")).get("stream", ""))
+    except (OSError, ValueError):
+        return ""

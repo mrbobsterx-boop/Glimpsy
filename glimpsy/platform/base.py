@@ -48,6 +48,8 @@ class CaptureInput:
 class WindowInfo:
     app: str = ""
     title: str = ""
+    wid: int = 0                                        # номер окна в системе (для «только это окно»)
+    rect: tuple[int, int, int, int] | None = None       # где окно на экране: x, y, ширина, высота
 
     def matched(self, patterns: list[str]) -> str | None:
         """Какое слово из чёрного списка нашлось в названии программы или заголовке окна."""

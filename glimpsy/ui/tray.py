@@ -36,6 +36,8 @@ class TrayController(QObject):
         self._settings_open = False
         self._sessions = None
         self._editors: list = []
+        self._picker = None
+        self._stream_next = 1
 
         self.menu = QMenu()
         self.a_status = self.menu.addAction("…")
@@ -51,6 +53,8 @@ class TrayController(QObject):
                                             self._finish)
         self.a_start = self.menu.addAction(ic("circle", theme.DANGER, 16), "Начать запись", self.engine.start_session)
         self.menu.addSeparator()
+        self.streams_menu = self.menu.addMenu(ic("app-window", size=16), "Что записывать")
+        self.streams_menu.aboutToShow.connect(self._fill_streams_menu)
         self.monitor_menu = self.menu.addMenu(ic("monitor", size=16), "Монитор")
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
         self.menu.addAction(ic("film", size=16), "Редактор роликов…", self.open_editor)
@@ -101,7 +105,9 @@ class TrayController(QObject):
         self.status = st
         state = st.get("state", State.STOPPED)
         label = st.get("label", "")
-        if st.get("monitor") and state == State.RECORDING:
+        if st.get("stream") and state == State.RECORDING:
+            label += f" — «{st['stream']}»"
+        elif st.get("monitor") and state == State.RECORDING:
             label += f" — {st['monitor']}"
         self.a_status.setText(label)
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
@@ -147,14 +153,21 @@ class TrayController(QObject):
             self._win_status.setText(tip)
 
     def _on_done(self, path: str) -> None:
-        self._last_video = Path(path)
-        self.show_message("🎬 Ролик готов!", f"{Path(path).name}\nНажмите, чтобы открыть папку.")
+        files = [Path(p) for p in path.split("\n") if p]
+        if not files:
+            return
+        self._last_video = files[0]
+        if len(files) == 1:
+            self.show_message("🎬 Ролик готов!", f"{files[0].name}\nНажмите, чтобы открыть папку.")
+        else:
+            self.show_message(f"🎬 Готово роликов: {len(files)}",
+                              "\n".join(f.name for f in files) + "\nНажмите, чтобы открыть папку.")
 
     def _open_last_video(self) -> None:
         if self._last_video:
             paths.open_in_file_manager(self._last_video.parent)
 
-    QUIET_STATES = (State.STARTING, State.RECORDING, State.IDLE, State.PRIVATE)
+    QUIET_STATES = (State.STARTING, State.RECORDING, State.IDLE, State.PRIVATE, State.WAITING)
 
     def _quiet(self) -> bool:
         """Идёт запись — всплывающие уведомления попали бы в ролик, поэтому молчим."""
@@ -278,6 +291,55 @@ class TrayController(QObject):
             self.monitor_menu.addSeparator()
             self.monitor_menu.addAction("Выбрать экран заново…", self.engine.reselect_screen)
 
+    # ---------- что записывать: весь экран или только выбранные окна ----------
+
+    def _fill_streams_menu(self) -> None:
+        from glimpsy.recorder.streams import MAX_STREAMS
+        from glimpsy.ui.stream_picker import describe
+
+        m = self.streams_menu
+        m.clear()
+        specs = self.engine.streams
+        whole = QAction("Весь экран", m, checkable=True)
+        whole.setChecked(not specs)
+        whole.triggered.connect(lambda: self.engine.set_streams([]))
+        m.addAction(whole)
+        if specs:
+            m.addSeparator()
+            for sp in specs:
+                sub = m.addMenu(theme.icon("app-window", theme.ACCENT, 16), describe(sp))
+                sub.addAction(theme.icon("x", size=16), "Больше не записывать",
+                              lambda _=False, i=sp.id: self._remove_stream(i))
+        m.addSeparator()
+        add = m.addAction(theme.icon("plus", size=16),
+                          "Только одно окно…" if not specs else "Ещё одно окно (свой ролик)…", self._add_stream)
+        add.setEnabled(len(specs) < MAX_STREAMS and self.services.active_window.supported)
+        hint = m.addAction("Каждое окно — отдельный ролик. Впереди другое окно — запись ждёт."
+                           if specs else f"До {MAX_STREAMS} окон одновременно, каждое — в свой ролик.")
+        hint.setEnabled(False)
+
+    def _add_stream(self) -> None:
+        from glimpsy.ui.stream_picker import StreamPicker
+
+        if self._picker is not None:
+            self._picker.showNormal()
+            self._picker.raise_()
+            return
+        sid = self._stream_next
+        self._stream_next += 1
+
+        def done(spec) -> None:
+            self.engine.set_streams([*self.engine.streams, spec])
+            if not self.engine.running:
+                self.engine.start_session()
+
+        self._picker = StreamPicker(self.services.active_window, sid, done, first=not self.engine.streams)
+        self._picker.destroyed.connect(lambda: setattr(self, "_picker", None))
+        self._picker.show()
+
+    def _remove_stream(self, sid: int) -> None:
+        self.engine.set_streams([sp for sp in self.engine.streams if sp.id != sid])
+
     def _set_monitor(self, mode: str, index: int) -> None:
         import copy
 
@@ -386,7 +448,7 @@ class TrayController(QObject):
             self.bind_hotkeys()
 
     def quit(self) -> None:
-        if self.engine.pool and self.engine.pool.count:
+        if self.engine.candidate_count:
             ans = QMessageBox.question(
                 None, "Glimpsy",
                 "Выйти без сборки ролика?\nСохранённые фрагменты останутся — при следующем запуске "

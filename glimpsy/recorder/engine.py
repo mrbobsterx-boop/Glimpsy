@@ -37,6 +37,8 @@ from glimpsy.recorder.encoder import Encoder, pick_encoder, software_encoder
 from glimpsy.recorder.pacing import Plan, make_plan, save_probability
 from glimpsy.recorder.ring_buffer import BufferRun
 from glimpsy.recorder.audio import AudioCapture, write_wav
+from glimpsy.recorder import streams as streams_mod
+from glimpsy.recorder.streams import StreamSpec
 from glimpsy.recorder.webcam import MODES as CAM_MODES, CamClip, CamStore, Webcam
 
 log = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class State:
     IDLE = "idle"
     PAUSED = "paused"
     PRIVATE = "private"
+    WAITING = "waiting"          # потоки: впереди не то окно — ждём, пока вернётесь
     ASSEMBLING = "assembling"
     ERROR = "error"
 
@@ -64,6 +67,7 @@ STATE_LABELS = {
     State.IDLE: "Пауза: нет активности",
     State.PAUSED: "Пауза",
     State.PRIVATE: "Пауза: приватное приложение",
+    State.WAITING: "Пауза: ждёт окна потока",
     State.ASSEMBLING: "Собираю ролик…",
     State.ERROR: "Ошибка записи",
 }
@@ -97,6 +101,8 @@ class RecorderEngine(QObject):
         self._thread: threading.Thread | None = None
         self._rng = random.Random()
         self.state = State.STOPPED
+        self.streams: list[StreamSpec] = []      # пусто — весь экран; иначе только эти окна
+        self._streams_lock = threading.Lock()
         self._reset_session_fields()
 
     def _reset_session_fields(self) -> None:
@@ -134,6 +140,15 @@ class RecorderEngine(QObject):
         self._stats_saved = 0.0
         self._cur_app = ""
         self._cam_next = 0.0
+        self._cam_seconds = 0.0
+        # потоки: у каждого свой набор кандидатов и свои счётчики
+        self.pools: dict[int, CandidatePool] = {}
+        self._stream = 0                          # 0 — весь экран
+        self._stream_names: dict[int, str] = {}
+        self._stream_state: dict[int, tuple[float, float, float]] = {}
+        self._waiting = False
+        self._win_rect: tuple[int, int, int, int] | None = None
+        self._rects: list[tuple[float, tuple[int, int, int, int] | None]] = []
 
     # ======================= публичные команды (из интерфейса) =======================
 
@@ -160,7 +175,7 @@ class RecorderEngine(QObject):
             self._reset_session_fields()
             self.session_dir = session_dir
             self.session_start = float(_read_json(session_dir / "session.json").get("start", time.time()))
-            self.pool = CandidatePool(session_dir)
+            self._load_pools(session_dir)
             self._assemble()
 
         self._thread = threading.Thread(target=work, daemon=True, name="assemble")
@@ -188,6 +203,14 @@ class RecorderEngine(QObject):
             self._cmds.put(("settings", s))
         else:
             self.s, self.plan = s, make_plan(s)
+
+    def set_streams(self, specs: list[StreamSpec]) -> None:
+        """Какие окна записывать (до трёх, каждое — в свой ролик). Пустой список — весь экран."""
+        specs = [copy.deepcopy(x) for x in specs[:streams_mod.MAX_STREAMS]]
+        with self._streams_lock:
+            self.streams = specs
+        if self.running:
+            self._cmds.put(("streams", specs))
 
     def reselect_screen(self) -> None:
         """Wayland: заново показать системное окно выбора экрана."""
@@ -239,7 +262,8 @@ class RecorderEngine(QObject):
             self.session_dir.mkdir(parents=True, exist_ok=True)
             (self.session_dir / "session.json").write_text(json.dumps({"start": self.session_start}))
         shutil.rmtree(self.session_dir / "buffer", ignore_errors=True)  # старый буфер не нужен
-        self.pool = CandidatePool(self.session_dir)
+        self._load_pools(self.session_dir)
+        self._set_streams(self.streams)
         self.activity = ActivityTracker(self.services.input_events_supported, self.services.input_backend)
         for err in self.activity.start():
             self.notify.emit("Glimpsy", err)
@@ -264,6 +288,8 @@ class RecorderEngine(QObject):
             self._mark_important(cmd[1])
         elif kind == "settings":
             self._apply_settings(cmd[1])
+        elif kind == "streams":
+            self._set_streams(cmd[1])
         elif kind == "reselect":
             self._close_run()
             self.services.capture.reset()
@@ -282,8 +308,8 @@ class RecorderEngine(QObject):
             self._audio_run(False)
             self._cam_stop()
             self._stop_listeners()
-            if self.pool:
-                self.pool.save()
+            for pool in self.pools.values():
+                pool.save()
             self._set_state(State.STOPPED)
             return "exit"
         return None
@@ -328,6 +354,7 @@ class RecorderEngine(QObject):
             win = self.services.active_window.active()
             hit = win.matched(self.s.blacklist) if win else None
             self._cur_app = "" if win is None else ("Приватное приложение" if hit else _app_name(win.app))
+            self._check_stream(win, now)
             private = hit is not None
             if private != self._private:
                 self._private = private
@@ -338,6 +365,14 @@ class RecorderEngine(QObject):
             self._cam_stop()
             self._audio_run(False)    # и ни звука (например, звонок в мессенджере)
             self._set_state(State.PRIVATE)
+            return
+
+        if self._waiting:
+            # потоки: впереди окно, которое не записывается — ждём, пока вы к нему вернётесь
+            self._close_run()
+            self._cam_stop()
+            self._audio_run(False)
+            self._set_state(State.WAITING)
             return
 
         self._audio_run(True)
@@ -353,6 +388,8 @@ class RecorderEngine(QObject):
 
         # --- 4. какой монитор снимать ---
         target = self._target_monitor(cursor_mon, now)
+        if self._stream:          # поток: снимаем тот монитор, где его окно
+            target = streams_mod.monitor_for(self._monitors, self._win_rect) or target
         if target is None:
             return
         if self.run and (self.run.monitor != target):
@@ -390,6 +427,7 @@ class RecorderEngine(QObject):
             self._last_second = sec
             if not idle:
                 self._active_seconds += 1
+                self._cam_seconds += 1
                 self._maybe_save(now)
                 self._maybe_camera()
         self._emit_status(now)
@@ -414,6 +452,84 @@ class RecorderEngine(QObject):
             self._pending_monitor = None
             return cursor_mon
         return self.run.monitor
+
+    # ======================= потоки (только выбранные окна) =======================
+
+    def _load_pools(self, session_dir: Path) -> None:
+        self.pools = {0: CandidatePool(session_dir)}
+        for d in sorted(session_dir.glob("stream_*")):
+            try:
+                self.pools[int(d.name.split("_", 1)[1])] = CandidatePool(d)
+            except ValueError:
+                continue
+        for sid, name in _read_json(session_dir / "streams.json").items():
+            self._stream_names[int(sid)] = name
+        self.pool = self.pools[0]
+
+    def _pool_for(self, sid: int) -> CandidatePool:
+        assert self.session_dir is not None
+        if sid not in self.pools:
+            self.pools[sid] = CandidatePool(self.session_dir / f"stream_{sid}" if sid else self.session_dir)
+        return self.pools[sid]
+
+    @property
+    def candidate_count(self) -> int:
+        return sum(p.count for p in self.pools.values())
+
+    def _set_streams(self, specs: list[StreamSpec]) -> None:
+        for sp in specs:
+            self._stream_names[sp.id] = sp.name
+        if self.session_dir is not None and self._stream_names:
+            try:
+                (self.session_dir / "streams.json").write_text(
+                    json.dumps({str(k): v for k, v in self._stream_names.items()}, ensure_ascii=False),
+                    encoding="utf-8")
+            except OSError:
+                log.exception("Не удалось сохранить список потоков")
+        if specs:
+            log.info("Потоки: %s", ", ".join(f"«{sp.name}» ({sp.mode})" for sp in specs))
+        else:
+            log.info("Потоки выключены — снимается весь экран")
+            self._waiting = False
+            self._switch_stream(0)
+        self._privacy_at = 0.0          # сразу проверить, какое окно впереди
+
+    def _check_stream(self, win, now: float) -> None:
+        """Какой поток сейчас впереди. Нет подходящего окна — запись ждёт."""
+        with self._streams_lock:
+            specs = list(self.streams)
+        if not specs:
+            self._waiting = False
+            return
+        spec = streams_mod.match(specs, win)
+        self._waiting = spec is None
+        if spec is None:
+            return
+        self._switch_stream(spec.id)
+        self._win_rect = win.rect if win else None
+        self._rects.append((now, self._win_rect))
+        cutoff = now - self.s.buffer_s - 10
+        while self._rects and self._rects[0][0] < cutoff:
+            self._rects.pop(0)
+
+    def _switch_stream(self, sid: int) -> None:
+        if sid == self._stream or self.session_dir is None:
+            return
+        self._close_run()            # фрагмент прошлого окна заканчивается здесь
+        self._stream_state[self._stream] = (self._last_save_end, self._active_seconds, self._avg_score)
+        self._stream = sid
+        self._last_save_end, self._active_seconds, self._avg_score = self._stream_state.get(sid, (0.0, 0.0, 0.0))
+        self.pool = self._pool_for(sid)
+        self._rects = []
+        self._win_rect = None
+        self._pending_monitor = None
+        log.info("Запись переключилась на %s", f"поток «{self._stream_names.get(sid, sid)}»" if sid else "весь экран")
+
+    def _crop(self, mon: Monitor, t0: float, t1: float) -> list[float] | None:
+        rects = [r for t, r in self._rects if r and t0 - 1 <= t <= t1 + 1]
+        if not rects and self._win_rect:
+            rects = [self._win_rect]
+        return streams_mod.crop_fraction(rects, mon)
 
     # ======================= буфер =======================
 
@@ -586,25 +702,28 @@ class RecorderEngine(QObject):
                 except OSError:
                     log.exception("Не удалось сохранить звук")
                     audio_name = ""
-        cursor = [[round(t - ws, 2), round(x, 4), round(y, 4)]
-                  for t, m, x, y in act.cursor_between(ws, we) if m == run.monitor.index]
+        crop = self._crop(run.monitor, ws, we) if self._stream else None
+        cursor = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
+                                      for t, m, x, y in act.cursor_between(ws, we) if m == run.monitor.index], crop)
+        clicks = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
+                                      for t, x, y in act.clicks_between(ws, we, run.monitor.index)], crop)
         cand = Candidate(
             id=cid, file=path.name, wall_start=ws, wall_end=we,
             want_start=max(t0, ws), want_end=min(t1, we), monitor=run.monitor.index,
             width=run.capture.width, height=run.capture.height,
             score=act.score(max(t0, ws), min(t1, we)), priority=priority,
             activity=[round(v, 3) for v in act.per_second(ws, we)], cursor=cursor,
-            clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)]
-                    for t, x, y in act.clicks_between(ws, we, run.monitor.index)],
+            clicks=clicks, crop=crop or [],
             audio=audio_name, voice_id=voice[0] if voice else 0, voice_part=voice[1] if voice else 0,
         )
         pool.add(cand)
         removed = pool.prune(self.plan.pool_size)
         pool.save()
         self._last_save_end = max(self._last_save_end, we)
-        log.info("Кандидат #%s: %.1f с, оценка %.2f%s%s%s (удалено %s)", cid, we - ws, cand.score,
+        log.info("Кандидат #%s: %.1f с, оценка %.2f%s%s%s%s (удалено %s)", cid, we - ws, cand.score,
                  ", ВАЖНЫЙ" if priority and not voice else "", f", РЕЧЬ {voice[0]}.{voice[1]}" if voice else "",
-                 ", со звуком" if audio_name else "", len(removed))
+                 ", со звуком" if audio_name else "",
+                 f", поток «{self._stream_names.get(self._stream, '')}»" if self._stream else "", len(removed))
         self._emit_status(time.time(), force=True)
         return ws, we
 
@@ -614,6 +733,9 @@ class RecorderEngine(QObject):
             return
         if self._private:
             self.notify.emit("Glimpsy", "Открыто приватное приложение — момент не сохранён.")
+            return
+        if self._waiting:
+            self.notify.emit("Glimpsy", "Впереди окно, которое не записывается, — момент не сохранён.")
             return
         if self.activity:
             self.activity.last_input_time = t   # пользователь точно активен
@@ -692,7 +814,7 @@ class RecorderEngine(QObject):
             return
         self.cam = cam
         # первый фрагмент — пораньше, чтобы и короткая сессия получила хотя бы один
-        self._cam_next = self._active_seconds + interval * self._rng.uniform(0.15, 0.5)
+        self._cam_next = self._cam_seconds + interval * self._rng.uniform(0.15, 0.5)
 
     def _maybe_camera(self) -> None:
         cam, store = self.cam, self.cam_store
@@ -704,7 +826,7 @@ class RecorderEngine(QObject):
             if isinstance(got, CamClip):
                 store.add(got, keep=max(3, self.plan.clips_needed // 3))
                 log.info("Фрагмент с камеры: %.1f с (всего %s)", got.duration, len(store.items))
-                self._cam_next = self._active_seconds + interval * self._rng.uniform(0.6, 1.4)
+                self._cam_next = self._cam_seconds + interval * self._rng.uniform(0.6, 1.4)
             elif got is False:
                 if cam.gave_up:
                     self.notify.emit("Glimpsy", "Не получилось снять с веб-камеры (возможно, она занята "
@@ -712,9 +834,9 @@ class RecorderEngine(QObject):
                                                   "камера больше не включается.")
                     self.cam = None
                 else:
-                    self._cam_next = self._active_seconds + 30
+                    self._cam_next = self._cam_seconds + 30
             return
-        if self._active_seconds >= self._cam_next:
+        if self._cam_seconds >= self._cam_next:
             cam.start(store.new_path(), self.s.camera_clip_s)
 
     def _cam_stop(self) -> None:
@@ -737,32 +859,52 @@ class RecorderEngine(QObject):
     # ======================= сборка =======================
 
     def _assemble(self) -> None:
-        assert self.pool is not None and self.session_dir is not None
+        assert self.session_dir is not None
         self._set_state(State.ASSEMBLING)
-        pool = self.pool
-        if not pool.items:
+        pools = {sid: p for sid, p in sorted(self.pools.items()) if p.items}
+        if not pools:
             self.assembly_failed.emit("За эту сессию не сохранилось ни одного фрагмента.")
             shutil.rmtree(self.session_dir, ignore_errors=True)
             self._set_state(State.STOPPED)
             return
         encoder = self.encoder or pick_encoder(self.ffmpeg, self.s.encoder, self.s.fps)
-        project_dir = None
-        if self.s.keep_project_for_editor:
-            project_dir = paths.data_dir() / "projects" / self.session_dir.name.replace("session_", "project_")
-        try:
-            out = Assembler(self.ffmpeg, encoder, self.s, self.plan).run(
-                self.session_dir, pool.items, self.session_start,
-                progress=lambda f, t: self.assembly_progress.emit(f, t), project_dir=project_dir,
-            )
-        except Exception as e:
-            log.exception("Сборка не удалась")
+        base = self.session_dir.name.replace("session_", "project_")
+        done: list[str] = []
+        errors: list[str] = []
+        for n, (sid, pool) in enumerate(pools.items()):
+            # у каждого потока — свой ролик и свой проект в редакторе
+            name = self._stream_names.get(sid, f"Поток {sid}") if sid else ("весь экран" if len(pools) > 1 else "")
+            project_dir = None
+            if self.s.keep_project_for_editor:
+                project_dir = paths.data_dir() / "projects" / (base + (f"_{sid}" if sid else ""))
+            prefix = f"«{name}» ({n + 1} из {len(pools)}): " if len(pools) > 1 else ""
+
+            def progress(f: float, t: str, n=n, prefix=prefix) -> None:
+                self.assembly_progress.emit((n + f) / len(pools), prefix + t)
+
+            try:
+                out = Assembler(self.ffmpeg, encoder, self.s, self.plan).run(
+                    pool.dir, pool.items, self.session_start, progress=progress, project_dir=project_dir,
+                    name=name if len(pools) > 1 or sid else "", shared_dir=self.session_dir,
+                )
+            except Exception as e:
+                log.exception("Сборка не удалась (%s)", name or "весь экран")
+                errors.append(f"{name}: {e}" if name else str(e))
+                continue
+            done.append(str(out))
+            # собранный поток повторно не собираем, даже если другой не получился
+            pool.index_path.unlink(missing_ok=True)
+        if errors and not done:
             # черновики не удаляем — можно будет попробовать ещё раз после перезапуска
-            self.assembly_failed.emit(str(e))
+            self.assembly_failed.emit("\n".join(errors))
             self._set_state(State.STOPPED)
             return
-        shutil.rmtree(self.session_dir, ignore_errors=True)   # буфер и черновики больше не нужны
+        if errors:
+            self.notify.emit("Glimpsy: собрано не всё", "\n".join(errors))
+        else:
+            shutil.rmtree(self.session_dir, ignore_errors=True)   # буфер и черновики больше не нужны
         self._set_state(State.STOPPED)
-        self.assembly_done.emit(str(out))
+        self.assembly_done.emit("\n".join(done))
 
     # ======================= разное =======================
 
@@ -780,9 +922,9 @@ class RecorderEngine(QObject):
         camera_changed = s.camera_mode != old.camera_mode or s.camera_device != old.camera_device
         audio_changed = (s.audio_mic, s.audio_mic_device, s.audio_system, s.voice_sensitivity) != \
             (old.audio_mic, old.audio_mic_device, old.audio_system, old.voice_sensitivity)
-        if self.pool:
-            self.pool.prune(self.plan.pool_size)
-            self.pool.save()
+        for pool in self.pools.values():
+            pool.prune(self.plan.pool_size)
+            pool.save()
         if camera_changed and self.cam_store is not None:
             self._setup_camera()
         if audio_changed and self.cam_store is not None:
@@ -806,6 +948,7 @@ class RecorderEngine(QObject):
             "state": self.state,
             "label": STATE_LABELS.get(self.state, self.state),
             "monitor": self.run.monitor.label if self.run else "",
+            "stream": self._stream_names.get(self._stream, "") if self._stream else "",
             "candidates": pool.count if pool else 0,
             "important": sum(1 for c in pool.items if c.priority) if pool else 0,
             "needed": self.plan.clips_needed,
@@ -831,8 +974,8 @@ def find_unfinished_sessions() -> list[Path]:
     """Сессии, оставшиеся после аварийного закрытия или выхода без сборки."""
     out = []
     for d in sorted(paths.temp_root().glob("session_*")):
-        idx = _read_json(d / "candidates.json")
-        if idx.get("items"):
+        indexes = [d / "candidates.json", *d.glob("stream_*/candidates.json")]
+        if any(_read_json(i).get("items") for i in indexes):
             out.append(d)
         elif d.is_dir():
             shutil.rmtree(d, ignore_errors=True)   # пустые — просто убираем

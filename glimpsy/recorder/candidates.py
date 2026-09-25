@@ -35,6 +35,14 @@ class Candidate:
     audio: str = ""               # звук (микрофон + колонки) за то же время, .wav рядом
     voice_id: int = 0             # >0 — кусок речи (голосовой режим): идёт целиком, со звуком
     voice_part: int = 0           # номер куска внутри одной речи
+    crop: list[float] = field(default_factory=list)   # поток «только окно»: где окно, доли [x, y, w, h]
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """Размер картинки в пикселях монитора (с учётом вырезанного окна)."""
+        if self.crop:
+            return max(2, round(self.width * self.crop[2])), max(2, round(self.height * self.crop[3]))
+        return self.width, self.height
 
     @property
     def duration(self) -> float:

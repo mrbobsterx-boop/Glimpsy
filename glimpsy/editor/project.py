@@ -310,7 +310,8 @@ class Project:
                               zoom_strength=float(c.get("zoom_strength", 1.8))))
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
-            created = time.mktime(time.strptime(directory.name.split("_", 1)[1], "%Y%m%d_%H%M%S"))
+            # у потоков к имени добавлен номер: project_ГГГГММДД_ЧЧММСС_1
+            created = time.mktime(time.strptime("_".join(directory.name.split("_")[1:3]), "%Y%m%d_%H%M%S"))
         except (IndexError, ValueError):
             created = directory.stat().st_mtime
         name = Path(output).stem if output else directory.name
