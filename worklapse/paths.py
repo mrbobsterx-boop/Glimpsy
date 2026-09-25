@@ -78,6 +78,22 @@ def find_executable(name: str) -> str | None:
     return shutil.which(name)
 
 
+def clean_child_environment(env=None) -> None:
+    """Собранная программа для Linux (PyInstaller) подсовывает свои библиотеки через
+    LD_LIBRARY_PATH, и его наследуют все запущенные программы: FFmpeg, whisper, xdg-open.
+    Тогда, например, драйвер видеокарты не загружается («GLIBCXX not found»), и аппаратное
+    ускорение не работает. Возвращаем системное значение — сама программа свои библиотеки
+    уже загрузила, ей это не мешает."""
+    env = os.environ if env is None else env
+    if not getattr(sys, "frozen", False) or not sys.platform.startswith("linux"):
+        return
+    orig = env.get("LD_LIBRARY_PATH_ORIG")
+    if orig is not None:
+        env["LD_LIBRARY_PATH"] = orig
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+
+
 def subprocess_flags() -> dict:
     """На Windows прячем чёрные консольные окна у FFmpeg."""
     if IS_WINDOWS:

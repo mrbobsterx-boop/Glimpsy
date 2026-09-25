@@ -20,3 +20,27 @@ def test_broken_file_does_not_crash(tmp_path):
     p = tmp_path / "s.json"
     p.write_text("{not json")
     assert load_settings(p).fps == 30
+
+
+def test_clean_child_environment(monkeypatch):
+    """Собранная программа на Linux не должна передавать свои библиотеки FFmpeg и другим программам."""
+    import sys
+
+    from worklapse import paths
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    env = {"LD_LIBRARY_PATH": "/tmp/_MEI/_internal", "LD_LIBRARY_PATH_ORIG": "/opt/lib"}
+    paths.clean_child_environment(env)
+    assert env["LD_LIBRARY_PATH"] == "/opt/lib"
+    env = {"LD_LIBRARY_PATH": "/tmp/_MEI/_internal"}
+    paths.clean_child_environment(env)
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_error_summary():
+    from worklapse.recorder.encoder import error_summary
+    err = ("[VAAPI @ 0x1] libva error: /usr/lib/dri/radeonsi_drv_video.so init failed\n"
+           "/tmp/x/libstdc++.so.6: version `GLIBCXX_3.4.32' not found (required by /usr/lib/libSPIRV-Tools.so)\n"
+           "Device creation failed: -5.\n")
+    s = error_summary(err)
+    assert "GLIBCXX_3.4.32" in s and s.startswith("[VAAPI")

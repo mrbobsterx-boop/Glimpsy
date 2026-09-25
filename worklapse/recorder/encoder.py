@@ -84,6 +84,14 @@ def candidates() -> list[Encoder]:
     return [nvenc, vaapi, qsv, sw]
 
 
+def error_summary(stderr: str, limit: int = 6) -> str:
+    """Самые полезные строки ошибки FFmpeg целиком (а не обрезок с середины слова)."""
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    keys = ("error", "cannot", "failed", "not found", "no ", "unsupported", "невозмож")
+    useful = [ln for ln in lines if any(k in ln.lower() for k in keys)]
+    return " | ".join((useful or lines)[:limit])[:600]
+
+
 def test_encoder(ffmpeg: str, enc: Encoder, fps: int = 30) -> bool:
     """Кодек подходит, только если он работает И умеет резать видео на секундные кусочки.
 
@@ -105,7 +113,7 @@ def test_encoder(ffmpeg: str, enc: Encoder, fps: int = 30) -> bool:
             log.info("Кодек %s недоступен", enc.name, exc_info=True)
             return False
         if r.returncode != 0:
-            log.info("Кодек %s недоступен: %s", enc.name, r.stderr.decode(errors="replace")[-300:])
+            log.info("Кодек %s недоступен: %s", enc.name, error_summary(r.stderr.decode(errors="replace")))
             return False
         try:
             segments = [x for x in seg_list.read_text().splitlines() if x.strip()]

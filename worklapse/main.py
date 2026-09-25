@@ -38,6 +38,7 @@ def setup_logging() -> None:
 
 
 def main() -> None:
+    paths.clean_child_environment()
     setup_logging()
     log.info("%s %s запускается", APP_NAME, __version__)
     app = QApplication(sys.argv)
