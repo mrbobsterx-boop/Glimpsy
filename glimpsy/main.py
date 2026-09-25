@@ -88,6 +88,8 @@ def main() -> None:
     if disable_gl:
         os.environ["QT_XCB_GL_INTEGRATION"] = "none"
     app = QApplication(sys.argv)
+    from glimpsy.ui import theme
+    theme.apply(app)                          # тёмная тема, шрифт Inter, единые иконки
     if disable_gl:
         os.environ.pop("QT_XCB_GL_INTEGRATION", None)   # запущенным программам (файловому менеджеру) — как было
     app.setApplicationName(APP_NAME)

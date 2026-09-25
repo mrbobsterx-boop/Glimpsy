@@ -28,10 +28,10 @@ class Inspector(QWidget):
 
         self.title = QLabel("Выберите фрагмент на ленте")
         self.title.setWordWrap(True)
-        self.title.setStyleSheet("font-weight: 600;")
+        self.title.setProperty("role", "title")
         self.info = QLabel()
         self.info.setWordWrap(True)
-        self.info.setStyleSheet("color: #8b8d98;")
+        self.info.setProperty("role", "muted")
 
         self.speed = QDoubleSpinBox(minimum=MIN_SPEED, maximum=MAX_SPEED, singleStep=0.25, decimals=2, suffix=" ×")
         self.speed.valueChanged.connect(lambda v: self._emit("speed", v))
@@ -59,7 +59,7 @@ class Inspector(QWidget):
         # --- кадр (масштаб и положение внутри ролика) ---
         # --- движение кадра по курсору (этап 3) ---
         self.motion_title = QLabel("Движение кадра")
-        self.motion_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
+        self.motion_title.setProperty("role", "section")
         self.motion = QComboBox()
         for key, label in MODES.items():
             self.motion.addItem(label, key)
@@ -71,12 +71,12 @@ class Inspector(QWidget):
         self.click_fx.toggled.connect(lambda on: self._emit("click_fx", on))
         self.motion_hint = QLabel()
         self.motion_hint.setWordWrap(True)
-        self.motion_hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        self.motion_hint.setProperty("role", "hint")
         # у переносимых подписей в QFormLayout Qt иногда занижает высоту — задаём её явно
         self.motion_hint.setMinimumHeight(self.motion_hint.fontMetrics().lineSpacing() * 4 + 4)
 
         self.frame_title = QLabel()
-        self.frame_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
+        self.frame_title.setProperty("role", "section")
         self.zoom = QDoubleSpinBox(minimum=MIN_ZOOM * 100, maximum=MAX_ZOOM * 100, singleStep=5, decimals=0,
                                    suffix=" %")
         self.pos_x = QDoubleSpinBox(minimum=-150, maximum=150, singleStep=1, decimals=1, suffix=" %")
@@ -100,24 +100,24 @@ class Inspector(QWidget):
         self.frame_hint = QLabel("В просмотре: тащите кадр мышью, размер — уголки или колёсико. "
                                  "Shift+щелчок по фрагментам на ленте — править несколько сразу.")
         self.frame_hint.setWordWrap(True)
-        self.frame_hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        self.frame_hint.setProperty("role", "hint")
 
         self.form = QFormLayout()
-        self.form.addRow("Скорость:", self.speed)
+        self.form.addRow("Скорость", self.speed)
         self.form.addRow(self.presets)
         self.form.addRow(self.sound)
-        self.form.addRow("Начало в файле:", self.in_s)
-        self.form.addRow("Конец в файле:", self.out_s)
-        self.form.addRow("Показывать фото:", self.photo_dur)
+        self.form.addRow("Начало в файле", self.in_s)
+        self.form.addRow("Конец в файле", self.out_s)
+        self.form.addRow("Показывать фото", self.photo_dur)
         self.form.addRow(self.motion_title)
-        self.form.addRow("Режим:", self.motion)
-        self.form.addRow("Сила зума:", self.strength)
+        self.form.addRow("Режим", self.motion)
+        self.form.addRow("Сила зума", self.strength)
         self.form.addRow(self.click_fx)
         self.form.addRow(self.motion_hint)
         self.form.addRow(self.frame_title)
-        self.form.addRow("Масштаб:", self.zoom)
-        self.form.addRow("Сдвиг влево/вправо:", self.pos_x)
-        self.form.addRow("Сдвиг вверх/вниз:", self.pos_y)
+        self.form.addRow("Масштаб", self.zoom)
+        self.form.addRow("Сдвиг влево/вправо", self.pos_x)
+        self.form.addRow("Сдвиг вверх/вниз", self.pos_y)
         self.form.addRow(self.frame_btns)
 
         self.delete_btn = QPushButton("Удалить фрагмент")
@@ -133,7 +133,7 @@ class Inspector(QWidget):
         lay.addWidget(self.delete_btn)
         lay.addStretch(1)
         hint = QLabel("Все горячие клавиши — кнопка ⌨ слева от просмотра")
-        hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        hint.setProperty("role", "hint")
         lay.addWidget(hint)
         self.set_clip(None)
 

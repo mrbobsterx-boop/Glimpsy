@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import copy
 
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea,
+    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from glimpsy.config import PACE_LABELS, PACES, Settings
@@ -16,6 +17,8 @@ from glimpsy.platform.base import Monitor, PlatformServices
 from glimpsy.recorder.encoder import candidates as encoder_candidates
 from glimpsy.recorder.pacing import make_plan
 from glimpsy.recorder.webcam import MODE_LABELS as CAMERA_MODES, list_cameras
+from glimpsy.ui import theme
+from glimpsy.ui.icons import app_logo
 
 RESOLUTIONS = [("1920×1080 (Full HD)", 1920, 1080), ("2560×1440 (2K)", 2560, 1440),
                ("3840×2160 (4K)", 3840, 2160), ("1280×720 (HD)", 1280, 720)]
@@ -24,7 +27,7 @@ RESOLUTIONS = [("1920×1080 (Full HD)", 1920, 1080), ("2560×1440 (2K)", 2560, 1
 def _hint(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
-    lbl.setStyleSheet("color: #6b6f7a; font-size: 11px;")
+    lbl.setProperty("role", "hint")
     return lbl
 
 
@@ -37,27 +40,77 @@ class SettingsDialog(QDialog):
         self.s = copy.deepcopy(settings)
         self.services = services
         self.ffmpeg = ffmpeg
-        tabs = QTabWidget()
-        tabs.addTab(self._video_tab(), "Ролик")
-        tabs.addTab(self._record_tab(monitors, on_reselect_screen), "Запись")
-        tabs.addTab(self._hotkeys_tab(), "Горячие клавиши")
-        tabs.addTab(self._privacy_tab(), "Приватность")
-        self._camera_page = self._camera_tab()
-        tabs.addTab(self._camera_page, "Камера")
-        tabs.currentChanged.connect(lambda _i: tabs.currentWidget() is self._camera_page and self._find_cameras(False))
-        tabs.addTab(self._system_tab(status), "Система")
+        pages = [
+            ("film", "Ролик", "Длина, темп и эффекты готового ролика", self._video_tab()),
+            ("monitor", "Запись", "Что и как записывать", self._record_tab(monitors, on_reselect_screen)),
+            ("keyboard", "Горячие клавиши", "Работают в любой программе и раскладке", self._hotkeys_tab()),
+            ("eye", "Приватность", "Что никогда не попадает в запись", self._privacy_tab()),
+            ("video", "Камера", "Окошко с веб-камеры в углу ролика", self._camera_tab()),
+            ("info", "Система", "Сведения о компьютере и записи", self._system_tab(status)),
+        ]
+        self._camera_page = pages[4][3]
+        self.nav = QListWidget()
+        self.nav.setObjectName("settingsNav")
+        self.nav.setFixedWidth(200)
+        self.nav.setIconSize(QSize(18, 18))
+        self.stack = QStackedWidget()
+        for ic, name, sub, page in pages:
+            self.nav.addItem(QListWidgetItem(theme.icon(ic, theme.MUTED, 18), name))
+            holder = QWidget()
+            hv = QVBoxLayout(holder)
+            hv.setContentsMargins(24, 18, 24, 12)
+            hv.setSpacing(4)
+            hv.addWidget(theme.mark(QLabel(name), "h1"))
+            hv.addWidget(theme.mark(QLabel(sub), "muted"))
+            hv.addSpacing(10)
+            hv.addWidget(page, 1)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(holder)
+            self.stack.addWidget(scroll)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.nav.currentRowChanged.connect(lambda i: i == 4 and self._find_cameras(False))
+        self.nav.setCurrentRow(0)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save.setText("Сохранить")
+        theme.mark(save, "primary")
+        theme.mark(buttons.button(QDialogButtonBox.StandardButton.Cancel), "ghost").setText("Отмена")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         self.error = QLabel()
-        self.error.setStyleSheet("color: #E5484D;")
+        self.error.setStyleSheet(f"color: {theme.DANGER};")
         self.error.setWordWrap(True)
-        lay = QVBoxLayout(self)
-        lay.addWidget(tabs)
-        lay.addWidget(self.error)
-        lay.addWidget(buttons)
+        side = QFrame()
+        side.setObjectName("settingsSide")
+        sv = QVBoxLayout(side)
+        sv.setContentsMargins(12, 16, 12, 12)
+        logo_row = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(app_logo(28))
+        logo_row.addWidget(logo)
+        logo_row.addWidget(theme.mark(QLabel("Настройки"), "title"))
+        logo_row.addStretch(1)
+        sv.addLayout(logo_row)
+        sv.addSpacing(10)
+        sv.addWidget(self.nav, 1)
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 16, 14)
+        right.addWidget(self.stack, 1)
+        right.addWidget(self.error)
+        right.addWidget(buttons)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(side)
+        lay.addLayout(right, 1)
+        self.resize(820, 600)
+        self.setStyleSheet(f"""
+            QFrame#settingsSide {{ background: {theme.SURFACE}; border-right: 1px solid {theme.BORDER}; }}
+            QListWidget#settingsNav::item {{ padding: 9px 10px; border-radius: 8px; color: {theme.MUTED}; }}
+            QListWidget#settingsNav::item:selected {{ background: {theme.ACCENT_SOFT}; color: {theme.TEXT}; }}
+            QListWidget#settingsNav::item:hover:!selected {{ background: {theme.HOVER}; }}
+        """)
         self._update_plan_hint()
 
     # ---------- вкладки ----------
@@ -93,13 +146,13 @@ class SettingsDialog(QDialog):
             widget.valueChanged.connect(self._update_plan_hint)
         self.pace.currentIndexChanged.connect(self._update_plan_hint)
 
-        f.addRow("Длина ролика:", self.target)
-        f.addRow("Длина фрагмента:", clip_row)
-        f.addRow("Темп:", self.pace)
+        f.addRow("Длина ролика", self.target)
+        f.addRow("Длина фрагмента", clip_row)
+        f.addRow("Темп", self.pace)
         f.addRow("", _hint("Спокойный — фрагменты длиннее, без ускорения. Динамичный — короткие "
                            "фрагменты и ускорение ×1.6."))
         f.addRow("", self.plan_hint)
-        f.addRow("Разрешение ролика:", self.resolution)
+        f.addRow("Разрешение ролика", self.resolution)
         self.fx_zoom = QCheckBox("Плавно приближать к кликам и месту работы")
         self.fx_zoom.setChecked(self.s.fx_zoom)
         self.fx_strength = QDoubleSpinBox(minimum=1.2, maximum=3.0, singleStep=0.1, decimals=1, suffix=" ×")
@@ -108,13 +161,13 @@ class SettingsDialog(QDialog):
         self.fx_zoom.toggled.connect(self.fx_strength.setEnabled)
         self.fx_clicks = QCheckBox("Подсвечивать клики кругом")
         self.fx_clicks.setChecked(self.s.fx_clicks)
-        f.addRow("Эффекты:", self.fx_zoom)
-        f.addRow("   сила приближения:", self.fx_strength)
+        f.addRow("Эффекты", self.fx_zoom)
+        f.addRow("   сила приближения", self.fx_strength)
         f.addRow("", self.fx_clicks)
         f.addRow("", _hint("Как в Screen Studio: камера сама наезжает туда, где вы кликаете и работаете, "
                            "а клик отмечается расходящимся кругом. В редакторе эффекты можно выключить "
                            "у любого фрагмента."))
-        f.addRow("Папка для роликов:", out_row)
+        f.addRow("Папка для роликов", out_row)
         f.addRow("", _hint("Можно выбрать папку Google Drive / Яндекс Диска / Dropbox — "
                            "ролики будут сами загружаться в облако. Черновики туда не попадают."))
         return w
@@ -152,19 +205,19 @@ class SettingsDialog(QDialog):
         self.login = QCheckBox("Запускать Glimpsy вместе с компьютером")
         self.login.setChecked(autostart.is_enabled())   # правда — в системе, а не в файле настроек
 
-        f.addRow("Частота кадров:", self.fps)
-        f.addRow("Кольцевой буфер:", self.buffer)
+        f.addRow("Частота кадров", self.fps)
+        f.addRow("Кольцевой буфер", self.buffer)
         f.addRow("", _hint("Сколько последних секунд экрана хранится на диске, чтобы было из чего вырезать момент."))
-        f.addRow("Автопауза после:", self.idle)
+        f.addRow("Автопауза после", self.idle)
         f.addRow("", _hint("Если столько секунд нет активности, запись встаёт на паузу и сама продолжится."))
-        f.addRow("Макс. высота записи:", self.max_h)
-        f.addRow("Какой монитор писать:", self.monitor_mode)
+        f.addRow("Макс. высота записи", self.max_h)
+        f.addRow("Какой монитор писать", self.monitor_mode)
         if self.services.display_server == "wayland" and on_reselect:
             btn = QPushButton("Выбрать экран заново")
             btn.clicked.connect(on_reselect)
             f.addRow("", btn)
             f.addRow("", _hint("На Wayland монитор выбирается в системном окне «Поделиться экраном»."))
-        f.addRow("Видеокодек:", self.encoder)
+        f.addRow("Видеокодек", self.encoder)
         f.addRow("", self.autostart)
         f.addRow("", self.login)
         return w
@@ -177,11 +230,11 @@ class SettingsDialog(QDialog):
         self.hk_finish = QLineEdit(self.s.hotkey_finish)
         self.imp_before = QSpinBox(minimum=1, maximum=60, suffix=" с", value=self.s.important_before_s)
         self.imp_after = QSpinBox(minimum=0, maximum=30, suffix=" с", value=self.s.important_after_s)
-        f.addRow("Важный момент:", self.hk_important)
-        f.addRow("   сохранить до нажатия:", self.imp_before)
-        f.addRow("   и после нажатия:", self.imp_after)
-        f.addRow("Пауза / продолжить:", self.hk_pause)
-        f.addRow("Собрать ролик:", self.hk_finish)
+        f.addRow("Важный момент", self.hk_important)
+        f.addRow("   сохранить до нажатия", self.imp_before)
+        f.addRow("   и после нажатия", self.imp_after)
+        f.addRow("Пауза / продолжить", self.hk_pause)
+        f.addRow("Собрать ролик", self.hk_finish)
         f.addRow("", _hint("Формат: Ctrl+Alt+1, Ctrl+Shift+F9, Cmd+Alt+P. Модификаторы: Ctrl, Alt (Option), "
                            "Shift, Cmd (Win)."))
         if not self.services.hotkeys.supported:
@@ -224,10 +277,10 @@ class SettingsDialog(QDialog):
         self.cam_len = QDoubleSpinBox(minimum=2, maximum=10, singleStep=0.5, decimals=1, suffix=" с")
         self.cam_len.setValue(self.s.camera_clip_s)
         self.cam_status = _hint("")
-        f.addRow("Фрагменты с веб-камеры:", self.cam_mode)
-        f.addRow("Камера:", dev_row)
+        f.addRow("Фрагменты с веб-камеры", self.cam_mode)
+        f.addRow("Камера", dev_row)
         f.addRow("", self.cam_status)
-        f.addRow("Длина фрагмента:", self.cam_len)
+        f.addRow("Длина фрагмента", self.cam_len)
         f.addRow("", _hint("Пока вы работаете, Glimpsy изредка снимает несколько секунд с камеры "
                            "(в это время горит её лампочка) и ставит их в ролик маленьким окошком в углу. "
                            "В редакторе окошко можно подвинуть, увеличить или удалить. "

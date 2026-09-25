@@ -8,20 +8,82 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
+    QDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QStyle,
+    QStyledItemDelegate, QVBoxLayout,
 )
 
 from glimpsy import paths
 from glimpsy.editor.media import Thumbnailer
 from glimpsy.editor.project import Project, list_projects
 from glimpsy.editor.timeline import fmt_time
+from glimpsy.ui import theme
+from glimpsy.ui.icons import app_logo
 
 log = logging.getLogger(__name__)
 
-THUMB_H = 72
+THUMB_H = 126
+CARD_W, CARD_H = 240, 188
+
+
+class _CardDelegate(QStyledItemDelegate):
+    """Карточка сессии: превью, дата, сведения."""
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(CARD_W, CARD_H)
+
+    def paint(self, p: QPainter, option, index) -> None:
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(option.rect).adjusted(6, 6, -6, -6)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        p.setPen(QPen(QColor(theme.ACCENT if selected else theme.BORDER_STRONG if hover else theme.BORDER),
+                      2 if selected else 1))
+        p.setBrush(QColor(theme.HOVER if hover and not selected else theme.RAISED))
+        p.drawRoundedRect(r, 12, 12)
+        thumb = QRectF(r.left() + 8, r.top() + 8, r.width() - 16, THUMB_H - 16)
+        path = QPainterPath()
+        path.addRoundedRect(thumb, 8, 8)
+        p.setClipPath(path)
+        p.fillRect(thumb, QColor(theme.BG))
+        pm = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(pm, QPixmap) and not pm.isNull():
+            scaled = pm.scaled(thumb.size().toSize(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                               Qt.TransformationMode.SmoothTransformation)
+            p.drawPixmap(thumb.topLeft(), scaled, QRectF(0, 0, thumb.width(), thumb.height()))
+        badge = index.data(Qt.ItemDataRole.UserRole + 3)
+        if badge:
+            fm = p.fontMetrics()
+            w = fm.horizontalAdvance(badge) + 14
+            b = QRectF(thumb.right() - w - 6, thumb.bottom() - 22, w, 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(b, 8, 8)
+            p.setPen(QColor("#FFFFFF"))
+            f = QFont(p.font())
+            f.setPixelSize(10)
+            p.setFont(f)
+            p.drawText(b, Qt.AlignmentFlag.AlignCenter, badge)
+        p.setClipping(False)
+        title = index.data(Qt.ItemDataRole.UserRole + 1) or ""
+        meta = index.data(Qt.ItemDataRole.UserRole + 2) or ""
+        f = QFont(p.font())
+        f.setPixelSize(13)
+        f.setWeight(QFont.Weight.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor(theme.TEXT))
+        p.drawText(QRectF(r.left() + 12, thumb.bottom() + 10, r.width() - 24, 18),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+        f.setPixelSize(11)
+        f.setWeight(QFont.Weight.Normal)
+        p.setFont(f)
+        p.setPen(QColor(theme.MUTED))
+        p.drawText(QRectF(r.left() + 12, thumb.bottom() + 30, r.width() - 24, 16),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, meta)
+        p.restore()
 
 
 def projects_root() -> Path:
@@ -32,40 +94,64 @@ class SessionsDialog(QDialog):
     def __init__(self, ffmpeg: str, open_project: Callable[[Path], None]) -> None:
         super().__init__()
         self.setWindowTitle("Glimpsy — мои сессии")
-        self.resize(640, 560)
+        self.resize(820, 620)
         self.open_project = open_project
         self.thumbs = Thumbnailer(ffmpeg)
         self.thumbs.ready.connect(self._refresh_icons)
         self._first_frames: dict[int, tuple[Path, float, bool]] = {}
 
         self.list = QListWidget()
-        self.list.setIconSize(QSize(THUMB_H * 16 // 9, THUMB_H))
-        self.list.setSpacing(4)
+        self.list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list.setMovement(QListWidget.Movement.Static)
+        self.list.setGridSize(QSize(CARD_W, CARD_H))
+        self.list.setUniformItemSizes(True)
+        self.list.setMouseTracking(True)
+        self.list.setItemDelegate(_CardDelegate(self.list))
+        self.list.setStyleSheet("QListWidget::item, QListWidget::item:selected, QListWidget::item:hover "
+                                "{ background: transparent; border: none; }")
         self.list.itemDoubleClicked.connect(lambda _: self._open())
         self.list.currentRowChanged.connect(lambda _: self._update_buttons())
+        self.empty = theme.mark(QLabel("Пока нет ни одной сессии.\nЗапишите и соберите ролик — он появится здесь."),
+                                "muted")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.b_open = QPushButton("Открыть в редакторе")
+        self.b_open = theme.mark(QPushButton(theme.icon("film", "#FFFFFF", 16), "  Открыть в редакторе"), "primary")
         self.b_open.setDefault(True)
         self.b_open.clicked.connect(self._open)
-        self.b_folder = QPushButton("Показать файлы")
+        self.b_folder = QPushButton(theme.icon("folder-open", size=16), "  Файлы")
         self.b_folder.clicked.connect(self._show_folder)
-        self.b_delete = QPushButton("Удалить…")
+        self.b_delete = theme.mark(QPushButton(theme.icon("trash-2", theme.DANGER, 16), "  Удалить…"), "danger")
         self.b_delete.clicked.connect(self._delete)
-        close = QPushButton("Закрыть")
+        close = theme.mark(QPushButton("Закрыть"), "ghost")
         close.clicked.connect(self.close)
         buttons = QHBoxLayout()
-        for b in (self.b_open, self.b_folder, self.b_delete):
-            buttons.addWidget(b)
+        buttons.addWidget(self.b_delete)
+        buttons.addWidget(self.b_folder)
         buttons.addStretch(1)
         buttons.addWidget(close)
+        buttons.addWidget(self.b_open)
 
-        hint = QLabel("Каждая сессия записи — отдельный проект. Правки сохраняются автоматически, "
-                      "исходный ролик не меняется.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #8b8d98;")
+        logo = QLabel()
+        logo.setPixmap(app_logo(40))
+        title = theme.mark(QLabel("Мои сессии"), "h1")
+        sub = theme.mark(QLabel("Каждая запись — отдельный проект. Правки сохраняются сами, исходный ролик "
+                                "не меняется."), "muted")
+        sub.setWordWrap(True)
+        head_text = QVBoxLayout()
+        head_text.setSpacing(2)
+        head_text.addWidget(title)
+        head_text.addWidget(sub)
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        head.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
+        head.addLayout(head_text, 1)
         lay = QVBoxLayout(self)
-        lay.addWidget(hint)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(12)
+        lay.addLayout(head)
         lay.addWidget(self.list, 1)
+        lay.addWidget(self.empty, 1)
         lay.addLayout(buttons)
         self.reload()
 
@@ -82,19 +168,19 @@ class SessionsDialog(QDialog):
             info = f"{len(p.clips)} фрагм. · {fmt_time(p.total)}"
             if p.edited:
                 info += " · изменён"
-            item = QListWidgetItem(f"{when}\n{info}")
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, str(d))
-            item.setSizeHint(QSize(0, THUMB_H + 12))
+            item.setData(Qt.ItemDataRole.UserRole + 1, when)
+            item.setData(Qt.ItemDataRole.UserRole + 2, f"{len(p.clips)} фрагм." + (" · изменён" if p.edited else ""))
+            item.setData(Qt.ItemDataRole.UserRole + 3, fmt_time(p.total))
             self.list.addItem(item)
             if p.clips:
                 c = p.clips[0]
                 self._first_frames[self.list.count() - 1] = (p.path_of(c), c.in_s, c.kind == "image")
-        if self.list.count() == 0:
-            item = QListWidgetItem("Пока нет ни одной сессии. Запишите и соберите ролик — "
-                                   "он появится здесь.")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.list.addItem(item)
-        else:
+        empty = self.list.count() == 0
+        self.list.setVisible(not empty)
+        self.empty.setVisible(empty)
+        if not empty:
             self.list.setCurrentRow(0)
         self._refresh_icons()
         self._update_buttons()
@@ -103,8 +189,8 @@ class SessionsDialog(QDialog):
         for row, (path, t, is_image) in self._first_frames.items():
             img = self.thumbs.get(path, t, THUMB_H, is_image)
             item = self.list.item(row)
-            if img is not None and item is not None and item.icon().isNull():
-                item.setIcon(QIcon(QPixmap.fromImage(img)))
+            if img is not None and item is not None and item.data(Qt.ItemDataRole.DecorationRole) is None:
+                item.setData(Qt.ItemDataRole.DecorationRole, QPixmap.fromImage(img))
 
     def _current_dir(self) -> Path | None:
         item = self.list.currentItem()

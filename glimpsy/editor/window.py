@@ -19,12 +19,14 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractSpinBox, QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
     QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
 
 from glimpsy import paths
+from glimpsy.ui import theme
+from glimpsy.ui.icons import app_logo
 from glimpsy.editor import keys, motion
 from glimpsy.editor.export import (
     ExportCancelled, default_output, export_project, render_overlay_layers, render_text_layers,
@@ -53,6 +55,22 @@ class _ExportBridge(QObject):
     progress = Signal(float, str)
     done = Signal(str)
     failed = Signal(str)
+
+
+EDITOR_QSS = f"""
+QFrame#topbar {{ background: {theme.SURFACE}; border-bottom: 1px solid {theme.BORDER}; }}
+QFrame#rail {{ background: {theme.SURFACE}; border-right: 1px solid {theme.BORDER}; }}
+QFrame#previewPanel, QFrame#sidePanel, QFrame#timelinePanel {{ background: {theme.SURFACE};
+    border: 1px solid {theme.BORDER}; border-radius: 12px; }}
+QFrame#segmented {{ background: {theme.RAISED}; border: 1px solid {theme.BORDER}; border-radius: 9px; }}
+QPushButton#segButton {{ background: transparent; border: none; border-radius: 7px; padding: 5px 12px;
+    color: {theme.MUTED}; font-weight: 500; }}
+QPushButton#segButton:hover {{ color: {theme.TEXT}; }}
+QPushButton#segButton:checked {{ background: {theme.HOVER}; color: {theme.TEXT}; }}
+QFrame[role="vdivider"] {{ background: {theme.BORDER}; border: none; }}
+QLabel#timecode {{ color: {theme.MUTED}; font-size: 12px; font-family: "{theme.FONT}"; }}
+QScrollArea {{ background: transparent; }}
+"""
 
 
 class EditorWindow(QMainWindow):
@@ -88,77 +106,14 @@ class EditorWindow(QMainWindow):
         self._ov_images: dict[str, QImage] = {}
         self._motion_cache: dict = {}
 
-        self.play_btn = QPushButton()
-        self.play_btn.setFixedWidth(44)
-        self._icon_play = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-        self._icon_pause = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
-        self.play_btn.setIcon(self._icon_play)
-        self.play_btn.setToolTip("Пуск / пауза (Пробел)")
-        self.play_btn.clicked.connect(self.player.toggle)
-        self.time_lbl = QLabel()
-        self.time_lbl.setMinimumWidth(150)
-        vol = QSlider(Qt.Orientation.Horizontal)
-        vol.setRange(0, 100)
-        vol.setValue(80)
-        vol.setFixedWidth(90)
-        vol.valueChanged.connect(lambda v: self.player.set_volume(v / 100))
-        self.player.set_volume(0.8)
-        zoom_out, zoom_fit, zoom_in = QPushButton("−"), QPushButton("Вся лента"), QPushButton("+")
-        for b in (zoom_out, zoom_in):
-            b.setFixedWidth(32)
-        zoom_out.clicked.connect(lambda: self.timeline.zoom(1 / 1.4))
-        zoom_in.clicked.connect(lambda: self.timeline.zoom(1.4))
-        zoom_fit.clicked.connect(self.timeline.fit)
-
-        transport = QHBoxLayout()
-        transport.addWidget(self.play_btn)
-        transport.addWidget(self.time_lbl)
-        transport.addStretch(1)
-        transport.addWidget(QLabel("🔊"))
-        transport.addWidget(vol)
-        transport.addSpacing(16)
-        transport.addWidget(QLabel("Масштаб:"))
-        transport.addWidget(zoom_out)
-        transport.addWidget(zoom_fit)
-        transport.addWidget(zoom_in)
-
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(self.preview, 1)
-        lv.addLayout(transport)
-        from glimpsy.editor.shortcuts_panel import ShortcutsPanel
-        self.shortcuts = ShortcutsPanel()
-        top = QSplitter(Qt.Orientation.Horizontal)
-        top.addWidget(left)
-        top.addWidget(self._right_column())
-        top.setStretchFactor(0, 1)
-        top.setSizes([930, 350])
-        root = QSplitter(Qt.Orientation.Vertical)
-        upper = QWidget()                   # слева шпаргалка клавиш, дальше просмотр и свойства
-        ul = QHBoxLayout(upper)
-        ul.setContentsMargins(0, 0, 0, 0)
-        ul.setSpacing(6)
-        ul.addWidget(self.shortcuts)
-        ul.addWidget(top, 1)
-        root.addWidget(upper)
-        root.addWidget(self.timeline)
-        root.setStretchFactor(0, 1)
-        root.setStretchFactor(1, 0)
-        root.setSizes([640, 150])
-        central = QWidget()
-        cv = QVBoxLayout(central)
-        cv.setContentsMargins(8, 4, 8, 8)
-        cv.addWidget(root)
-        self.setCentralWidget(central)
-
-        self._build_toolbar()
+        self._build_ui()
 
         # --- связи ---
         self.player.frame.connect(self.preview.set_image)
         self.player.position.connect(self._on_position)
         self.player.playing_changed.connect(
             lambda on: self.play_btn.setIcon(self._icon_pause if on else self._icon_play))
+        self.player.set_volume(0.8)
         self.timeline.seek_requested.connect(self.player.seek)
         self.timeline.selection_changed.connect(self._on_select)
         self.timeline.about_to_change.connect(lambda key: self.history.push(self.project.to_dict(), key))
@@ -194,57 +149,206 @@ class EditorWindow(QMainWindow):
         self.player.seek(0.0)
         self._update_actions()
 
-    # ---------- панель инструментов ----------
+    # ---------- раскладка окна ----------
 
-    def _build_toolbar(self) -> None:
-        tb = QToolBar("Инструменты")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(tb)
-        self.a_undo = QAction("↶ Отменить", self, triggered=self.undo, toolTip="Ctrl+Z")
-        self.a_redo = QAction("↷ Повторить", self, triggered=self.redo, toolTip="Ctrl+Shift+Z / Ctrl+Y")
-        a_add = QAction("＋ Добавить медиа", self, triggered=self.add_media_dialog, toolTip="Видео или фото (Ctrl+V)")
-        a_text = QAction("T  Текст", self, triggered=self.add_text, toolTip="Добавить текст в месте курсора (Ctrl+T)")
-        a_overlay = QAction("▣  Наложение", self, triggered=self.add_overlay_dialog,
-                            toolTip="Картинка или видео поверх ролика (логотип, макет, съёмка с телефона)")
-        a_subs = QAction("💬  Субтитры", self, triggered=self.auto_subtitles,
-                         toolTip="Автосубтитры: распознать речь в ролике (на этом компьютере, без интернета)")
-        a_music = QAction("♪  Музыка", self, triggered=self.add_music_dialog,
-                          toolTip="Фоновая музыка на весь ролик (mp3, wav, m4a, ogg, flac…)")
-        a_stats = QAction("📊  Статистика", self, triggered=self.show_stats,
-                          toolTip="Сколько работали, где и сколько кликов — только для вас")
-        self.a_split = QAction("✂ Разрезать", self, triggered=self.split, toolTip="Ctrl+B — по курсору")
-        self.a_delete = QAction("🗑 Удалить", self, triggered=self.delete_selected, toolTip="Delete")
-        for a in (self.a_undo, self.a_redo):
-            tb.addAction(a)
-        tb.addSeparator()
-        for a in (a_add, a_text, a_subs, a_overlay, a_music, self.a_split, self.a_delete, a_stats):
-            tb.addAction(a)
+    def _build_ui(self) -> None:
+        """Сверху — логотип, формат и «Экспорт»; слева — инструменты; в центре — просмотр;
+        справа — свойства; внизу — лента с её кнопками."""
+        from glimpsy.editor.shortcuts_panel import ShortcutsPanel
 
-    def _right_column(self) -> QWidget:
-        """Справа сверху — формат и «Экспорт» (всегда на виду, даже на узком экране), ниже — свойства."""
-        self.aspect_box = QComboBox()
-        for value, label in ASPECT_CHOICES:
-            self.aspect_box.addItem(label, value)
-        self.aspect_box.setCurrentIndex(max(0, self.aspect_box.findData(self.project.aspect)))
-        self.aspect_box.currentIndexChanged.connect(self._on_aspect)
-        self.aspect_box.setToolTip("Горизонтальный ролик для YouTube или вертикальный для Reels, TikTok, Shorts")
-        self.export_btn = QPushButton("Экспорт")
+        # --- действия (одни и те же для кнопок и горячих клавиш) ---
+        self.a_undo = QAction(theme.icon("undo-2"), "Отменить", self, triggered=self.undo, toolTip="Отменить (Ctrl+Z)")
+        self.a_redo = QAction(theme.icon("redo-2"), "Повторить", self, triggered=self.redo,
+                              toolTip="Повторить (Ctrl+Shift+Z / Ctrl+Y)")
+        self.a_split = QAction(theme.icon("scissors"), "Разрезать", self, triggered=self.split,
+                               toolTip="Разрезать по курсору (S)")
+        self.a_delete = QAction(theme.icon("trash-2"), "Удалить", self, triggered=self.delete_selected,
+                                toolTip="Удалить выбранное (Delete)")
+
+        # --- верхняя полоса ---
+        logo = QLabel()
+        logo.setPixmap(app_logo(26))
+        brand = theme.mark(QLabel("Glimpsy"), "title")
+        name = theme.mark(QLabel(self.project.name), "muted")
+        self.aspect_group = QButtonGroup(self)
+        seg = QFrame()
+        seg.setObjectName("segmented")
+        sl = QHBoxLayout(seg)
+        sl.setContentsMargins(3, 3, 3, 3)
+        sl.setSpacing(2)
+        for value, label, ic, tip in (("16:9", "16:9", "monitor", "Горизонтальный — YouTube"),
+                                      ("9:16", "9:16", "smartphone", "Вертикальный — Reels, TikTok, Shorts")):
+            b = QPushButton(theme.icon(ic, size=16), f" {label}")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setProperty("aspect", value)
+            b.setObjectName("segButton")
+            self.aspect_group.addButton(b)
+            sl.addWidget(b)
+            b.setChecked(value == self.project.aspect)
+        self.aspect_group.buttonClicked.connect(lambda b: self._on_aspect(b.property("aspect")))
+        self.export_btn = theme.mark(QPushButton(theme.icon("download", "#FFFFFF", 16), "  Экспорт"), "primary")
         self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E)")
-        self.export_btn.setStyleSheet("QPushButton { background: #1f6f78; color: white; font-weight: 600;"
-                                      " padding: 6px 18px; border-radius: 6px; }")
         self.export_btn.clicked.connect(self.export)
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 4)
-        head.addWidget(QLabel("Формат:"))
-        head.addWidget(self.aspect_box, 1)
-        head.addWidget(self.export_btn)
-        col = QWidget()
-        v = QVBoxLayout(col)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.addLayout(head)
-        v.addWidget(self.side, 1)
-        return col
+        topbar = QFrame()
+        topbar.setObjectName("topbar")
+        tl = QHBoxLayout(topbar)
+        tl.setContentsMargins(14, 8, 12, 8)
+        tl.setSpacing(10)
+        tl.addWidget(logo)
+        tl.addWidget(brand)
+        tl.addWidget(theme.mark(QLabel("·"), "muted"))
+        tl.addWidget(name)
+        tl.addStretch(1)
+        tl.addWidget(seg)
+        tl.addSpacing(6)
+        tl.addWidget(self.export_btn)
+
+        # --- левая колонка инструментов ---
+        rail = QFrame()
+        rail.setObjectName("rail")
+        rl = QVBoxLayout(rail)
+        rl.setContentsMargins(6, 8, 6, 8)
+        rl.setSpacing(4)
+
+        def tool(ic: str, text: str, tip: str, slot=None, checkable: bool = False) -> QToolButton:
+            b = QToolButton()
+            b.setIcon(theme.icon(ic, theme.MUTED, 22))
+            b.setIconSize(theme.icon_size(22))
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            b.setFixedWidth(76)
+            b.setCheckable(checkable)
+            theme.mark(b, "rail")
+            if slot is not None:
+                b.clicked.connect(slot)
+            rl.addWidget(b)
+            return b
+
+        tool("image-plus", "Медиа", "Добавить видео или фото (M, Ctrl+V)", self.add_media_dialog)
+        tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
+        tool("captions", "Субтитры", "Автосубтитры: распознать речь (на этом компьютере)", self.auto_subtitles)
+        tool("layers", "Наложение", "Картинка или видео поверх ролика", self.add_overlay_dialog)
+        tool("music", "Музыка", "Фоновая музыка на весь ролик", self.add_music_dialog)
+        rl.addStretch(1)
+        tool("chart-column", "Статистика", "Сколько работали и где — только для вас", self.show_stats)
+        self.shortcuts = ShortcutsPanel()
+        keys_btn = tool("keyboard", "Клавиши", "Все горячие клавиши", checkable=True)
+        keys_btn.setChecked(self.shortcuts.is_open())
+        keys_btn.toggled.connect(self.shortcuts.set_open)
+
+        # --- просмотр и управление под ним ---
+        self.play_btn = theme.mark(QToolButton(), "play")
+        self._icon_play = theme.icon("play", theme.BG, 18, 2.2)
+        self._icon_pause = theme.icon("pause", theme.BG, 18, 2.2)
+        self.play_btn.setIcon(self._icon_play)
+        self.play_btn.setIconSize(theme.icon_size(18))
+        self.play_btn.setToolTip("Пуск / пауза (Пробел)")
+        self.play_btn.clicked.connect(self.player.toggle)
+        self.time_lbl = QLabel()
+        self.time_lbl.setObjectName("timecode")
+        vol_icon = QLabel()
+        vol_icon.setPixmap(theme.pixmap("volume-2", theme.MUTED, 18))
+        vol = QSlider(Qt.Orientation.Horizontal)
+        vol.setRange(0, 100)
+        vol.setValue(80)
+        vol.setFixedWidth(90)
+        vol.valueChanged.connect(lambda v: self.player.set_volume(v / 100))
+        transport = QHBoxLayout()
+        transport.setContentsMargins(12, 6, 12, 8)
+        transport.addWidget(self.time_lbl)
+        transport.addStretch(1)
+        transport.addWidget(self.play_btn)
+        transport.addStretch(1)
+        transport.addWidget(vol_icon)
+        transport.addWidget(vol)
+        center = theme.mark(QFrame(), "panel")
+        center.setObjectName("previewPanel")
+        cl = QVBoxLayout(center)
+        cl.setContentsMargins(6, 6, 6, 0)
+        cl.addWidget(self.preview, 1)
+        cl.addLayout(transport)
+
+        right = theme.mark(QFrame(), "panel")
+        right.setObjectName("sidePanel")
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(4, 8, 4, 4)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.side)
+        rv.addWidget(scroll)
+        right.setMinimumWidth(330)
+
+        top = QSplitter(Qt.Orientation.Horizontal)
+        top.setHandleWidth(6)
+        top.addWidget(center)
+        top.addWidget(right)
+        top.setStretchFactor(0, 1)
+        top.setSizes([900, 360])
+
+        # --- лента и её кнопки ---
+        def tbtn(action: QAction) -> QToolButton:
+            b = QToolButton()
+            b.setDefaultAction(action)
+            b.setIconSize(theme.icon_size(18))
+            return b
+
+        zoom_out, zoom_in = QToolButton(), QToolButton()
+        zoom_out.setIcon(theme.icon("zoom-out", size=18))
+        zoom_in.setIcon(theme.icon("zoom-in", size=18))
+        zoom_out.setToolTip("Уменьшить ленту (Ctrl+колёсико)")
+        zoom_in.setToolTip("Увеличить ленту (Ctrl+колёсико)")
+        zoom_fit = theme.mark(QPushButton("Вся лента"), "ghost")
+        zoom_out.clicked.connect(lambda: self.timeline.zoom(1 / 1.4))
+        zoom_in.clicked.connect(lambda: self.timeline.zoom(1.4))
+        zoom_fit.clicked.connect(self.timeline.fit)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 4, 8, 2)
+        bar.setSpacing(2)
+        for a in (self.a_undo, self.a_redo):
+            bar.addWidget(tbtn(a))
+        sep = theme.mark(QFrame(), "vdivider")
+        sep.setFixedSize(1, 18)
+        bar.addSpacing(6)
+        bar.addWidget(sep)
+        bar.addSpacing(6)
+        for a in (self.a_split, self.a_delete):
+            bar.addWidget(tbtn(a))
+        bar.addStretch(1)
+        bar.addWidget(zoom_out)
+        bar.addWidget(zoom_fit)
+        bar.addWidget(zoom_in)
+        bottom = theme.mark(QFrame(), "panel")
+        bottom.setObjectName("timelinePanel")
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(0)
+        bl.addLayout(bar)
+        bl.addWidget(self.timeline, 1)
+
+        root = QSplitter(Qt.Orientation.Vertical)
+        root.setHandleWidth(6)
+        root.addWidget(top)
+        root.addWidget(bottom)
+        root.setStretchFactor(0, 1)
+        root.setStretchFactor(1, 0)
+        root.setSizes([600, 190])
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 8, 8)
+        body.setSpacing(6)
+        body.addWidget(rail)
+        body.addWidget(self.shortcuts)
+        body.addWidget(root, 1)
+        central = QWidget()
+        cv = QVBoxLayout(central)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
+        cv.addWidget(topbar)
+        cv.addLayout(body, 1)
+        self.setCentralWidget(central)
+        self.setStyleSheet(EDITOR_QSS)
 
     def _update_actions(self) -> None:
         self.a_undo.setEnabled(self.history.can_undo)
@@ -460,8 +564,7 @@ class EditorWindow(QMainWindow):
         self._sync_preview()
         self._save_timer.start()
 
-    def _on_aspect(self) -> None:
-        value = self.aspect_box.currentData()
+    def _on_aspect(self, value: str) -> None:
         if value == self.project.aspect:
             return
         self.history.push(self.project.to_dict(), key="aspect")
@@ -484,9 +587,8 @@ class EditorWindow(QMainWindow):
     def _restore(self, state: dict) -> None:
         self.project.restore(state)
         self.preview.set_aspect(self.project.aspect)
-        self.aspect_box.blockSignals(True)
-        self.aspect_box.setCurrentIndex(max(0, self.aspect_box.findData(self.project.aspect)))
-        self.aspect_box.blockSignals(False)
+        for b in self.aspect_group.buttons():
+            b.setChecked(b.property("aspect") == self.project.aspect)
         self._changed()
 
     def split(self) -> None:

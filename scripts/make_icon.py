@@ -1,28 +1,25 @@
-"""Рисует иконку приложения assets/icon.png (запускать один раз, результат лежит в репозитории)."""
+"""Рисует значок программы assets/icon.png из знака Glimpsy (glimpsy/ui/icons.py → draw_logo).
 
+Запускать после изменения знака: python scripts/make_icon.py
+"""
+
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QLinearGradient, QPainter
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from PySide6.QtCore import Qt                                          # noqa: E402
+from PySide6.QtGui import QGuiApplication, QImage, QPainter            # noqa: E402
 
 app = QGuiApplication([])
+from glimpsy.ui.icons import draw_logo                                 # noqa: E402
+
 S = 1024
 img = QImage(S, S, QImage.Format.Format_ARGB32)
 img.fill(Qt.GlobalColor.transparent)
 p = QPainter(img)
-p.setRenderHint(QPainter.RenderHint.Antialiasing)
-grad = QLinearGradient(0, 0, S, S)
-grad.setColorAt(0, QColor("#2B2B33"))
-grad.setColorAt(1, QColor("#121216"))
-p.setBrush(grad)
-p.setPen(Qt.PenStyle.NoPen)
-p.drawRoundedRect(QRectF(64, 64, S - 128, S - 128), 200, 200)
-# «плёнка» из трёх кадров разной длины — символ нарезки моментов
-for i, (x, w) in enumerate([(230, 150), (410, 230), (670, 120)]):
-    p.setBrush(QColor(["#5B5BD6", "#8E4EC6", "#3E63DD"][i]))
-    p.drawRoundedRect(QRectF(x, 330, w, 250), 40, 40)
-p.setBrush(QColor("#E5484D"))
-p.drawEllipse(QRectF(437, 640, 150, 150))
+p.translate(S * 0.06, S * 0.06)            # поля, как у системных значков
+draw_logo(p, S * 0.88)
 p.end()
 out = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
 img.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation).save(str(out))

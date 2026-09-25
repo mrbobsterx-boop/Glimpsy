@@ -50,7 +50,7 @@ class TextPanel(QWidget):
         self._loading = False
 
         title = QLabel("Текст")
-        title.setStyleSheet("font-weight: 600;")
+        title.setProperty("role", "title")
         self.edit = QPlainTextEdit()
         self.edit.setPlaceholderText("Введите текст…")
         self.edit.setFixedHeight(70)
@@ -65,7 +65,7 @@ class TextPanel(QWidget):
         self.own.toggled.connect(lambda on: self._emit("own_style", on))
         self.scope = QLabel()
         self.scope.setWordWrap(True)
-        self.scope.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        self.scope.setProperty("role", "hint")
 
         self.font_box = QFontComboBox()
         self.font_box.currentFontChanged.connect(lambda f: self._emit("font", f.family()))
@@ -116,20 +116,20 @@ class TextPanel(QWidget):
             pos_row.addWidget(b)
 
         form = QFormLayout()
-        form.addRow("Появляется:", self.start)
-        form.addRow("Длительность:", self.dur)
+        form.addRow("Появляется", self.start)
+        form.addRow("Длительность", self.dur)
         form.addRow(self.own)
         form.addRow(self.scope)
-        form.addRow("Шрифт:", self.font_box)
+        form.addRow("Шрифт", self.font_box)
         form.addRow(add_font_btn)
-        form.addRow("Размер:", self.size)
-        form.addRow("Цвет:", self.color)
+        form.addRow("Размер", self.size)
+        form.addRow("Цвет", self.color)
         form.addRow(look)
         form.addRow(bg_row)
-        form.addRow("Прозрачность:", self.bg_opacity)
-        form.addRow("Скругление:", self.bg_radius)
-        form.addRow("Анимация:", self.anim)
-        form.addRow("Положение:", pos_row)
+        form.addRow("Прозрачность", self.bg_opacity)
+        form.addRow("Скругление", self.bg_radius)
+        form.addRow("Анимация", self.anim)
+        form.addRow("Положение", pos_row)
 
         delete = QPushButton("Удалить текст")
         delete.clicked.connect(lambda: self._emit("delete", None))
@@ -138,7 +138,7 @@ class TextPanel(QWidget):
         hint = QLabel("Текст можно перетаскивать мышью в окне просмотра, а на ленте — двигать по времени "
                       "и тянуть за края.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        hint.setProperty("role", "hint")
 
         lay = QVBoxLayout(self)
         lay.addWidget(title)

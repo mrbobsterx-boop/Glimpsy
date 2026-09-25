@@ -53,6 +53,14 @@ def default_output_dir() -> Path:
     return videos / APP_NAME
 
 
+def asset(rel: str) -> Path:
+    """Файл из папки assets/ (иконки, шрифты) — и в собранной программе, и при запуске из исходников."""
+    bundle = _bundle_dir()
+    if bundle and (bundle / "assets" / rel).exists():
+        return bundle / "assets" / rel
+    return Path(__file__).resolve().parent.parent / "assets" / rel
+
+
 def _bundle_dir() -> Path | None:
     """Папка распакованной сборки PyInstaller (там лежит встроенный FFmpeg)."""
     base = getattr(sys, "_MEIPASS", None)

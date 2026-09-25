@@ -15,7 +15,8 @@ from glimpsy import paths
 from glimpsy.config import Settings, save_settings
 from glimpsy.platform.base import PlatformServices
 from glimpsy.recorder.engine import RecorderEngine, State
-from glimpsy.ui.icons import state_icon
+from glimpsy.ui import theme
+from glimpsy.ui.icons import app_logo, state_icon
 from glimpsy.ui.settings_dialog import SettingsDialog
 
 log = logging.getLogger(__name__)
@@ -42,19 +43,23 @@ class TrayController(QObject):
         self.a_counts = self.menu.addAction("")
         self.a_counts.setEnabled(False)
         self.menu.addSeparator()
-        self.a_pause = self.menu.addAction("Пауза", self.engine.toggle_pause)
-        self.a_important = self.menu.addAction("⭐ Отметить важный момент", self.engine.mark_important)
-        self.a_finish = self.menu.addAction("🎬 Завершить и собрать ролик", self._finish)
-        self.a_start = self.menu.addAction("▶ Начать запись", self.engine.start_session)
+        ic = theme.icon
+        self.a_pause = self.menu.addAction(ic("pause", size=16), "Пауза", self.engine.toggle_pause)
+        self.a_important = self.menu.addAction(ic("star", "#F5C518", 16), "Отметить важный момент",
+                                               self.engine.mark_important)
+        self.a_finish = self.menu.addAction(ic("film", theme.ACCENT_HOVER, 16), "Завершить и собрать ролик",
+                                            self._finish)
+        self.a_start = self.menu.addAction(ic("circle", theme.DANGER, 16), "Начать запись", self.engine.start_session)
         self.menu.addSeparator()
-        self.monitor_menu = self.menu.addMenu("Монитор")
+        self.monitor_menu = self.menu.addMenu(ic("monitor", size=16), "Монитор")
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
-        self.menu.addAction("Настройки…", self.open_settings)
-        self.menu.addAction("Открыть папку с роликами", lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
-        self.menu.addAction("🎞 Редактор роликов…", self.open_editor)
-        self.menu.addAction("🧹 Очистить кэш…", self.clear_cache)
+        self.menu.addAction(ic("film", size=16), "Редактор роликов…", self.open_editor)
+        self.menu.addAction(ic("folder-open", size=16), "Папка с роликами",
+                            lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
+        self.menu.addAction(ic("settings", size=16), "Настройки…", self.open_settings)
+        self.menu.addAction(ic("trash-2", size=16), "Очистить кэш…", self.clear_cache)
         self.menu.addSeparator()
-        self.menu.addAction("Выход", self.quit)
+        self.menu.addAction(ic("power", size=16), "Выход", self.quit)
 
         self.tray: QSystemTrayIcon | None = None
         self.window: QWidget | None = None
@@ -102,7 +107,8 @@ class TrayController(QObject):
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
         self.a_counts.setText(f"Фрагментов: {n} (нужно ~{need})" + (f", важных: {imp}" if imp else ""))
         active = state not in (State.STOPPED, State.ASSEMBLING)
-        self.a_pause.setText("▶ Продолжить" if state == State.PAUSED else "⏸ Пауза")
+        self.a_pause.setText("Продолжить" if state == State.PAUSED else "Пауза")
+        self.a_pause.setIcon(theme.icon("play" if state == State.PAUSED else "pause", size=16))
         for a in (self.a_pause, self.a_important, self.a_finish):
             a.setVisible(active)
         self.a_start.setVisible(state == State.STOPPED)
@@ -173,32 +179,63 @@ class TrayController(QObject):
                  "рядом с часами. Чтобы значок был виден всегда, перетащите его из этого "
                  "меню на панель задач." if paths.IS_WINDOWS else
                  "в строке меню вверху экрана." if paths.IS_MAC else "в системном трее.")
-        box = QMessageBox()
-        box.setWindowTitle("Glimpsy")
-        box.setIconPixmap(state_icon(State.RECORDING).pixmap(48, 48))
-        box.setText("<b>Glimpsy запущен и записывает экран в фоне.</b>")
-        box.setInformativeText(
-            f"У программы нет большого окна — только значок {where}\n\n"
-            "Нажмите на значок правой кнопкой: там пауза, настройки и сборка ролика.\n\n"
-            f"Горячие клавиши:\n"
-            f"  {self.s.hotkey_important} — важный момент\n"
-            f"  {self.s.hotkey_pause} — пауза / продолжить\n"
-            f"  {self.s.hotkey_finish} — завершить и собрать ролик")
-        from PySide6.QtWidgets import QCheckBox
+        from PySide6.QtWidgets import QCheckBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
         from glimpsy import autostart
 
+        dlg = QDialog()
+        dlg.setWindowTitle("Glimpsy")
+        dlg.setMinimumWidth(460)
+        logo = QLabel()
+        logo.setPixmap(app_logo(64))
+        title = theme.mark(QLabel("Glimpsy записывает экран в фоне"), "h1")
+        title.setWordWrap(True)
+        sub = theme.mark(QLabel(f"Большого окна нет — только значок {where} Нажмите на него: там пауза, "
+                                "настройки, редактор и сборка ролика."), "muted")
+        sub.setWordWrap(True)
+        keys = QGridLayout()
+        keys.setHorizontalSpacing(12)
+        keys.setVerticalSpacing(8)
+        for i, (combo, text) in enumerate(((self.s.hotkey_important, "важный момент — точно попадёт в ролик"),
+                                           (self.s.hotkey_pause, "пауза / продолжить"),
+                                           (self.s.hotkey_finish, "завершить и собрать ролик"))):
+            keys.addWidget(theme.mark(QLabel(combo), "kbd"), i, 0)
+            keys.addWidget(QLabel(text), i, 1)
+        keys.setColumnStretch(1, 1)
         login = QCheckBox("Запускать Glimpsy вместе с компьютером")
         login.setChecked(True)
-        box.setCheckBox(login)
-        b_settings = box.addButton("Открыть настройки", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("Понятно", QMessageBox.ButtonRole.AcceptRole)
-        box.exec()
+        b_settings = theme.mark(QPushButton("Настройки"), "ghost")
+        b_ok = theme.mark(QPushButton("Понятно"), "primary")
+        b_ok.setDefault(True)
+        opened = {"settings": False}
+        b_ok.clicked.connect(dlg.accept)
+        b_settings.clicked.connect(lambda: (opened.__setitem__("settings", True), dlg.accept()))
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(b_settings)
+        buttons.addWidget(b_ok)
+        head = QHBoxLayout()
+        head.setSpacing(16)
+        head.addWidget(logo, alignment=Qt.AlignmentFlag.AlignTop)
+        text = QVBoxLayout()
+        text.setSpacing(6)
+        text.addWidget(title)
+        text.addWidget(sub)
+        head.addLayout(text, 1)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(24, 22, 24, 18)
+        lay.setSpacing(14)
+        lay.addLayout(head)
+        lay.addWidget(theme.mark(QLabel("Горячие клавиши"), "section"))
+        lay.addLayout(keys)
+        lay.addWidget(login)
+        lay.addLayout(buttons)
+        dlg.exec()
         err = autostart.set_enabled(login.isChecked())
         self.s.launch_at_login = autostart.is_enabled()
         if err:
             self.show_message("Автозапуск", f"Не удалось включить автозапуск: {err}")
-        if box.clickedButton() == b_settings:
+        if opened["settings"]:
             self.open_settings()
 
     def show_already_running(self) -> None:

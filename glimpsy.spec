@@ -37,7 +37,7 @@ a = Analysis(
     [str(ROOT / "glimpsy" / "__main__.py")],
     pathex=[str(ROOT)],
     binaries=binaries,
-    datas=[(str(ROOT / "assets" / "icon.png"), "assets")],
+    datas=[(str(ROOT / "assets"), "assets")],          # иконки, шрифт Inter, значок программы
     hiddenimports=hidden,
     # Лишние модули Qt сильно раздувают сборку — нам они не нужны
     excludes=["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQml",

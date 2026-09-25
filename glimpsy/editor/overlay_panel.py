@@ -26,7 +26,7 @@ class OverlayPanel(QWidget):
         self._loading = False
 
         self.title = QLabel("Наложение")
-        self.title.setStyleSheet("font-weight: 600;")
+        self.title.setProperty("role", "title")
         self.title.setWordWrap(True)
         self.start = QDoubleSpinBox(minimum=0, maximum=36000, singleStep=0.1, decimals=2, suffix=" с")
         self.dur = QDoubleSpinBox(minimum=0.2, maximum=36000, singleStep=0.1, decimals=2, suffix=" с")
@@ -54,14 +54,14 @@ class OverlayPanel(QWidget):
         full.clicked.connect(lambda: self._emit("fill", None))
 
         form = QFormLayout()
-        form.addRow("Появляется:", self.start)
-        form.addRow("Длительность:", self.dur)
-        form.addRow("Размер:", self.size)
-        form.addRow("Прозрачность:", self.opacity)
-        form.addRow("Скругление:", self.radius)
+        form.addRow("Появляется", self.start)
+        form.addRow("Длительность", self.dur)
+        form.addRow("Размер", self.size)
+        form.addRow("Прозрачность", self.opacity)
+        form.addRow("Скругление", self.radius)
         form.addRow(self.shadow)
         form.addRow(self.sound)
-        form.addRow("Положение:", grid)
+        form.addRow("Положение", grid)
         form.addRow(full)
 
         delete = QPushButton("Удалить наложение")
@@ -69,7 +69,7 @@ class OverlayPanel(QWidget):
         hint = QLabel("В просмотре наложение перетаскивается мышью, размер — уголки или колёсико. "
                       "На ленте его можно двигать по времени и тянуть за края.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        hint.setProperty("role", "hint")
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.title)

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from glimpsy.editor.media import Thumbnailer
 from glimpsy.editor.project import Project
+from glimpsy.ui import theme
 
 RULER_H = 24
 TEXT_Y = 30          # дорожка текстов
@@ -31,16 +32,18 @@ MUSIC_H = 20
 EDGE_PX = 8
 GAP = 2
 
-COL_BG = QColor("#17171c")
-COL_RULER = QColor("#8b8d98")
-COL_CLIP = QColor("#1f6f78")
-COL_IMAGE = QColor("#6b4fa3")
-COL_SELECT = QColor("#ffffff")
-COL_PLAYHEAD = QColor("#ffffff")
-COL_DROP = QColor("#3e9bff")
-COL_TEXT = QColor("#b5892a")
-COL_OVL = QColor("#7d5fb2")
-COL_MUSIC = QColor("#2f8f5b")
+COL_BG = QColor(theme.SURFACE)
+COL_RULER = QColor(theme.FAINT)
+COL_CLIP = QColor("#1C5F68")
+COL_IMAGE = QColor("#4B3C7A")
+COL_SELECT = QColor(theme.ACCENT_HOVER)
+COL_PLAYHEAD = QColor("#FFFFFF")
+COL_DROP = QColor(theme.ACCENT)
+COL_TEXT = QColor("#D0932F")
+COL_OVL = QColor("#7E62D6")
+COL_MUSIC = QColor("#2E9A6E")
+COL_LANE = QColor(255, 255, 255, 9)
+LANE_ICONS = {"text": "type", "overlay": "layers", "music": "music"}
 MIN_TEXT_S = 0.2
 LANES = ("text", "overlay")
 
@@ -161,63 +164,73 @@ class TimelineWidget(QWidget):
         if not self.project.clips:
             p.setPen(COL_RULER)
             p.drawText(QRectF(0, TRACK_Y, self.width(), TRACK_H), Qt.AlignmentFlag.AlignCenter,
-                       "Перетащите сюда видео или фото, или нажмите «Добавить медиа»")
+                       "Перетащите сюда видео или фото, или нажмите «Медиа» слева")
         # курсор воспроизведения
         x = self.x_of(self.playhead)
         p.setPen(QPen(COL_PLAYHEAD, 2))
-        p.drawLine(QPointF(x, 4), QPointF(x, self.height() - 4))
+        p.drawLine(QPointF(x, 8), QPointF(x, self.height() - 4))
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(COL_PLAYHEAD)
-        p.drawPolygon([QPointF(x - 6, 2), QPointF(x + 6, 2), QPointF(x, 10)])
+        p.drawRoundedRect(QRectF(x - 6, 2, 12, 12), 4, 4)
 
     def _paint_lane(self, p: QPainter, kind: str) -> None:
         f = QFont(self.font())
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        f.setPixelSize(11)
         p.setFont(f)
         y = self._lane_y(kind)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 12))
-        p.drawRoundedRect(QRectF(0, y, self.width(), TEXT_H), 4, 4)
+        p.setBrush(COL_LANE)
+        p.drawRoundedRect(QRectF(4, y, self.width() - 8, TEXT_H), 6, 6)
         items = self._lane_items(kind)
         if not items:
-            p.setPen(QColor(COL_RULER.red(), COL_RULER.green(), COL_RULER.blue(), 140))
-            hint = ("T  тексты — кнопка «T Текст» сверху" if kind == "text"
-                    else "▣  наложения — кнопка «▣ Наложение» или перетащите сюда картинку/видео")
-            p.drawText(QRectF(12, y, self.width(), TEXT_H), Qt.AlignmentFlag.AlignVCenter, hint)
+            hint = ("Текст — кнопка «Текст» слева или клавиша T" if kind == "text"
+                    else "Наложение — кнопка слева или перетащите сюда картинку или видео")
+            self._lane_hint(p, kind, y, TEXT_H, hint)
             return
         selected = self.selected_text if kind == "text" else self.selected_overlay
         for t, r in zip(items, self.lane_rects(kind)):
             if r.right() < 0 or r.left() > self.width():
                 continue
-            p.setPen(QPen(COL_SELECT, 2) if t.id == selected else Qt.PenStyle.NoPen)
+            p.setPen(QPen(QColor("#FFFFFF"), 2) if t.id == selected else Qt.PenStyle.NoPen)
             p.setBrush(COL_TEXT if kind == "text" else COL_OVL)
-            p.drawRoundedRect(r, 4, 4)
-            p.setPen(QColor("#ffffff"))
-            if kind == "text":
-                label = "T  " + (t.text.strip().splitlines() or [""])[0]
-            else:
-                label = ("▣  " if t.kind == "image" else "▶  ") + t.label
-            p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+            p.drawRoundedRect(r, 6, 6)
+            label = (t.text.strip().splitlines() or [""])[0] if kind == "text" else t.label
+            self._chip_text(p, r, kind if kind == "text" else ("overlay" if t.kind == "image" else "video"), label)
 
     def music_rect(self) -> QRectF:
         return QRectF(self.x_of(0) + 1, MUSIC_Y, max(6.0, self.project.total * self.pps - 2), MUSIC_H)
 
     def _paint_music(self, p: QPainter) -> None:
         f = QFont(self.font())
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        f.setPixelSize(11)
         p.setFont(f)
         m = self.project.music
         if m is None:
-            p.setPen(QColor(COL_RULER.red(), COL_RULER.green(), COL_RULER.blue(), 140))
-            p.drawText(QRectF(12, MUSIC_Y, self.width(), MUSIC_H), Qt.AlignmentFlag.AlignVCenter,
-                       "♪  музыка — кнопка «♪ Музыка» сверху или перетащите сюда mp3")
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(COL_LANE)
+            p.drawRoundedRect(QRectF(4, MUSIC_Y, self.width() - 8, MUSIC_H), 6, 6)
+            self._lane_hint(p, "music", MUSIC_Y, MUSIC_H, "Музыка — кнопка «Музыка» слева или перетащите сюда mp3")
             return
         r = self.music_rect()
-        p.setPen(QPen(COL_SELECT, 2) if self.music_active else Qt.PenStyle.NoPen)
+        p.setPen(QPen(QColor("#FFFFFF"), 2) if self.music_active else Qt.PenStyle.NoPen)
         p.setBrush(COL_MUSIC)
-        p.drawRoundedRect(r, 4, 4)
-        p.setPen(QColor("#ffffff"))
-        p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                   f"♪  {m.label}  ·  громкость {int(m.volume * 100)}%")
+        p.drawRoundedRect(r, 6, 6)
+        self._chip_text(p, r, "music", f"{m.label}  ·  громкость {int(m.volume * 100)}%")
+
+    def _lane_hint(self, p: QPainter, kind: str, y: float, h: float, text: str) -> None:
+        p.drawPixmap(QPointF(14, y + (h - 12) / 2), theme.pixmap(LANE_ICONS[kind], theme.FAINT, 12))
+        p.setPen(COL_RULER)
+        p.drawText(QRectF(32, y, self.width(), h), Qt.AlignmentFlag.AlignVCenter, text)
+
+    def _chip_text(self, p: QPainter, r: QRectF, kind: str, text: str) -> None:
+        """Иконка и подпись внутри элемента дорожки."""
+        ic = {"text": "type", "overlay": "image-plus", "video": "film", "music": "music"}[kind]
+        p.save()
+        p.setClipRect(r.adjusted(2, 0, -2, 0))
+        p.drawPixmap(QPointF(r.left() + 6, r.center().y() - 6), theme.pixmap(ic, "#FFFFFF", 12))
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(r.adjusted(22, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        p.restore()
 
     def select_music(self, on: bool) -> None:
         if on:
@@ -234,7 +247,7 @@ class TimelineWidget(QWidget):
         step = next(s for s in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600) if s * self.pps >= 70)
         p.setPen(COL_RULER)
         f = QFont(self.font())
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        f.setPixelSize(10)
         p.setFont(f)
         t = (self.t_of(0) // step) * step
         while self.x_of(t) < self.width():
@@ -248,7 +261,7 @@ class TimelineWidget(QWidget):
 
     def _paint_clip(self, p: QPainter, c, r: QRectF, ghost: bool) -> None:
         path = QPainterPath()
-        path.addRoundedRect(r, 6, 6)
+        path.addRoundedRect(r, 8, 8)
         p.save()
         p.setClipPath(path)
         p.fillRect(r, COL_IMAGE if c.kind == "image" else COL_CLIP)
@@ -268,29 +281,43 @@ class TimelineWidget(QWidget):
             x += tile_w
         if ghost:
             p.fillRect(r, QColor(0, 0, 0, 150))
-        # подписи
-        p.fillRect(QRectF(r.left(), r.top(), r.width(), 16), QColor(0, 0, 0, 120))
-        p.fillRect(QRectF(r.left(), r.bottom() - 16, r.width(), 16), QColor(0, 0, 0, 120))
-        p.setPen(QColor("#ffffff"))
+        # подписи — «пилюли» поверх кадров
         f = QFont(self.font())
-        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        f.setPixelSize(10)
         p.setFont(f)
-        badges = ("⭐ " if c.priority else "") + ("🔇 " if c.muted and c.has_audio else "")
+        fm = p.fontMetrics()
+        badges = ("★ " if c.priority else "") + ("без звука · " if c.muted and c.has_audio else "")
         if abs(c.speed - 1.0) > 1e-3:
-            badges += f"×{c.speed:g} "
-        p.drawText(QRectF(r.left() + 5, r.top(), r.width() - 10, 16),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, badges + (c.label or ""))
-        p.drawText(QRectF(r.left() + 5, r.bottom() - 16, r.width() - 10, 16),
-                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, f"{c.duration:.1f} с")
+            badges += f"×{c.speed:g} · "
+        if c.motion != "none" and c.cursor:
+            badges += "зум · "
+        top = badges + (c.label or "")
+        for text, right in ((top, False), (f"{c.duration:.1f} с", True)):
+            w = min(r.width() - 8, fm.horizontalAdvance(text) + 12)
+            if w < 20:
+                continue
+            x = r.right() - 4 - w if right else r.left() + 4
+            y = r.bottom() - 19 if right else r.top() + 4
+            pill = QRectF(x, y, w, 15)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 150))
+            p.drawRoundedRect(pill, 7, 7)
+            p.setPen(QColor("#FFFFFF"))
+            p.drawText(pill.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter,
+                       fm.elidedText(text, Qt.TextElideMode.ElideRight, int(pill.width() - 12)))
         p.restore()
         if c.id in self.selection:
-            p.setPen(QPen(COL_SELECT if c.id == self.selected else COL_DROP, 2))
+            p.setPen(QPen(COL_SELECT if c.id == self.selected else QColor(theme.ACCENT_DOWN), 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 6, 6)
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 8, 8)
             # «ручки» обрезки
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(COL_SELECT)
             for hx in (r.left() + 1, r.right() - 7):
                 p.drawRoundedRect(QRectF(hx, r.top() + 1, 6, r.height() - 2), 3, 3)
+            p.setBrush(QColor(0, 0, 0, 120))
+            for hx in (r.left() + 3, r.right() - 5):
+                p.drawRoundedRect(QRectF(hx, r.center().y() - 7, 2, 14), 1, 1)
 
     # ---------- мышь ----------
 

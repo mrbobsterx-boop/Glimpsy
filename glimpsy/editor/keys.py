@@ -25,22 +25,26 @@ _CYR = dict(zip("йцукенгшщзфывапролдячсмить", "qwertyu
 
 
 def latin_letter(ev: QKeyEvent) -> str | None:
-    """Латинская буква физической клавиши (a–z) или None."""
+    """Латинская буква клавиши (a–z) или None — в любой раскладке."""
+    k = ev.key()
+    if Qt.Key.Key_A <= k <= Qt.Key.Key_Z:      # латинская раскладка — буква как есть
+        return chr(k).lower()
+    # другая раскладка (например, русская): смотрим, какая это физическая клавиша
     if sys.platform.startswith("win"):
-        vk = ev.nativeVirtualKey()        # на Windows это код клавиши, не зависящий от раскладки
+        vk = ev.nativeVirtualKey()              # на Windows это код клавиши, не зависящий от раскладки
         if 0x41 <= vk <= 0x5A:
             return chr(vk).lower()
     elif sys.platform == "darwin":
-        letter = _MAC.get(ev.nativeVirtualKey())
-        if letter:
-            return letter
+        vk = ev.nativeVirtualKey()
+        # код 0 — это клавиша «A», но его же дают события без кода клавиши: проверяем по символу
+        if vk or ev.text().lower() in ("a", "ф"):
+            letter = _MAC.get(vk)
+            if letter:
+                return letter
     else:
         letter = _X11.get(ev.nativeScanCode())
         if letter:
             return letter
-    k = ev.key()
-    if Qt.Key.Key_A <= k <= Qt.Key.Key_Z:
-        return chr(k).lower()
     return _CYR.get(ev.text().lower())
 
 
