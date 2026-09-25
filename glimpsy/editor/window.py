@@ -19,7 +19,7 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractSpinBox, QApplication, QMenu, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
     QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
@@ -192,8 +192,15 @@ class EditorWindow(QMainWindow):
         self.montage_btn.setToolTip("Автозум, клики, темп, наезды, 9:16 и склейки под музыку — одной кнопкой")
         self.montage_btn.clicked.connect(self.auto_montage)
         self.export_btn = theme.mark(QPushButton(theme.icon("download", "#FFFFFF", 16), "  Экспорт"), "primary")
-        self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E)")
-        self.export_btn.clicked.connect(self.export)
+        self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E — в текущем формате)")
+        export_menu = QMenu(self.export_btn)
+        export_menu.addAction(theme.icon("monitor", size=16), "16:9 — YouTube", lambda: self.export(["16:9"]))
+        export_menu.addAction(theme.icon("smartphone", size=16), "9:16 — Reels, TikTok, Shorts",
+                              lambda: self.export(["9:16"]))
+        export_menu.addSeparator()
+        export_menu.addAction(theme.icon("layers", size=16), "Оба формата сразу (два файла)",
+                              lambda: self.export(["16:9", "9:16"]))
+        self.export_btn.setMenu(export_menu)
         topbar = QFrame()
         topbar.setObjectName("topbar")
         tl = QHBoxLayout(topbar)
@@ -1198,12 +1205,13 @@ class EditorWindow(QMainWindow):
 
     # ---------- экспорт ----------
 
-    def export(self) -> None:
+    def export(self, aspects: list[str] | None = None) -> None:
+        """Экспорт в текущем формате или сразу в нескольких (16:9 и 9:16 — два файла)."""
         self.player.pause()
         self._save()
-        out = default_output(self.project, self.fallback_output)
+        aspects = aspects or [self.project.aspect]
         dlg = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
-        dlg.setWindowTitle("Экспорт ролика")
+        dlg.setWindowTitle("Экспорт ролика" if len(aspects) == 1 else "Экспорт: 16:9 и 9:16")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
@@ -1215,14 +1223,15 @@ class EditorWindow(QMainWindow):
 
         def finished(path: str) -> None:
             dlg.close()
+            files = path.split("\n")
             box = QMessageBox(self)
             box.setWindowTitle("Готово")
-            box.setText(f"Ролик сохранён:\n{path}")
+            box.setText(("Ролик сохранён:\n" if len(files) == 1 else "Ролики сохранены:\n") + "\n".join(files))
             b_open = box.addButton("Открыть папку", QMessageBox.ButtonRole.ActionRole)
             box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
             box.exec()
             if box.clickedButton() == b_open:
-                paths.open_in_file_manager(Path(path).parent)
+                paths.open_in_file_manager(Path(files[0]).parent)
 
         def failed(msg: str) -> None:
             dlg.close()
@@ -1231,26 +1240,37 @@ class EditorWindow(QMainWindow):
 
         bridge.done.connect(finished)
         bridge.failed.connect(failed)
-        snapshot = Project(self.project.dir, self.project.name, fps=self.project.fps,
-                           source_video=self.project.source_video)
-        snapshot.restore(self.project.to_dict())    # копия — можно продолжать править во время экспорта
-        # тексты рисуются в основном потоке (так надёжнее для шрифтов), дальше — FFmpeg в фоне
+        # тексты и наложения рисуются в основном потоке (так надёжнее для шрифтов), дальше — FFmpeg в фоне
         layers_dir = paths.temp_root() / f"text_{int(time.time())}"
-        text_layers = render_text_layers(snapshot, layers_dir)
-        overlay_layers = render_overlay_layers(snapshot, layers_dir)
+        jobs = []
+        for aspect in aspects:
+            snapshot = Project(self.project.dir, self.project.name, fps=self.project.fps,
+                               source_video=self.project.source_video)
+            snapshot.restore(self.project.to_dict())   # копия — можно продолжать править во время экспорта
+            snapshot.aspect = aspect
+            sub = layers_dir / aspect.replace(":", "x")
+            jobs.append((snapshot, default_output(snapshot, self.fallback_output),
+                         render_text_layers(snapshot, sub), render_overlay_layers(snapshot, sub)))
 
         def work() -> None:
+            done = []
             try:
                 enc = self.encoder_getter()
-                path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
-                                      overlay_layers=overlay_layers,
-                                      progress=lambda f, t: bridge.progress.emit(f, t), cancel=cancel)
-                bridge.done.emit(str(path))
+                for n, (snapshot, out, text_layers, overlay_layers) in enumerate(jobs):
+                    prefix = f"{snapshot.aspect} ({n + 1} из {len(jobs)}): " if len(jobs) > 1 else ""
+
+                    def prog(f: float, t: str, n=n, prefix=prefix) -> None:
+                        bridge.progress.emit((n + f) / len(jobs), prefix + t)
+
+                    path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
+                                          overlay_layers=overlay_layers, progress=prog, cancel=cancel)
+                    done.append(str(path))
+                bridge.done.emit("\n".join(done))
             except ExportCancelled:
                 bridge.failed.emit("")
             except Exception as e:
                 log.exception("Экспорт не удался")
-                bridge.failed.emit(str(e))
+                bridge.failed.emit(str(e) + (f"\n\nУже сохранено: {', '.join(done)}" if done else ""))
             finally:
                 shutil.rmtree(layers_dir, ignore_errors=True)
 
