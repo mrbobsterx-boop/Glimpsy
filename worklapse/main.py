@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import signal
 import sys
@@ -80,7 +81,15 @@ def main() -> None:
     paths.clean_child_environment()
     setup_logging()
     log.info("%s %s запускается", APP_NAME, __version__)
+    # Linux/X11: OpenGL программе не нужен (кадры рисуются обычным способом). А если он есть,
+    # Qt пытается через него готовить кадры видео в редакторе и на некоторых системах
+    # (например, Steam Deck) падает целиком: «Could not initialize GLX». Выключаем.
+    disable_gl = sys.platform.startswith("linux") and "QT_XCB_GL_INTEGRATION" not in os.environ
+    if disable_gl:
+        os.environ["QT_XCB_GL_INTEGRATION"] = "none"
     app = QApplication(sys.argv)
+    if disable_gl:
+        os.environ.pop("QT_XCB_GL_INTEGRATION", None)   # запущенным программам (файловому менеджеру) — как было
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)     # программа живёт в трее
     app.setWindowIcon(state_icon("recording"))
