@@ -50,6 +50,11 @@ class Settings:
     autostart_recording: bool = True   # начинать запись сразу при запуске программы
     launch_at_login: bool = False      # запускать вместе с компьютером (реально хранится в системе)
 
+    # --- Веб-камера (по умолчанию выключена: камера не включается без вашего согласия) ---
+    camera_mode: str = "off"           # off / rare / sometimes / often
+    camera_device: str = ""            # пусто — первая найденная камера
+    camera_clip_s: float = 4.0         # длина одного фрагмента с камеры
+
     # --- Горячие клавиши ---
     hotkey_important: str = "Ctrl+Alt+S"
     hotkey_pause: str = "Ctrl+Alt+P"
@@ -82,6 +87,9 @@ class Settings:
         self.idle_pause_s = max(10, min(int(self.idle_pause_s), 3600))
         self.oversample = max(1.5, min(float(self.oversample), 4.0))
         self.record_max_height = max(480, min(int(self.record_max_height), 4320))
+        if self.camera_mode not in ("off", "rare", "sometimes", "often"):
+            self.camera_mode = "off"
+        self.camera_clip_s = max(2.0, min(float(self.camera_clip_s), 10.0))
         self.blacklist = [s.strip() for s in self.blacklist if s and s.strip()]
         return self
 

@@ -7,6 +7,8 @@
   3. Внутри каждого кандидата выбираем самый живой кусок нужной длины.
   4. Каждый кусок приводим к одному размеру (1920×1080, с полями, если монитор другой
      формы), слегка ускоряем по темпу и склеиваем.
+  5. Если были фрагменты с веб-камеры — ставим их окошком в углу рядом с теми
+     моментами, когда они сняты.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from worklapse.paths import subprocess_flags
 from worklapse.recorder.candidates import Candidate
 from worklapse.recorder.encoder import Encoder, software_encoder
 from worklapse.recorder.pacing import Plan
+from worklapse.recorder.webcam import CamClip, load_clips
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +106,49 @@ def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.R
     return pieces
 
 
+CAM_EVERY_S = 12.0       # не чаще одного окошка с камеры на столько секунд ролика
+CAM_MIN_S = 1.5
+
+
+@dataclass
+class CamPlacement:
+    clip: CamClip
+    start: float             # секунда итогового ролика
+    duration: float
+
+
+def place_camera(pieces: list[Piece], cams: list[CamClip]) -> list[CamPlacement]:
+    """Каждый фрагмент с камеры — к тому куску ролика, который снят ближе всего по времени."""
+    if not pieces or not cams:
+        return []
+    starts, t = [], 0.0
+    for p in pieces:
+        starts.append(t)
+        t += p.out_s
+    total = t
+    limit = max(1, int(total // CAM_EVERY_S))
+    cams = sorted(cams, key=lambda c: c.start)
+    if len(cams) > limit:        # равномерно по сессии
+        cams = [cams[round(i * (len(cams) - 1) / max(1, limit - 1))] for i in range(limit)] if limit > 1 \
+            else [cams[len(cams) // 2]]
+    out: list[CamPlacement] = []
+    used: set[int] = set()
+    for c in cams:
+        order = sorted(range(len(pieces)), key=lambda i: abs(pieces[i].cand.wall_start + pieces[i].offset - c.start))
+        for i in order[:3]:     # только среди ближайших по времени — иначе окошко окажется «не к месту»
+            s = starts[i] + (0.3 if i else 0.8)
+            d = min(c.duration, total - s - 0.4)
+            if i in used or d < CAM_MIN_S:
+                continue
+            if any(s < o.start + o.duration + 2 and o.start < s + d + 2 for o in out):
+                continue       # не накладываем окошки друг на друга
+            used.add(i)
+            out.append(CamPlacement(c, round(s, 3), round(d, 3)))
+            break
+    out.sort(key=lambda o: o.start)
+    return out
+
+
 # ---------------- рендер ----------------
 
 class Assembler:
@@ -139,10 +185,20 @@ class Assembler:
         tmp_final = work / "final.mp4"
         self._ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy",
                       "-movflags", "+faststart", str(tmp_final)])
+        cams = place_camera(pieces, load_clips(session_dir))
+        if cams:
+            progress(len(pieces) / (len(pieces) + 1), "Окошко с веб-камеры")
+            with_cam = work / "final_cam.mp4"
+            try:
+                self._add_camera(tmp_final, cams, session_dir / "camera", with_cam)
+                tmp_final = with_cam
+            except AssemblyError:
+                log.exception("Не удалось добавить фрагменты с камеры — ролик без них")
+                cams = []
         shutil.move(str(tmp_final), final)
 
         if project_dir is not None:
-            self._save_project(project_dir, pieces, rendered, final)
+            self._save_project(project_dir, pieces, rendered, final, cams, session_dir / "camera")
         progress(1.0, "Готово")
         return final
 
@@ -171,6 +227,42 @@ class Assembler:
             self.encoder = software_encoder()
             self._ffmpeg(cmd(self.encoder))
 
+    def _add_camera(self, src: Path, cams: list[CamPlacement], cam_dir: Path, out: Path) -> None:
+        """Второй проход: окошки с камеры поверх склеенного ролика."""
+        from worklapse.editor.overlay import camera_item, overlay_rect, video_alpha_filter
+
+        W, H, fps = self.s.output_width, self.s.output_height, self.s.fps
+        aspect = "9:16" if H > W else "16:9"
+
+        def cmd(enc: Encoder) -> list[str]:
+            args = [*enc.global_args, "-i", str(src)]
+            parts, prev = [], "0:v"
+            for k, c in enumerate(cams, start=1):
+                item = camera_item("cam", c.clip.file, c.start, c.duration, c.clip.width, c.clip.height)
+                x, y, w, h = overlay_rect(item, aspect, W, H)
+                w, h = max(2, int(round(w / 2)) * 2), max(2, int(round(h / 2)) * 2)
+                S, E = c.start, c.start + c.duration
+                args += ["-t", f"{c.duration:.3f}", "-i", str(cam_dir / c.clip.file)]
+                fade = min(0.25, c.duration / 4)
+                parts.append(f"[{k}:v]setpts=PTS-STARTPTS+{S:.3f}/TB,"
+                             f"{video_alpha_filter(w, h, item.radius, 1.0)},"
+                             f"fade=t=in:st={S:.3f}:d={fade:.2f}:alpha=1,"
+                             f"fade=t=out:st={E - fade:.3f}:d={fade:.2f}:alpha=1[c{k}]")
+                parts.append(f"[{prev}][c{k}]overlay=x={round(x)}:y={round(y)}:eof_action=pass:"
+                             f"enable='between(t,{S:.3f},{E:.3f})'[v{k}]")
+                prev = f"v{k}"
+            parts.append(f"[{prev}]{enc.filter_suffix}[vout]")
+            return [*args, "-filter_complex", ";".join(parts), "-map", "[vout]", "-an",
+                    *enc.args("final", fps), "-movflags", "+faststart", str(out)]
+
+        try:
+            self._ffmpeg(cmd(self.encoder))
+        except AssemblyError:
+            if not self.encoder.hw:
+                raise
+            self.encoder = software_encoder()
+            self._ffmpeg(cmd(self.encoder))
+
     def _ffmpeg(self, args: list[str]) -> None:
         full = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
         log.debug("ffmpeg %s", " ".join(full))
@@ -178,7 +270,8 @@ class Assembler:
         if r.returncode != 0:
             raise AssemblyError("FFmpeg: " + r.stderr.decode("utf-8", "replace")[-800:])
 
-    def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path) -> None:
+    def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path,
+                      cams: list[CamPlacement] | None = None, cam_dir: Path | None = None) -> None:
         """Сохраняем готовые фрагменты и данные для будущего редактора (этап 2)."""
         project_dir.mkdir(parents=True, exist_ok=True)
         items = []
@@ -194,8 +287,16 @@ class Assembler:
                 "source_size": [c.width, c.height], "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor,
             })
+        camera = []
+        for i, c in enumerate(cams or []):
+            if cam_dir is None:
+                break
+            name = f"camera_{i:03d}.mp4"
+            shutil.copy2(cam_dir / c.clip.file, project_dir / name)
+            camera.append({"file": name, "start": c.start, "duration": c.duration, "src_duration": c.clip.duration,
+                           "width": c.clip.width, "height": c.clip.height, "recorded_at": c.clip.start})
         meta = {"version": 1, "output": str(final), "width": self.s.output_width,
-                "height": self.s.output_height, "fps": self.s.fps, "clips": items}
+                "height": self.s.output_height, "fps": self.s.fps, "clips": items, "camera": camera}
         (project_dir / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
 

@@ -116,3 +116,23 @@ def video_alpha_filter(w: int, h: int, radius: float, opacity: float) -> str:
     elif opacity < 0.999:
         parts.append(f"colorchannelmixer=aa={opacity:.3f}")
     return ",".join(parts)
+
+
+CAMERA_RADIUS = 0.12
+
+
+def camera_item(item_id: str, src: str, start: float, duration: float, width: int, height: int,
+                label: str = "Веб-камера") -> OverlayItem:
+    """Окошко с веб-камеры в правом нижнем углу («картинка в картинке») для обоих форматов."""
+    o = OverlayItem(item_id, "video", src, round(start, 3), round(duration, 3), width=width, height=height,
+                    src_duration=duration, radius=CAMERA_RADIUS, label=label)
+    ar = (height / width) if width and height else 9 / 16
+    # 16:9 — ширина 24 % кадра, отступ 3 % от краёв
+    W, H, sc = 1920, 1080, 0.24
+    h = sc * W * ar / H
+    o.set_layout("16:9", 1 - 0.03 - sc / 2, 1 - 0.03 * W / H - h / 2, sc)
+    # 9:16 — крупнее, в нижней части кадра (там обычно поля под записью экрана)
+    W, H, sc = 1080, 1920, 0.42
+    h = sc * W * ar / H
+    o.set_layout("9:16", 1 - 0.05 - sc / 2, min(0.82, 1 - 0.06 - h / 2), sc)
+    return o

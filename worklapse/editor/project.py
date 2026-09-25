@@ -304,7 +304,17 @@ class Project:
         except (IndexError, ValueError):
             created = directory.stat().st_mtime
         name = Path(output).stem if output else directory.name
-        return cls(directory, name, clips, fps=int(meta.get("fps", 30)), source_video=output, created=created)
+        project = cls(directory, name, clips, fps=int(meta.get("fps", 30)), source_video=output, created=created)
+        # окошки с веб-камеры, которые автосборка поставила в ролик, — как обычные наложения
+        from worklapse.editor.overlay import camera_item
+        for c in meta.get("camera", []):
+            when = c.get("recorded_at")
+            label = "Камера " + time.strftime("%H:%M:%S", time.localtime(when)) if when else "Веб-камера"
+            item = camera_item(new_id(), c["file"], float(c["start"]), float(c["duration"]),
+                               int(c.get("width", 0)), int(c.get("height", 0)), label)
+            item.src_duration = float(c.get("src_duration", c["duration"]))
+            project.overlays.append(item)
+        return project
 
 
 class History:

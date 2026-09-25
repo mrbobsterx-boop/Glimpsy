@@ -15,6 +15,7 @@ from worklapse.platform import hotkey_format
 from worklapse.platform.base import Monitor, PlatformServices
 from worklapse.recorder.encoder import candidates as encoder_candidates
 from worklapse.recorder.pacing import make_plan
+from worklapse.recorder.webcam import MODE_LABELS as CAMERA_MODES, list_cameras
 
 RESOLUTIONS = [("1920×1080 (Full HD)", 1920, 1080), ("2560×1440 (2K)", 2560, 1440),
                ("3840×2160 (4K)", 3840, 2160), ("1280×720 (HD)", 1280, 720)]
@@ -29,17 +30,21 @@ def _hint(text: str) -> QLabel:
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, services: PlatformServices, monitors: list[Monitor],
-                 status: dict, on_reselect_screen=None, parent=None) -> None:
+                 status: dict, on_reselect_screen=None, parent=None, ffmpeg: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Worklapse — настройки")
         self.setMinimumWidth(520)
         self.s = copy.deepcopy(settings)
         self.services = services
+        self.ffmpeg = ffmpeg
         tabs = QTabWidget()
         tabs.addTab(self._video_tab(), "Ролик")
         tabs.addTab(self._record_tab(monitors, on_reselect_screen), "Запись")
         tabs.addTab(self._hotkeys_tab(), "Горячие клавиши")
         tabs.addTab(self._privacy_tab(), "Приватность")
+        self._camera_page = self._camera_tab()
+        tabs.addTab(self._camera_page, "Камера")
+        tabs.currentChanged.connect(lambda _i: tabs.currentWidget() is self._camera_page and self._find_cameras(False))
         tabs.addTab(self._system_tab(status), "Система")
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("Сохранить")
@@ -184,6 +189,56 @@ class SettingsDialog(QDialog):
                               "Ставьте паузу вручную."))
         return w
 
+    def _camera_tab(self) -> QWidget:
+        w = QWidget()
+        f = QFormLayout(w)
+        self.cam_mode = QComboBox()
+        for key, label in CAMERA_MODES.items():
+            self.cam_mode.addItem(label, key)
+        self.cam_mode.setCurrentIndex(max(0, self.cam_mode.findData(self.s.camera_mode)))
+        self.cam_device = QComboBox()
+        self.cam_device.addItem("Первая найденная", "")
+        if self.s.camera_device:
+            self.cam_device.addItem(self.s.camera_device, self.s.camera_device)
+            self.cam_device.setCurrentIndex(1)
+        self._cams_listed = False
+        find = QPushButton("Найти камеры")
+        find.clicked.connect(lambda: self._find_cameras(True))
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(self.cam_device, 1)
+        dev_row.addWidget(find)
+        self.cam_len = QDoubleSpinBox(minimum=2, maximum=10, singleStep=0.5, decimals=1, suffix=" с")
+        self.cam_len.setValue(self.s.camera_clip_s)
+        self.cam_status = _hint("")
+        f.addRow("Фрагменты с веб-камеры:", self.cam_mode)
+        f.addRow("Камера:", dev_row)
+        f.addRow("", self.cam_status)
+        f.addRow("Длина фрагмента:", self.cam_len)
+        f.addRow("", _hint("Пока вы работаете, Worklapse изредка снимает несколько секунд с камеры "
+                           "(в это время горит её лампочка) и ставит их в ролик маленьким окошком в углу. "
+                           "В редакторе окошко можно подвинуть, увеличить или удалить. "
+                           "На паузе, в приватных приложениях и когда вас нет за компьютером камера "
+                           "не включается. Видео остаётся только на этом компьютере."))
+        return w
+
+    def _find_cameras(self, force: bool) -> None:
+        if (self._cams_listed and not force) or not self.ffmpeg:
+            return
+        self._cams_listed = True
+        self.cam_status.setText("Ищу камеры…")
+        self.cam_status.repaint()
+        cams = list_cameras(self.ffmpeg)
+        current = self.cam_device.currentData()
+        self.cam_device.clear()
+        self.cam_device.addItem("Первая найденная", "")
+        for c in cams:
+            self.cam_device.addItem(c.name, c.name)
+        if current and self.cam_device.findData(current) < 0:
+            self.cam_device.addItem(f"{current} (не подключена)", current)
+        self.cam_device.setCurrentIndex(max(0, self.cam_device.findData(current)))
+        self.cam_status.setText("Найдено: " + ", ".join(c.name for c in cams) if cams
+                                else "Камера не найдена — фрагменты с камеры будут пропускаться.")
+
     def _system_tab(self, status: dict) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
@@ -250,6 +305,9 @@ class SettingsDialog(QDialog):
         s.important_before_s = self.imp_before.value()
         s.important_after_s = self.imp_after.value()
         s.blacklist = [x.strip() for x in self.blacklist.toPlainText().splitlines() if x.strip()]
+        s.camera_mode = self.cam_mode.currentData()
+        s.camera_device = self.cam_device.currentData() or ""
+        s.camera_clip_s = self.cam_len.value()
         s.validate()
         self.accept()
 

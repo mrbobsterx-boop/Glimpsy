@@ -36,6 +36,7 @@ from worklapse.recorder.candidates import Candidate, CandidatePool
 from worklapse.recorder.encoder import Encoder, pick_encoder, software_encoder
 from worklapse.recorder.pacing import Plan, make_plan, save_probability
 from worklapse.recorder.ring_buffer import BufferRun
+from worklapse.recorder.webcam import MODES as CAM_MODES, CamClip, CamStore, Webcam
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,9 @@ class RecorderEngine(QObject):
         self._status_at = 0.0
         self._error = ""
         self._last_tick = 0.0
+        self.cam: Webcam | None = None
+        self.cam_store: CamStore | None = None
+        self._cam_next = 0.0
 
     # ======================= публичные команды (из интерфейса) =======================
 
@@ -229,6 +233,8 @@ class RecorderEngine(QObject):
         self.activity = ActivityTracker(self.services.input_events_supported, self.services.input_backend)
         for err in self.activity.start():
             self.notify.emit("Worklapse", err)
+        self.cam_store = CamStore(self.session_dir)
+        self._setup_camera()
 
     def _handle(self, cmd: tuple) -> str | None:
         kind = cmd[0]
@@ -236,6 +242,7 @@ class RecorderEngine(QObject):
             self._user_paused = not self._user_paused
             if self._user_paused:
                 self._close_run()
+                self._cam_stop()
                 self._set_state(State.PAUSED)
             else:
                 if self.activity:
@@ -251,11 +258,13 @@ class RecorderEngine(QObject):
             self._monitors = []
         elif kind == "finish":
             self._close_run()
+            self._cam_finish()
             self._stop_listeners()
             self._assemble()
             return "exit"
         elif kind == "stop":
             self._close_run()
+            self._cam_stop()
             self._stop_listeners()
             if self.pool:
                 self.pool.save()
@@ -308,6 +317,7 @@ class RecorderEngine(QObject):
                          f" — совпало со словом «{hit}» из чёрного списка" if hit else "")
         if self._private:
             self._close_run()     # в буфер не попадает ни одного кадра приватного окна
+            self._cam_stop()
             self._set_state(State.PRIVATE)
             return
 
@@ -315,6 +325,7 @@ class RecorderEngine(QObject):
         if idle and self.services.input_events_supported:
             # Можем отследить возвращение пользователя по мыши/клавиатуре → запись полностью стоит
             self._close_run()
+            self._cam_stop()
             self._set_state(State.IDLE)
             return
 
@@ -357,6 +368,7 @@ class RecorderEngine(QObject):
             if not idle:
                 self._active_seconds += 1
                 self._maybe_save(now)
+                self._maybe_camera()
         self._emit_status(now)
 
     def _target_monitor(self, cursor_mon: Monitor | None, now: float) -> Monitor | None:
@@ -527,6 +539,64 @@ class RecorderEngine(QObject):
         self._deferred.append(Deferred(due=t + after + 1.2, t0=t - before, t1=t + after, priority=True))
         self.notify.emit("Worklapse", f"⭐ Важный момент отмечен (−{before} с / +{after} с)")
 
+    # ======================= веб-камера =======================
+
+    camera_input_override: list[str] | None = None     # для проверок без настоящей камеры
+
+    def _setup_camera(self) -> None:
+        self._cam_stop()
+        self.cam = None
+        interval = CAM_MODES.get(self.s.camera_mode, 0)
+        if not interval:
+            return
+        cam = Webcam(self.ffmpeg, self.s.camera_device, self.camera_input_override)
+        if cam.find() is None:
+            log.info("Веб-камера не найдена — фрагменты с камеры пропускаются")
+            return
+        self.cam = cam
+        # первый фрагмент — пораньше, чтобы и короткая сессия получила хотя бы один
+        self._cam_next = self._active_seconds + interval * self._rng.uniform(0.15, 0.5)
+
+    def _maybe_camera(self) -> None:
+        cam, store = self.cam, self.cam_store
+        if cam is None or store is None:
+            return
+        interval = CAM_MODES.get(self.s.camera_mode, 0) or 300
+        if cam.busy:
+            got = cam.poll()
+            if isinstance(got, CamClip):
+                store.add(got, keep=max(3, self.plan.clips_needed // 3))
+                log.info("Фрагмент с камеры: %.1f с (всего %s)", got.duration, len(store.items))
+                self._cam_next = self._active_seconds + interval * self._rng.uniform(0.6, 1.4)
+            elif got is False:
+                if cam.gave_up:
+                    self.notify.emit("Worklapse", "Не получилось снять с веб-камеры (возможно, она занята "
+                                                  "другой программой или нет разрешения). До конца сессии "
+                                                  "камера больше не включается.")
+                    self.cam = None
+                else:
+                    self._cam_next = self._active_seconds + 30
+            return
+        if self._active_seconds >= self._cam_next:
+            cam.start(store.new_path(), self.s.camera_clip_s)
+
+    def _cam_stop(self) -> None:
+        if self.cam is not None and self.cam.busy:
+            self.cam.stop()
+
+    def _cam_finish(self) -> None:
+        """Конец сессии: дождаться фрагмента, который уже снимается (несколько секунд)."""
+        cam = self.cam
+        if cam is None or not cam.busy:
+            return
+        deadline = time.time() + self.s.camera_clip_s + 8
+        while cam.busy and time.time() < deadline:
+            time.sleep(0.2)
+            got = cam.poll()
+            if isinstance(got, CamClip) and self.cam_store is not None:
+                self.cam_store.add(got, keep=max(3, self.plan.clips_needed // 3))
+        self._cam_stop()
+
     # ======================= сборка =======================
 
     def _assemble(self) -> None:
@@ -560,6 +630,7 @@ class RecorderEngine(QObject):
     # ======================= разное =======================
 
     def _apply_settings(self, s: Settings) -> None:
+        old = self.s
         restart = (s.fps != self.s.fps or s.encoder != self.s.encoder or
                    s.record_max_height != self.s.record_max_height or
                    s.monitor_mode != self.s.monitor_mode or s.manual_monitor != self.s.manual_monitor)
@@ -569,9 +640,12 @@ class RecorderEngine(QObject):
         self.plan = make_plan(s)
         if restart:
             self._close_run()
+        camera_changed = s.camera_mode != old.camera_mode or s.camera_device != old.camera_device
         if self.pool:
             self.pool.prune(self.plan.pool_size)
             self.pool.save()
+        if camera_changed and self.cam_store is not None:
+            self._setup_camera()
 
     def _stop_listeners(self) -> None:
         if self.activity:

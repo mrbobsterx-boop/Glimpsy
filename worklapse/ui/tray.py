@@ -294,7 +294,7 @@ class TrayController(QObject):
         self._settings_open = True
         try:
             dlg = SettingsDialog(self.s, self.services, list(self.engine._monitors), self.status,
-                                 on_reselect_screen=self.engine.reselect_screen)
+                                 on_reselect_screen=self.engine.reselect_screen, ffmpeg=self.engine.ffmpeg)
             dlg.setWindowIcon(state_icon(self.status.get("state", State.STOPPED)))
             dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
             if dlg.exec():
