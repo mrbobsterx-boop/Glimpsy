@@ -64,6 +64,16 @@ jobs:
       - name: Скачать FFmpeg
         run: python scripts/fetch_ffmpeg.py
 
+      # whisper.cpp для автосубтитров: собираем один раз, дальше берём из кэша
+      - name: Кэш whisper.cpp
+        uses: actions/cache@v4
+        with:
+          path: vendor/whisper
+          key: whisper-${{ runner.os }}-${{ matrix.mac_arch || 'x64' }}-${{ hashFiles('scripts/build_whisper.py') }}
+
+      - name: Собрать whisper.cpp
+        run: python scripts/build_whisper.py
+
       - name: Тесты
         shell: bash
         run: |

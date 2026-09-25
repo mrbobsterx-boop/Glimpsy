@@ -19,7 +19,7 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractSpinBox, QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
     QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
@@ -40,6 +40,7 @@ from worklapse.editor.overlay import OverlayItem
 from worklapse.editor.overlay_panel import OverlayPanel
 from worklapse.editor.music import AUDIO_EXT, MusicTrack, probe_audio
 from worklapse.editor.music_panel import MusicPanel
+from worklapse.editor import subtitles as subs
 from worklapse.editor.timeline import TimelineWidget, fmt_time
 from worklapse.recorder.encoder import Encoder
 
@@ -198,6 +199,8 @@ class EditorWindow(QMainWindow):
         a_text = QAction("T  Текст", self, triggered=self.add_text, toolTip="Добавить текст в месте курсора (Ctrl+T)")
         a_overlay = QAction("▣  Наложение", self, triggered=self.add_overlay_dialog,
                             toolTip="Картинка или видео поверх ролика (логотип, макет, съёмка с телефона)")
+        a_subs = QAction("💬  Субтитры", self, triggered=self.auto_subtitles,
+                         toolTip="Автосубтитры: распознать речь в ролике (на этом компьютере, без интернета)")
         a_music = QAction("♪  Музыка", self, triggered=self.add_music_dialog,
                           toolTip="Фоновая музыка на весь ролик (mp3, wav, m4a, ogg, flac…)")
         self.a_split = QAction("✂ Разрезать", self, triggered=self.split, toolTip="Ctrl+B — по курсору")
@@ -205,7 +208,7 @@ class EditorWindow(QMainWindow):
         for a in (self.a_undo, self.a_redo):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (a_add, a_text, a_overlay, a_music, self.a_split, self.a_delete):
+        for a in (a_add, a_text, a_subs, a_overlay, a_music, self.a_split, self.a_delete):
             tb.addAction(a)
         tb.addSeparator()
         tb.addWidget(QLabel(" Формат: "))
@@ -247,7 +250,10 @@ class EditorWindow(QMainWindow):
             self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
         self.preview.set_src_crop(self._motion_crop(c))
         t = self.player.t
-        visible = [x for x in self.project.texts if x.start <= t < x.end or x.id == self.timeline.selected_text]
+        visible = self.project.texts_at(t)
+        sel = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
+        if sel is not None and not visible:
+            visible = [sel]          # выбранный текст виден для правки, если он не мешает другим
         self.preview.set_texts([(x, effective_style(x, self.project.text_style)) for x in visible], t,
                                self.timeline.selected_text)
         sel_ov = self.timeline.selected_overlay
@@ -508,6 +514,12 @@ class EditorWindow(QMainWindow):
             self.timeline.select_text(None)
             self._text_changed()
             return
+        if what == "delete_auto":
+            self.history.push(self.project.to_dict())
+            self.project.texts = [t for t in self.project.texts if not t.auto]
+            self.timeline.select_text(None)
+            self._text_changed()
+            return
         self.history.push(self.project.to_dict(), key=f"text-{what}:{text_id}")
         if what == "text":
             item.text = value
@@ -518,12 +530,16 @@ class EditorWindow(QMainWindow):
         elif what == "own_style":
             item.style = dict(effective_style(item, self.project.text_style)) if value else None
         elif what == "pos_preset":
-            item.set_pos(self.project.aspect, 0.5, float(value))
+            for t in self._text_group(item):
+                t.set_pos(self.project.aspect, 0.5, float(value))
         else:
             # свой стиль — меняем только этот текст, иначе общий стиль всех текстов
             target = item.style if item.style is not None else self.project.text_style
             target[what] = value
         self._text_changed()
+
+    def _text_group(self, item: TextItem) -> list[TextItem]:
+        return [t for t in self.project.texts if t.auto] if item.auto else [item]
 
     def _on_text_pressed(self, text_id: str) -> None:
         self.timeline.select_text(text_id)
@@ -532,9 +548,94 @@ class EditorWindow(QMainWindow):
     def _on_text_moved(self, text_id: str, x: float, y: float) -> None:
         item = self.project.text_by_id(text_id)
         if item is not None:
-            item.set_pos(self.project.aspect, x, y)
+            for t in self._text_group(item):      # автосубтитры двигаются все вместе
+                t.set_pos(self.project.aspect, x, y)
             self._sync_preview()
             self._save_timer.start()
+
+    # ---------- автосубтитры ----------
+
+    def auto_subtitles(self) -> None:
+        from worklapse.editor.subtitles_dialog import SubtitlesDialog
+
+        self.player.pause()
+        if not subs.whisper_exe():
+            QMessageBox.warning(self, "Автосубтитры", "В этой сборке нет программы распознавания речи. "
+                                "Скачайте свежую версию Worklapse.")
+            return
+        if not subs.has_speech_audio(self.project):
+            QMessageBox.information(self, "Автосубтитры",
+                                    "В ролике нет звука, из которого можно сделать субтитры.\n\n"
+                                    "Запись экрана идёт без звука. Субтитры получатся, если вставить видео "
+                                    "со своим голосом (например, с телефона или веб-камеры) — фрагментом "
+                                    "или наложением — и не выключать у него звук.")
+            return
+        has_auto = any(t.auto for t in self.project.texts)
+        dlg = SubtitlesDialog(self.project.aspect, has_auto, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        replace = has_auto and dlg.replace.isChecked()
+        self._save()
+        snapshot = Project(self.project.dir, self.project.name, fps=self.project.fps,
+                           source_video=self.project.source_video)
+        snapshot.restore(self.project.to_dict())
+        prog = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
+        prog.setWindowTitle("Автосубтитры")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setAutoClose(False)
+        prog.setAutoReset(False)
+        bridge = _ExportBridge(self)
+        cancel = threading.Event()
+        prog.canceled.connect(cancel.set)
+        bridge.progress.connect(lambda f, t: (prog.setValue(int(f * 1000)), prog.setLabelText(t)))
+        result: dict = {}
+
+        def done(_msg: str) -> None:
+            prog.close()
+            self._apply_subtitles(result.get("segs", []), replace)
+
+        def failed(msg: str) -> None:
+            prog.close()
+            if msg:
+                QMessageBox.warning(self, "Автосубтитры", msg)
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+        work = paths.temp_root() / f"subs_{int(time.time())}"
+        model, lang, chars = dlg.model_key, dlg.language, dlg.max_chars
+
+        def run() -> None:
+            try:
+                segs, detected = subs.transcribe(self.ffmpeg, snapshot, model, lang, chars, work,
+                                                 progress=lambda f, t: bridge.progress.emit(f, t), cancel=cancel)
+                log.info("Автосубтитры: %s фраз, язык %s", len(segs), detected)
+                result["segs"] = segs
+                bridge.done.emit("")
+            except subs.Cancelled:
+                bridge.failed.emit("")
+            except Exception as e:
+                log.exception("Автосубтитры не получились")
+                bridge.failed.emit(str(e))
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+
+        threading.Thread(target=run, daemon=True, name="subtitles").start()
+        prog.show()
+
+    def _apply_subtitles(self, segs: list, replace: bool) -> None:
+        items = subs.make_texts(segs, self.project.total)
+        if not items:
+            QMessageBox.information(self, "Автосубтитры", "Речь в ролике не найдена.")
+            return
+        self.history.push(self.project.to_dict())
+        if replace:
+            self.project.texts = [t for t in self.project.texts if not t.auto]
+        self.project.texts.extend(items)
+        self.timeline.select_text(items[0].id)
+        self._text_changed()
+        self.statusBar().showMessage(f"Добавлено субтитров: {len(items)}. Стиль меняется у любого из них — "
+                                     f"сразу для всех.", 8000)
 
     # ---------- наложения ----------
 

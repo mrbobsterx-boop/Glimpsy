@@ -60,17 +60,18 @@ def _bundle_dir() -> Path | None:
 
 
 def find_executable(name: str) -> str | None:
-    """Ищет программу (ffmpeg/ffprobe): сначала встроенную, потом в системе."""
+    """Ищет программу (ffmpeg, whisper-cli): сначала встроенную, потом в системе."""
     exe = name + (".exe" if IS_WINDOWS else "")
+    folder = "whisper" if name.startswith("whisper") else "ffmpeg"
     env = os.environ.get(f"WORKLAPSE_{name.upper()}")
     if env and Path(env).exists():
         return env
     candidates = []
     bundle = _bundle_dir()
     if bundle:
-        candidates.append(bundle / "ffmpeg" / exe)
-    # При запуске из исходников: vendor/ffmpeg/ (туда кладёт scripts/fetch_ffmpeg.py)
-    candidates.append(Path(__file__).resolve().parent.parent / "vendor" / "ffmpeg" / exe)
+        candidates.append(bundle / folder / exe)
+    # При запуске из исходников: vendor/ffmpeg/ и vendor/whisper/ (scripts/fetch_ffmpeg.py, build_whisper.py)
+    candidates.append(Path(__file__).resolve().parent.parent / "vendor" / folder / exe)
     for c in candidates:
         if c.exists():
             return str(c)

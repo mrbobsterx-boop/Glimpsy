@@ -133,6 +133,8 @@ class TextPanel(QWidget):
 
         delete = QPushButton("Удалить текст")
         delete.clicked.connect(lambda: self._emit("delete", None))
+        self.delete_auto = QPushButton("Удалить все автосубтитры")
+        self.delete_auto.clicked.connect(lambda: self._emit("delete_auto", None))
         hint = QLabel("Текст можно перетаскивать мышью в окне просмотра, а на ленте — двигать по времени "
                       "и тянуть за края.")
         hint.setWordWrap(True)
@@ -143,6 +145,7 @@ class TextPanel(QWidget):
         lay.addWidget(self.edit)
         lay.addLayout(form)
         lay.addWidget(delete)
+        lay.addWidget(self.delete_auto)
         lay.addWidget(hint)
         lay.addStretch(1)
 
@@ -151,6 +154,7 @@ class TextPanel(QWidget):
         if item is None or style is None:
             return
         self._loading = True
+        self.delete_auto.setVisible(item.auto)
         if self.edit.toPlainText() != item.text:
             self.edit.setPlainText(item.text)
         self.start.setValue(item.start)

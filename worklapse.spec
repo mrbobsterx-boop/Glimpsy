@@ -17,6 +17,14 @@ ffmpeg = ROOT / "vendor" / "ffmpeg" / ("ffmpeg.exe" if IS_WIN else "ffmpeg")
 if not ffmpeg.exists():
     raise SystemExit("Нет vendor/ffmpeg — сначала выполните: python scripts/fetch_ffmpeg.py")
 
+# Распознавание речи для автосубтитров (scripts/build_whisper.py). Без него всё остальное работает.
+whisper = ROOT / "vendor" / "whisper" / ("whisper-cli.exe" if IS_WIN else "whisper-cli")
+binaries = [(str(ffmpeg), "ffmpeg")]
+if whisper.exists():
+    binaries.append((str(whisper), "whisper"))
+else:
+    print("ВНИМАНИЕ: нет vendor/whisper — автосубтитры в этой сборке работать не будут")
+
 hidden = [
     "pynput.keyboard._win32", "pynput.mouse._win32",
     "pynput.keyboard._darwin", "pynput.mouse._darwin",
@@ -28,7 +36,7 @@ if sys.platform.startswith("linux"):
 a = Analysis(
     [str(ROOT / "worklapse" / "__main__.py")],
     pathex=[str(ROOT)],
-    binaries=[(str(ffmpeg), "ffmpeg")],
+    binaries=binaries,
     datas=[(str(ROOT / "assets" / "icon.png"), "assets")],
     hiddenimports=hidden,
     # Лишние модули Qt сильно раздувают сборку — нам они не нужны
