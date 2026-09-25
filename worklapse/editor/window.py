@@ -129,7 +129,7 @@ class EditorWindow(QMainWindow):
         lv.addLayout(transport)
         top = QSplitter(Qt.Orientation.Horizontal)
         top.addWidget(left)
-        top.addWidget(self.side)
+        top.addWidget(self._right_column())
         top.setStretchFactor(0, 1)
         top.setSizes([930, 350])
         root = QSplitter(Qt.Orientation.Vertical)
@@ -210,22 +210,31 @@ class EditorWindow(QMainWindow):
         tb.addSeparator()
         for a in (a_add, a_text, a_subs, a_overlay, a_music, self.a_split, self.a_delete):
             tb.addAction(a)
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Формат: "))
+
+    def _right_column(self) -> QWidget:
+        """Справа сверху — формат и «Экспорт» (всегда на виду, даже на узком экране), ниже — свойства."""
         self.aspect_box = QComboBox()
         for value, label in ASPECT_CHOICES:
             self.aspect_box.addItem(label, value)
         self.aspect_box.setCurrentIndex(max(0, self.aspect_box.findData(self.project.aspect)))
         self.aspect_box.currentIndexChanged.connect(self._on_aspect)
-        tb.addWidget(self.aspect_box)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb.addWidget(spacer)
-        self.export_btn = QPushButton("  Экспорт  ")
+        self.aspect_box.setToolTip("Горизонтальный ролик для YouTube или вертикальный для Reels, TikTok, Shorts")
+        self.export_btn = QPushButton("Экспорт")
+        self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E)")
         self.export_btn.setStyleSheet("QPushButton { background: #1f6f78; color: white; font-weight: 600;"
-                                      " padding: 6px 14px; border-radius: 6px; }")
+                                      " padding: 6px 18px; border-radius: 6px; }")
         self.export_btn.clicked.connect(self.export)
-        tb.addWidget(self.export_btn)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 4)
+        head.addWidget(QLabel("Формат:"))
+        head.addWidget(self.aspect_box, 1)
+        head.addWidget(self.export_btn)
+        col = QWidget()
+        v = QVBoxLayout(col)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addLayout(head)
+        v.addWidget(self.side, 1)
+        return col
 
     def _update_actions(self) -> None:
         self.a_undo.setEnabled(self.history.can_undo)
@@ -960,6 +969,10 @@ class EditorWindow(QMainWindow):
                 return True
             if letter == "t":
                 self.add_text()
+                return True
+            if letter == "e" and not (ev.modifiers() & Qt.KeyboardModifier.AltModifier):
+                if self.export_btn.isEnabled():
+                    self.export()
                 return True
             if letter == "a" and not typing:
                 self.timeline.select_all()

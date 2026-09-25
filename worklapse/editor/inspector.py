@@ -133,7 +133,7 @@ class Inspector(QWidget):
         lay.addWidget(self.delete_btn)
         lay.addStretch(1)
         hint = QLabel("Ctrl+Z — отменить · Ctrl+B — разрезать\nDelete — удалить · Пробел — пуск/пауза\n"
-                      "Ctrl+V — вставить файл или картинку · Ctrl+T — текст")
+                      "Ctrl+V — вставить файл или картинку · Ctrl+T — текст\nCtrl+E — экспорт")
         hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
         lay.addWidget(hint)
         self.set_clip(None)
