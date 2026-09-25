@@ -115,6 +115,7 @@ class Project:
     texts: list = field(default_factory=list)       # TextItem — тексты поверх ролика
     text_style: dict = field(default_factory=dict)  # общий стиль текстов (отличия от стандартного)
     overlays: list = field(default_factory=list)    # OverlayItem — картинки/видео поверх ролика
+    music: object = None                             # MusicTrack — фоновая музыка или None
 
     # ---------- время ----------
 
@@ -194,6 +195,19 @@ class Project:
 
     # ---------- файлы ----------
 
+    def copy_media(self, path: Path) -> str:
+        """Копирует файл в папку проекта (media/) и возвращает относительный путь."""
+        media = self.dir / "media"
+        media.mkdir(parents=True, exist_ok=True)
+        dest = media / path.name
+        n = 2
+        while dest.exists() and not _same_file(dest, path):
+            dest = media / f"{path.stem}_{n}{path.suffix}"
+            n += 1
+        if not dest.exists():
+            shutil.copyfile(path, dest)
+        return dest.relative_to(self.dir).as_posix()
+
     def import_file(self, path: Path, info) -> Clip:
         """Копирует вставленный файл в папку проекта (чтобы проект не сломался,
         если оригинал удалят) и создаёт для него фрагмент."""
@@ -223,6 +237,7 @@ class Project:
             "texts": [asdict(t) for t in self.texts],
             "text_style": copy.deepcopy(self.text_style),
             "overlays": [asdict(o) for o in self.overlays],
+            "music": asdict(self.music) if self.music is not None else None,
         }
 
     def restore(self, data: dict) -> None:
@@ -240,6 +255,11 @@ class Project:
         oknown = {f.name for f in fields(OverlayItem)}
         self.overlays = [OverlayItem(**{k: v for k, v in o.items() if k in oknown})
                          for o in data.get("overlays", [])]
+        from worklapse.editor.music import MusicTrack
+
+        m = data.get("music")
+        mknown = {f.name for f in fields(MusicTrack)}
+        self.music = MusicTrack(**{k: v for k, v in m.items() if k in mknown}) if m else None
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"

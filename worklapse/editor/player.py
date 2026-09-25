@@ -4,6 +4,8 @@
 склейках не было заминок, используются ДВА плеера по очереди (как два магнитофона у
 диджея): пока один играет текущий фрагмент, второй заранее открывает следующий и
 ждёт на нужном кадре. На склейке они просто меняются местами.
+
+Фоновая музыка играет третьим плеером и подстраивается под время ленты.
 """
 
 from __future__ import annotations
@@ -84,6 +86,15 @@ class TimelinePlayer(QObject):
         self.idx: int | None = None
         self.volume = 0.8
         self._images: dict[str, QImage] = {}
+        # фоновая музыка
+        self.music = QMediaPlayer(self)
+        self.music_audio = QAudioOutput(self)
+        self.music.setAudioOutput(self.music_audio)
+        self.music.errorOccurred.connect(lambda e, s: log.warning("Музыка: %s", s))
+        self.music.mediaStatusChanged.connect(self._on_music_status)
+        self._music_src: str | None = None
+        self._music_ready = False
+        self._music_ticks = 0
 
     @property
     def deck(self) -> _Deck:
@@ -106,6 +117,7 @@ class TimelinePlayer(QObject):
         self.playing = True
         self.clock.start()
         self._show(self.t, True)
+        self._music_sync(force=True)
         self.timer.start()
         self.playing_changed.emit(True)
 
@@ -115,23 +127,75 @@ class TimelinePlayer(QObject):
         for d in self.decks:
             d.mp.pause()
             d.want = (d.want[0], False) if d.want else None
+        self.music.pause()
         self.playing_changed.emit(False)
 
     def seek(self, t: float) -> None:
         self.t = max(0.0, min(t, self.project.total))
         self._show(self.t, self.playing)
+        self._music_sync(force=True)
         self.position.emit(self.t)
 
     def refresh(self) -> None:
         """Проект изменился (обрезка, скорость, кадрирование…) — показать актуальный кадр."""
         self.t = min(self.t, self.project.total)
         self._show(self.t, self.playing)
+        self._music_sync(force=True)
         self.position.emit(self.t)
 
     def set_volume(self, v: float) -> None:
         self.volume = v
         for d in self.decks:
             d.audio.setVolume(v)
+        self._music_volume()
+
+    # ---------- музыка ----------
+
+    def _music_target(self) -> float | None:
+        """Где сейчас должна быть музыка (с от начала файла) или None — тишина."""
+        m = self.project.music
+        if m is None or m.duration <= 0:
+            return None
+        pos = m.in_s + self.t
+        if pos >= m.duration:
+            if not m.loop:
+                return None
+            span = max(0.5, m.duration - m.in_s)       # при повторе трек снова идёт с «Начать с места»
+            pos = m.in_s + (self.t % span)
+        return pos
+
+    def _music_volume(self) -> None:
+        m = self.project.music
+        self.music_audio.setVolume(self.volume * (m.volume if m is not None else 0.0))
+
+    def _music_sync(self, force: bool = False) -> None:
+        m = self.project.music
+        path = str(self.project.dir / m.src) if m is not None else None
+        if path != self._music_src:
+            self._music_src, self._music_ready = path, False
+            self.music.stop()
+            self.music.setSource(QUrl.fromLocalFile(path) if path else QUrl())
+        if path is None:
+            return
+        self._music_volume()
+        target = self._music_target()
+        if not self.playing or target is None:
+            self.music.pause()
+            return
+        if not self._music_ready:
+            return                                      # догоним, когда файл откроется
+        drift = abs(self.music.position() / 1000.0 - target)
+        if force or drift > 0.25 or self.music.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            if force or drift > 0.25:
+                self.music.setPosition(int(target * 1000))
+            self.music.play()
+
+    def _on_music_status(self, status) -> None:
+        if status in (S.LoadedMedia, S.BufferedMedia) and not self._music_ready:
+            self._music_ready = True
+            self._music_sync(force=True)
+        elif status == S.EndOfMedia and self.playing:
+            self._music_sync(force=True)                # повтор трека
 
     # ---------- внутреннее ----------
 
@@ -217,6 +281,9 @@ class TimelinePlayer(QObject):
         if self.t >= start + c.duration - 1e-3:
             self._advance()
             return
+        self._music_ticks += 1
+        if self._music_ticks % 15 == 0:                 # раз в ~0,5 с сверяем музыку с лентой
+            self._music_sync()
         self.position.emit(self.t)
 
     def _advance(self) -> None:
@@ -246,3 +313,4 @@ class TimelinePlayer(QObject):
         self.timer.stop()
         for d in self.decks:
             d.mp.stop()
+        self.music.stop()

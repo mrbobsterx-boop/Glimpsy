@@ -26,6 +26,8 @@ TEXT_H = 22
 OVL_Y = 56           # дорожка наложений (картинки/видео поверх ролика)
 TRACK_Y = 84         # дорожка видео и фото
 TRACK_H = 64
+MUSIC_Y = TRACK_Y + TRACK_H + 6    # дорожка музыки
+MUSIC_H = 20
 EDGE_PX = 8
 GAP = 2
 
@@ -38,6 +40,7 @@ COL_PLAYHEAD = QColor("#ffffff")
 COL_DROP = QColor("#3e9bff")
 COL_TEXT = QColor("#b5892a")
 COL_OVL = QColor("#7d5fb2")
+COL_MUSIC = QColor("#2f8f5b")
 MIN_TEXT_S = 0.2
 LANES = ("text", "overlay")
 
@@ -56,6 +59,7 @@ class TimelineWidget(QWidget):
     text_selected = Signal(object)              # id текста или None
     overlay_selected = Signal(object)           # id наложения или None
     overlay_files_dropped = Signal(list, float) # пути, время начала
+    music_selected = Signal(bool)
 
     def __init__(self, project: Project, thumbs: Thumbnailer) -> None:
         super().__init__()
@@ -69,6 +73,7 @@ class TimelineWidget(QWidget):
         self.selection: list[str] = []          # все выбранные (Shift/Ctrl+щелчок)
         self.selected_text: str | None = None
         self.selected_overlay: str | None = None
+        self.music_active = False
         self._lane = "text"
         self._lane_orig = (0.0, 0.0, 0.0)       # начало, длительность, in_s — в момент нажатия
         self._mode: str | None = None  # playhead / trim_l / trim_r / press / drag
@@ -79,8 +84,8 @@ class TimelineWidget(QWidget):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.setMinimumHeight(TRACK_Y + TRACK_H + 24)
-        self.setMaximumHeight(TRACK_Y + TRACK_H + 60)
+        self.setMinimumHeight(MUSIC_Y + MUSIC_H + 10)
+        self.setMaximumHeight(MUSIC_Y + MUSIC_H + 40)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     # ---------- координаты ----------
@@ -152,6 +157,7 @@ class TimelineWidget(QWidget):
             p.fillRect(QRectF(x - 2, TRACK_Y - 6, 4, TRACK_H + 12), COL_DROP)
         self._paint_lane(p, "text")
         self._paint_lane(p, "overlay")
+        self._paint_music(p)
         if not self.project.clips:
             p.setPen(COL_RULER)
             p.drawText(QRectF(0, TRACK_Y, self.width(), TRACK_H), Qt.AlignmentFlag.AlignCenter,
@@ -191,6 +197,37 @@ class TimelineWidget(QWidget):
             else:
                 label = ("▣  " if t.kind == "image" else "▶  ") + t.label
             p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+
+    def music_rect(self) -> QRectF:
+        return QRectF(self.x_of(0) + 1, MUSIC_Y, max(6.0, self.project.total * self.pps - 2), MUSIC_H)
+
+    def _paint_music(self, p: QPainter) -> None:
+        f = QFont(self.font())
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+        p.setFont(f)
+        m = self.project.music
+        if m is None:
+            p.setPen(QColor(COL_RULER.red(), COL_RULER.green(), COL_RULER.blue(), 140))
+            p.drawText(QRectF(12, MUSIC_Y, self.width(), MUSIC_H), Qt.AlignmentFlag.AlignVCenter,
+                       "♪  музыка — кнопка «♪ Музыка» сверху или перетащите сюда mp3")
+            return
+        r = self.music_rect()
+        p.setPen(QPen(COL_SELECT, 2) if self.music_active else Qt.PenStyle.NoPen)
+        p.setBrush(COL_MUSIC)
+        p.drawRoundedRect(r, 4, 4)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   f"♪  {m.label}  ·  громкость {int(m.volume * 100)}%")
+
+    def select_music(self, on: bool) -> None:
+        if on:
+            self._select(None)
+            self._set_lane_selection("text", None)
+            self._set_lane_selection("overlay", None)
+        if on != self.music_active:
+            self.music_active = on
+            self.music_selected.emit(on)
+        self.update()
 
     def _paint_ruler(self, p: QPainter) -> None:
         # шаг подписей подбираем так, чтобы они не слипались
@@ -275,6 +312,9 @@ class TimelineWidget(QWidget):
 
     def _select_layer(self, kind: str, item_id: str | None) -> None:
         """Выбрать текст или наложение (выбор фрагментов и другой дорожки снимается)."""
+        if item_id is not None and self.music_active:
+            self.music_active = False
+            self.music_selected.emit(False)
         if item_id is not None and self.selection:
             self.selected, self.selection = None, []
             self.selection_changed.emit(None)
@@ -319,6 +359,13 @@ class TimelineWidget(QWidget):
             self._mode = "playhead"
             self.seek_requested.emit(self.t_of(pos.x()))
             return
+        if self.project.music is not None and MUSIC_Y - 2 <= pos.y() <= MUSIC_Y + MUSIC_H + 2:
+            self.select_music(True)
+            self._mode = "playhead"
+            self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
+            return
+        if self.music_active:
+            self.select_music(False)
         kind, li, lpart = self._hit_lane(pos)
         if li >= 0:
             t = self._lane_items(kind)[li]
@@ -420,6 +467,9 @@ class TimelineWidget(QWidget):
         if clip_id is not None:
             self._set_lane_selection("text", None)
             self._set_lane_selection("overlay", None)
+            if self.music_active:
+                self.music_active = False
+                self.music_selected.emit(False)
         changed = clip_id != self.selected or self.selection != ([clip_id] if clip_id else [])
         self.selected = clip_id
         self.selection = [clip_id] if clip_id else []

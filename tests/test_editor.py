@@ -300,3 +300,63 @@ def test_export_with_motion(tmp_path, mode, aspect):
     raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", "2.5", "-i", str(out), "-frames:v", "1",
                           "-vf", "scale=16:16,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
     assert sum(raw) / len(raw) > 200, "в кадре должна остаться только белая (правая) часть"
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+@pytest.mark.parametrize("duck", [True, False])
+def test_export_with_music(tmp_path, duck):
+    from worklapse.editor.music import MusicTrack, probe_audio
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:size=320x180:rate=30", "-t", "4", "-c:v", "libx264", str(tmp_path / "v.mp4")],
+                   check=True)
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=440",
+                    "-t", "1.5", str(tmp_path / "song.mp3")], check=True)     # трек короче ролика
+    assert 1.3 < probe_audio(FFMPEG, tmp_path / "song.mp3") < 1.7
+    p = Project(tmp_path, "t", [Clip("a", "video", "v.mp4", 4, 0, 4, width=320, height=180)])
+    p.music = MusicTrack("song.mp3", 1.5, volume=0.8, fade_in=0.2, fade_out=0.5, duck=duck)
+    out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder())
+
+    def loud(ts):
+        import array
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", str(ts), "-t", "0.2", "-i", str(out), "-vn",
+                              "-f", "s16le", "-ac", "1", "-"], capture_output=True).stdout
+        return max((abs(x) for x in array.array("h", raw[: len(raw) // 2 * 2])), default=0)
+    assert loud(0.02) < loud(1.0)          # плавное появление
+    assert loud(2.5) > 1000                # трек повторяется (он короче ролика)
+    assert loud(3.95) < loud(2.5)          # плавное затухание в конце
+    assert parse_probe(subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True,
+                                      text=True).stderr).duration == pytest.approx(4.0, abs=0.2)
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_music_in_editor_window(tmp_path, qt_app):
+    """Музыку добавляют, правят, отменяют и убирают через окно редактора."""
+    import json
+    from worklapse.editor.window import EditorWindow
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "3", "-pix_fmt", "yuv420p", str(proj / "piece_0000.mp4")], check=True)
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=440", "-t", "2",
+                    str(tmp_path / "song.mp3")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "piece_0000.mp4", "duration": 3.0}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.insert_files([str(tmp_path / "song.mp3")], 1)        # перетащили mp3 на ленту
+        assert w.project.music is not None and len(w.project.clips) == 1
+        assert (proj / w.project.music.src).is_file()
+        assert w.side.currentWidget() is w.music_panel
+        w.music_panel.volume.setValue(25)
+        assert w.project.music.volume == pytest.approx(0.25)
+        w.undo()
+        assert w.project.music.volume == pytest.approx(0.6)
+        w.delete_selected()
+        assert w.project.music is None and w.side.currentWidget() is w.inspector
+        w.undo()
+        assert w.project.music is not None
+        w.project.save()
+        assert json.loads((proj / "edit.json").read_text())["music"]["src"] == w.project.music.src
+    finally:
+        w.player.shutdown()
+        w.close()

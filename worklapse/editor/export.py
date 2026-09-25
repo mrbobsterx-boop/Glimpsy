@@ -237,12 +237,12 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         lst.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = work / "final.mp4"
-        layered = bool(text_layers or overlay_layers)
+        layered = bool(text_layers or overlay_layers or getattr(project, "music", None))
         joined = work / "joined.mp4" if layered else tmp
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
               "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)], cancel)
         if layered:
-            progress(len(clips) / (len(clips) + 1), "Тексты и наложения")
+            progress(len(clips) / (len(clips) + 1), "Тексты, наложения и музыка")
             _compose_layers(ffmpeg, project, joined, tmp, text_layers or [], overlay_layers or [], enc, cancel)
         shutil.move(str(tmp), out)
         progress(1.0, "Готово")
@@ -309,10 +309,28 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
         prev = f"t{len(parts) - 1}"
 
     parts.append(f"[{prev}]{enc.filter_suffix}[vout]")
+    # --- звук: свой звук ролика + звук видео-наложений + фоновая музыка ---
+    voice = "0:a"
     if audio:
         parts.append(f"[0:a]{''.join(audio)}amix=inputs={len(audio) + 1}:duration=first:"
-                     f"normalize=0:dropout_transition=0[aout]")
-        amap, acodec = "[aout]", ["-c:a", "aac", "-b:a", "160k"]
+                     f"normalize=0:dropout_transition=0[voice]")
+        voice = "voice"
+    track = getattr(project, "music", None)
+    if track is not None:
+        from worklapse.editor.music import music_filter, music_input_args
+
+        cmd.extend(music_input_args(project.dir, track))
+        n += 1
+        side = None
+        if track.duck:
+            parts.append(f"[{voice}]asplit=2[v1][v2]")
+            voice, side = "v1", "v2"
+        chain, mus = music_filter(n, track, total, side)
+        parts.append(chain)
+        parts.append(f"[{voice}]{mus}amix=inputs=2:duration=first:normalize=0:dropout_transition=0[aout]")
+        amap, acodec = "[aout]", ["-c:a", "aac", "-b:a", "192k"]
+    elif audio:
+        amap, acodec = "[voice]", ["-c:a", "aac", "-b:a", "160k"]
     else:
         amap, acodec = "0:a?", ["-c:a", "copy"]
     cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", amap, *acodec,

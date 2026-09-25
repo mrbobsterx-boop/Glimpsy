@@ -38,6 +38,8 @@ from worklapse.editor.text import TextItem, effective_style, load_custom_fonts
 from worklapse.editor.text_panel import TextPanel
 from worklapse.editor.overlay import OverlayItem
 from worklapse.editor.overlay_panel import OverlayPanel
+from worklapse.editor.music import AUDIO_EXT, MusicTrack, probe_audio
+from worklapse.editor.music_panel import MusicPanel
 from worklapse.editor.timeline import TimelineWidget, fmt_time
 from worklapse.recorder.encoder import Encoder
 
@@ -76,10 +78,12 @@ class EditorWindow(QMainWindow):
         self.inspector = Inspector()
         self.text_panel = TextPanel()
         self.overlay_panel = OverlayPanel()
-        self.side = QStackedWidget()        # справа: свойства фрагмента, текста или наложения
+        self.music_panel = MusicPanel()
+        self.side = QStackedWidget()        # справа: свойства фрагмента, текста, наложения или музыки
         self.side.addWidget(self.inspector)
         self.side.addWidget(self.text_panel)
         self.side.addWidget(self.overlay_panel)
+        self.side.addWidget(self.music_panel)
         self._ov_images: dict[str, QImage] = {}
         self._motion_cache: dict = {}
 
@@ -167,6 +171,8 @@ class EditorWindow(QMainWindow):
         self.preview.overlay_pressed.connect(self._on_overlay_pressed)
         self.preview.overlay_changed.connect(self._on_overlay_changed)
         self.preview.overlay_wheel.connect(self._on_overlay_wheel)
+        self.timeline.music_selected.connect(self._on_music_select)
+        self.music_panel.edited.connect(self._on_music_edit)
         self.thumbs.ready.connect(self._sync_preview)     # кадры видео-наложений подгружаются в фоне
 
         self._save_timer = QTimer(self, singleShot=True, interval=500)
@@ -192,12 +198,14 @@ class EditorWindow(QMainWindow):
         a_text = QAction("T  Текст", self, triggered=self.add_text, toolTip="Добавить текст в месте курсора (Ctrl+T)")
         a_overlay = QAction("▣  Наложение", self, triggered=self.add_overlay_dialog,
                             toolTip="Картинка или видео поверх ролика (логотип, макет, съёмка с телефона)")
+        a_music = QAction("♪  Музыка", self, triggered=self.add_music_dialog,
+                          toolTip="Фоновая музыка на весь ролик (mp3, wav, m4a, ogg, flac…)")
         self.a_split = QAction("✂ Разрезать", self, triggered=self.split, toolTip="Ctrl+B — по курсору")
         self.a_delete = QAction("🗑 Удалить", self, triggered=self.delete_selected, toolTip="Delete")
         for a in (self.a_undo, self.a_redo):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (a_add, a_text, a_overlay, self.a_split, self.a_delete):
+        for a in (a_add, a_text, a_overlay, a_music, self.a_split, self.a_delete):
             tb.addAction(a)
         tb.addSeparator()
         tb.addWidget(QLabel(" Формат: "))
@@ -219,7 +227,7 @@ class EditorWindow(QMainWindow):
     def _update_actions(self) -> None:
         self.a_undo.setEnabled(self.history.can_undo)
         self.a_redo.setEnabled(self.history.can_redo)
-        self.a_delete.setEnabled(self.timeline.selected is not None)
+        self.a_delete.setEnabled(self.timeline.selected is not None or self.timeline.music_active)
         self.a_split.setEnabled(bool(self.project.clips))
         self.export_btn.setEnabled(bool(self.project.clips))
 
@@ -304,6 +312,10 @@ class EditorWindow(QMainWindow):
 
     def _changed(self) -> None:
         """После любой правки: перерисовать, обновить просмотр, автосохранение."""
+        if self.project.music is None and self.timeline.music_active:
+            self.timeline.select_music(False)
+        elif self.project.music is not None:
+            self.music_panel.set_track(self.project.music)
         self.timeline.prune_selection()
         self.timeline.update()
         self.player.refresh()
@@ -534,6 +546,9 @@ class EditorWindow(QMainWindow):
             self.add_overlays(files, self.player.t)
 
     def add_overlays(self, files: list, start: float) -> None:
+        files = self._take_music(files)
+        if not files:
+            return
         self.player.pause()
         total = self.project.total
         start = max(0.0, min(float(start), max(0.0, total - 0.5)))
@@ -643,7 +658,78 @@ class EditorWindow(QMainWindow):
         o.set_layout(self.project.aspect, cx, cy, sc * factor)
         self._layer_changed()
 
+    # ---------- музыка ----------
+
+    def add_music_dialog(self) -> None:
+        exts = " ".join(f"*{e}" for e in sorted(AUDIO_EXT))
+        f, _ = QFileDialog.getOpenFileName(self, "Фоновая музыка", str(Path.home()),
+                                           f"Музыка ({exts});;Все файлы (*)")
+        if f:
+            self.set_music(Path(f))
+
+    def set_music(self, path: Path) -> bool:
+        self.player.pause()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            duration = probe_audio(self.ffmpeg, path)
+            rel = self.project.copy_media(path)
+        except (ValueError, OSError) as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Worklapse", f"Не удалось добавить музыку «{path.name}»: {e}")
+            return False
+        QApplication.restoreOverrideCursor()
+        self.history.push(self.project.to_dict())
+        old = self.project.music
+        track = MusicTrack(rel, duration, label=path.name)
+        if old is not None:          # замена трека — настройки сохраняем, кроме места начала
+            track.volume, track.fade_in, track.fade_out = old.volume, old.fade_in, old.fade_out
+            track.loop, track.duck = old.loop, old.duck
+        self.project.music = track
+        self.timeline.select_music(True)
+        self._music_changed()
+        return True
+
+    def _on_music_select(self, on: bool) -> None:
+        if on and self.project.music is not None:
+            self.player.pause()
+            self.music_panel.set_track(self.project.music)
+            self.side.setCurrentWidget(self.music_panel)
+        elif self.side.currentWidget() is self.music_panel:
+            self.side.setCurrentWidget(self.inspector)
+        self._update_actions()
+
+    def _on_music_edit(self, what: str, value) -> None:
+        m = self.project.music
+        if m is None:
+            return
+        if what == "replace":
+            self.add_music_dialog()
+            return
+        if what == "remove":
+            self.history.push(self.project.to_dict())
+            self.project.music = None
+            self.timeline.select_music(False)
+            self._music_changed()
+            return
+        self.history.push(self.project.to_dict(), key=f"music-{what}")
+        if what in ("volume", "in_s", "fade_in", "fade_out"):
+            setattr(m, what, max(0.0, float(value)))
+        elif what in ("loop", "duck"):
+            setattr(m, what, bool(value))
+        self._music_changed()
+
+    def _music_changed(self) -> None:
+        self.timeline.update()
+        self.player.refresh()
+        if self.project.music is not None:
+            self.music_panel.set_track(self.project.music)
+        self._update_actions()
+        self._save_timer.start()
+
     def delete_selected(self) -> None:
+        if self.timeline.music_active:
+            self._on_music_edit("remove", None)
+            return
         if self.timeline.selected_overlay:
             self._on_overlay_edit(self.timeline.selected_overlay, "delete", None)
             return
@@ -677,7 +763,17 @@ class EditorWindow(QMainWindow):
         if files:
             self.insert_files(files, self._insert_index())
 
+    def _take_music(self, files: list) -> list:
+        """Музыкальные файлы среди перетащенных/вставленных — ставим фоновой музыкой, остальные возвращаем."""
+        audio = [f for f in files if Path(f).suffix.lower() in AUDIO_EXT]
+        if audio:
+            self.set_music(Path(audio[-1]))
+        return [f for f in files if Path(f).suffix.lower() not in AUDIO_EXT]
+
     def insert_files(self, files: list[str], index: int) -> None:
+        files = self._take_music(files)
+        if not files:
+            return
         clips, errors = [], []
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
