@@ -220,3 +220,48 @@ def test_custom_font(qt_app, tmp_path, monkeypatch):
     family = textmod.add_font(Path(fonts[0]))
     assert family and (tmp_path / "fonts" / Path(fonts[0]).name).exists()
     assert family in textmod.load_custom_fonts()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_export_with_overlays(tmp_path, qt_app):
+    from worklapse.editor.export import render_overlay_layers
+    from worklapse.editor.overlay import OverlayItem
+
+    def gen(args, name):
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args, str(tmp_path / name)], check=True)
+    gen(["-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30", "-t", "3", "-c:v", "libx264"], "bg.mp4")
+    gen(["-f", "lavfi", "-i", "color=c=white:size=400x300", "-frames:v", "1"], "logo.png")
+    gen(["-f", "lavfi", "-i", "color=c=white:size=320x240:rate=30", "-f", "lavfi", "-i", "sine=f=880",
+         "-t", "2", "-c:v", "libx264", "-c:a", "aac", "-shortest"], "phone.mp4")
+    p = Project(tmp_path, "t", [Clip("a", "video", "bg.mp4", 3, 0, 3, width=640, height=360)])
+    img = OverlayItem("i", "image", "logo.png", 0.5, 0.8, width=400, height=300, radius=0.2, shadow=True)
+    img.set_layout("16:9", 0.25, 0.5, 0.3)                 # левая половина кадра
+    vid = OverlayItem("v", "video", "phone.mp4", 1.6, 1.0, width=320, height=240, src_duration=2,
+                      has_audio=True, radius=0.15, opacity=0.9)
+    vid.set_layout("16:9", 0.75, 0.5, 0.3)                 # правая половина
+    p.overlays = [img, vid]
+    layers = render_overlay_layers(p, tmp_path / "layers")
+    out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder(), overlay_layers=layers)
+
+    def halves(ts):
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", str(ts), "-i", str(out), "-frames:v", "1",
+                              "-vf", "scale=16:9,format=gray", "-f", "rawvideo", "-"], capture_output=True).stdout
+        left = sum(raw[r * 16 + c] for r in range(9) for c in range(8)) / 72
+        right = sum(raw[r * 16 + c] for r in range(9) for c in range(8, 16)) / 72
+        return left, right
+    l0, r0 = halves(0.2)
+    l1, r1 = halves(0.9)
+    l2, r2 = halves(2.1)
+    assert l0 < 5 and r0 < 5                 # до наложений — чёрный кадр
+    assert l1 > 20 and r1 < 5                # картинка слева
+    assert l2 < 5 and r2 > 20                # видео справа, картинка уже исчезла
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
+    assert "Audio: aac" in info
+    # звук видео-наложения подмешан: в 2.1 с есть сигнал, в 0.5 с — тишина
+    def loud(ts):
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", str(ts), "-t", "0.2", "-i", str(out), "-vn",
+                              "-f", "s16le", "-ac", "1", "-"], capture_output=True).stdout
+        import array
+        a = array.array("h", raw[: len(raw) // 2 * 2])
+        return max((abs(x) for x in a), default=0)
+    assert loud(0.5) < 100 and loud(2.1) > 1000

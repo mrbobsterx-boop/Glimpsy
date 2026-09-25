@@ -125,6 +125,49 @@ def render_text_layers(project: Project, out_dir: Path) -> list[TextLayer]:
     return layers
 
 
+@dataclass
+class OverlayLayer:
+    """Наложение, подготовленное к экспорту."""
+    item: object
+    x: float                  # левый верхний угол самого наложения (без запаса под тень)
+    y: float
+    w: int
+    h: int
+    pad: int                  # запас под тень вокруг картинки
+    png: Path | None = None           # картинка с оформлением (для фото)
+    shadow_png: Path | None = None    # только тень (для видео)
+    video: Path | None = None
+
+
+def render_overlay_layers(project: Project, out_dir: Path) -> list[OverlayLayer]:
+    """Подготовить наложения. Вызывать из основного потока (рисует Qt)."""
+    from PySide6.QtGui import QImage
+
+    from worklapse.editor.overlay import overlay_rect, shadow_image, shadow_pad, styled_image
+
+    W, H = ASPECTS[project.aspect]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    layers = []
+    for i, ov in enumerate(getattr(project, "overlays", [])):
+        x, y, w, h = overlay_rect(ov, project.aspect, W, H)
+        w, h = max(2, int(round(w / 2)) * 2), max(2, int(round(h / 2)) * 2)
+        pad = shadow_pad(w, h)
+        path = project.dir / ov.src
+        layer = OverlayLayer(ov, round(x), round(y), w, h, pad)
+        if ov.kind == "image":
+            png = out_dir / f"overlay_{i:03d}.png"
+            styled_image(QImage(str(path)), w, h, ov.radius, ov.shadow, ov.opacity).save(str(png))
+            layer.png = png
+        else:
+            layer.video = path
+            if ov.shadow:
+                sp = out_dir / f"overlay_{i:03d}_shadow.png"
+                shadow_image(w, h, ov.radius, ov.opacity).save(str(sp))
+                layer.shadow_png = sp
+        layers.append(layer)
+    return layers
+
+
 def default_output(project: Project, fallback_dir: Path) -> Path:
     suffix = "_edit" if project.aspect == "16:9" else "_edit_9x16"
     if project.source_video:
@@ -136,7 +179,8 @@ def default_output(project: Project, fallback_dir: Path) -> Path:
 def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
                    progress: Callable[[float, str], None] | None = None,
                    cancel: threading.Event | None = None,
-                   text_layers: list[TextLayer] | None = None) -> Path:
+                   text_layers: list[TextLayer] | None = None,
+                   overlay_layers: list["OverlayLayer"] | None = None) -> Path:
     progress = progress or (lambda f, t: None)
     cancel = cancel or threading.Event()
     clips = [c for c in project.clips if c.duration > 0.05]
@@ -167,12 +211,13 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         lst.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = work / "final.mp4"
-        joined = work / "joined.mp4" if text_layers else tmp
+        layered = bool(text_layers or overlay_layers)
+        joined = work / "joined.mp4" if layered else tmp
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
               "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)], cancel)
-        if text_layers:
-            progress(len(clips) / (len(clips) + 1), "Тексты")
-            _overlay_texts(ffmpeg, project, joined, tmp, text_layers, enc, cancel)
+        if layered:
+            progress(len(clips) / (len(clips) + 1), "Тексты и наложения")
+            _compose_layers(ffmpeg, project, joined, tmp, text_layers or [], overlay_layers or [], enc, cancel)
         shutil.move(str(tmp), out)
         progress(1.0, "Готово")
         return out
@@ -180,24 +225,72 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _overlay_texts(ffmpeg: str, project: Project, src: Path, out: Path, layers: list[TextLayer],
-                   enc: Encoder, cancel: threading.Event) -> None:
+def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: list[TextLayer],
+                    overlays: list["OverlayLayer"], enc: Encoder, cancel: threading.Event) -> None:
+    """Один проход FFmpeg: сначала наложения (картинки/видео), сверху — тексты."""
+    from worklapse.editor.overlay import video_alpha_filter
     from worklapse.editor.text import ffmpeg_overlay
 
     W, H = ASPECTS[project.aspect]
-    total = project.total
+    total, fps = project.total, project.fps
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *enc.global_args, "-i", str(src)]
-    for layer in layers:
-        cmd += ["-loop", "1", "-framerate", str(project.fps), "-t", f"{total:.3f}", "-i", str(layer.png)]
-    parts, prev = [], "0:v"
-    for i, layer in enumerate(layers, start=1):
-        label = f"v{i}"
-        parts.append(ffmpeg_overlay(i, prev, label, layer.item, layer.style, layer.x, layer.y,
-                                    layer.w, layer.h, H))
-        prev = label
-    graph = ";".join(parts) + f";[{prev}]{enc.filter_suffix}[vout]"
-    cmd += ["-filter_complex", graph, "-map", "[vout]", "-map", "0:a?", "-c:a", "copy",
-            *enc.args("final", project.fps), "-t", f"{total:.3f}", "-movflags", "+faststart", str(out)]
+    parts: list[str] = []
+    audio: list[str] = []
+    prev, n = "0:v", 0
+
+    def still(png: Path) -> int:
+        nonlocal n
+        cmd.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{total:.3f}", "-i", str(png)])
+        n += 1
+        return n
+
+    def put(label_in: str, x: float, y: float, S: float, E: float) -> None:
+        nonlocal prev
+        out_label = f"v{len(parts)}"
+        parts.append(f"[{prev}][{label_in}]overlay=x={x:.2f}:y={y:.2f}:eof_action=pass:"
+                     f"enable='between(t,{S:.3f},{E:.3f})'[{out_label}]")
+        prev = out_label
+
+    for ov in overlays:
+        it = ov.item
+        S, E = it.start, min(it.end, total)
+        if S >= total:
+            continue
+        if it.kind == "image":
+            k = still(ov.png)
+            parts.append(f"[{k}:v]format=rgba[o{k}]")
+            put(f"o{k}", ov.x - ov.pad, ov.y - ov.pad, S, E)
+            continue
+        if ov.shadow_png is not None:
+            k = still(ov.shadow_png)
+            parts.append(f"[{k}:v]format=rgba[o{k}]")
+            put(f"o{k}", ov.x - ov.pad, ov.y - ov.pad, S, E)
+        cmd.extend(["-ss", f"{it.in_s:.3f}", "-t", f"{E - S:.3f}", "-i", str(ov.video)])
+        n += 1
+        k = n
+        parts.append(f"[{k}:v]setpts=PTS-STARTPTS+{S:.3f}/TB,"
+                     f"{video_alpha_filter(ov.w, ov.h, it.radius, it.opacity)}[o{k}]")
+        put(f"o{k}", ov.x, ov.y, S, E)
+        if it.has_audio and not it.muted:
+            parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,adelay=delays={S * 1000:.0f}:all=1[a{k}]")
+            audio.append(f"[a{k}]")
+
+    for layer in texts:
+        k = still(layer.png)
+        chain = ffmpeg_overlay(k, prev, f"t{len(parts)}", layer.item, layer.style, layer.x, layer.y,
+                               layer.w, layer.h, H)
+        parts.append(chain)
+        prev = f"t{len(parts) - 1}"
+
+    parts.append(f"[{prev}]{enc.filter_suffix}[vout]")
+    if audio:
+        parts.append(f"[0:a]{''.join(audio)}amix=inputs={len(audio) + 1}:duration=first:"
+                     f"normalize=0:dropout_transition=0[aout]")
+        amap, acodec = "[aout]", ["-c:a", "aac", "-b:a", "160k"]
+    else:
+        amap, acodec = "0:a?", ["-c:a", "copy"]
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", amap, *acodec,
+            *enc.args("final", fps), "-t", f"{total:.3f}", "-movflags", "+faststart", str(out)]
     _run(cmd, cancel)
 
 

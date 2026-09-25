@@ -72,6 +72,10 @@ def main() -> None:
     engine = RecorderEngine(settings, services, ffmpeg)
     tray = TrayController(app, settings, services, engine)
     server = _listen_for_second_launch(tray)  # noqa: F841 — держим ссылку, пока программа работает
+    from worklapse import autostart
+
+    autostart.refresh()      # программу могли перенести в другую папку — обновим путь
+    settings.launch_at_login = autostart.is_enabled()
 
     # Один раз показываем, что на этой системе ограничено и почему
     new_limits = [x for x in services.limitations if x not in settings.shown_limitations]

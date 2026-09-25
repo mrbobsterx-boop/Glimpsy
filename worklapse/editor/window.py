@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeyEvent
+from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
@@ -26,7 +26,9 @@ from PySide6.QtWidgets import (
 
 from worklapse import paths
 from worklapse.editor import keys
-from worklapse.editor.export import ExportCancelled, default_output, export_project, render_text_layers
+from worklapse.editor.export import (
+    ExportCancelled, default_output, export_project, render_overlay_layers, render_text_layers,
+)
 from worklapse.editor.inspector import Inspector
 from worklapse.editor.media import IMAGE_EXT, VIDEO_EXT, MediaError, Thumbnailer, is_supported, probe
 from worklapse.editor.player import TimelinePlayer
@@ -34,6 +36,8 @@ from worklapse.editor.preview import PreviewWidget
 from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, Clip, History, Project, cover_zoom, new_id
 from worklapse.editor.text import TextItem, effective_style, load_custom_fonts
 from worklapse.editor.text_panel import TextPanel
+from worklapse.editor.overlay import OverlayItem
+from worklapse.editor.overlay_panel import OverlayPanel
 from worklapse.editor.timeline import TimelineWidget, fmt_time
 from worklapse.recorder.encoder import Encoder
 
@@ -71,9 +75,12 @@ class EditorWindow(QMainWindow):
         self.timeline = TimelineWidget(self.project, self.thumbs)
         self.inspector = Inspector()
         self.text_panel = TextPanel()
-        self.side = QStackedWidget()        # справа: свойства фрагмента или текста
+        self.overlay_panel = OverlayPanel()
+        self.side = QStackedWidget()        # справа: свойства фрагмента, текста или наложения
         self.side.addWidget(self.inspector)
         self.side.addWidget(self.text_panel)
+        self.side.addWidget(self.overlay_panel)
+        self._ov_images: dict[str, QImage] = {}
 
         self.play_btn = QPushButton()
         self.play_btn.setFixedWidth(44)
@@ -153,6 +160,13 @@ class EditorWindow(QMainWindow):
         self.text_panel.edited.connect(self._on_text_edit)
         self.preview.text_pressed.connect(self._on_text_pressed)
         self.preview.text_moved.connect(self._on_text_moved)
+        self.timeline.overlay_selected.connect(self._on_overlay_select)
+        self.timeline.overlay_files_dropped.connect(self.add_overlays)
+        self.overlay_panel.edited.connect(self._on_overlay_edit)
+        self.preview.overlay_pressed.connect(self._on_overlay_pressed)
+        self.preview.overlay_changed.connect(self._on_overlay_changed)
+        self.preview.overlay_wheel.connect(self._on_overlay_wheel)
+        self.thumbs.ready.connect(self._sync_preview)     # кадры видео-наложений подгружаются в фоне
 
         self._save_timer = QTimer(self, singleShot=True, interval=500)
         self._save_timer.timeout.connect(self._save)
@@ -175,12 +189,14 @@ class EditorWindow(QMainWindow):
         self.a_redo = QAction("↷ Повторить", self, triggered=self.redo, toolTip="Ctrl+Shift+Z / Ctrl+Y")
         a_add = QAction("＋ Добавить медиа", self, triggered=self.add_media_dialog, toolTip="Видео или фото (Ctrl+V)")
         a_text = QAction("T  Текст", self, triggered=self.add_text, toolTip="Добавить текст в месте курсора (Ctrl+T)")
+        a_overlay = QAction("▣  Наложение", self, triggered=self.add_overlay_dialog,
+                            toolTip="Картинка или видео поверх ролика (логотип, макет, съёмка с телефона)")
         self.a_split = QAction("✂ Разрезать", self, triggered=self.split, toolTip="Ctrl+B — по курсору")
         self.a_delete = QAction("🗑 Удалить", self, triggered=self.delete_selected, toolTip="Delete")
         for a in (self.a_undo, self.a_redo):
             tb.addAction(a)
         tb.addSeparator()
-        for a in (a_add, a_text, self.a_split, self.a_delete):
+        for a in (a_add, a_text, a_overlay, self.a_split, self.a_delete):
             tb.addAction(a)
         tb.addSeparator()
         tb.addWidget(QLabel(" Формат: "))
@@ -224,6 +240,20 @@ class EditorWindow(QMainWindow):
         visible = [x for x in self.project.texts if x.start <= t < x.end or x.id == self.timeline.selected_text]
         self.preview.set_texts([(x, effective_style(x, self.project.text_style)) for x in visible], t,
                                self.timeline.selected_text)
+        sel_ov = self.timeline.selected_overlay
+        shown = [o for o in self.project.overlays if o.start <= t < o.end or o.id == sel_ov]
+        self.preview.set_overlays([(o, self._overlay_frame(o, t)) for o in shown], sel_ov)
+
+    def _overlay_frame(self, o, t: float):
+        """Картинка для показа наложения в просмотре (для видео — кадр в нужный момент)."""
+        path = self.project.dir / o.src
+        if o.kind == "image":
+            img = self._ov_images.get(str(path))
+            if img is None:
+                img = self._ov_images[str(path)] = QImage(str(path))
+            return img
+        local = max(0.0, min(o.duration, t - o.start))
+        return self.thumbs.get(path, float(round(o.in_s + local)), 360)
 
     def _shown_clip(self) -> Clip | None:
         idx = self.player.idx
@@ -252,6 +282,9 @@ class EditorWindow(QMainWindow):
         item = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
         if item is not None:
             self.text_panel.set_item(item, effective_style(item, self.project.text_style))
+        ov = self.project.overlay_by_id(self.timeline.selected_overlay) if self.timeline.selected_overlay else None
+        if ov is not None:
+            self.overlay_panel.set_item(ov, self.project.aspect)
         self._sync_preview()
         self._update_actions()
         self._save_timer.start()
@@ -458,7 +491,129 @@ class EditorWindow(QMainWindow):
             self._sync_preview()
             self._save_timer.start()
 
+    # ---------- наложения ----------
+
+    def add_overlay_dialog(self) -> None:
+        exts = " ".join(f"*{e}" for e in sorted(IMAGE_EXT | VIDEO_EXT))
+        files, _ = QFileDialog.getOpenFileNames(self, "Картинка или видео поверх ролика", str(Path.home()),
+                                                f"Картинки и видео ({exts});;Все файлы (*)")
+        if files:
+            self.add_overlays(files, self.player.t)
+
+    def add_overlays(self, files: list, start: float) -> None:
+        self.player.pause()
+        total = self.project.total
+        start = max(0.0, min(float(start), max(0.0, total - 0.5)))
+        items, errors = [], []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for f in files:
+                path = Path(f)
+                if not path.is_file() or not is_supported(path):
+                    errors.append(f"{path.name}: этот тип файла не поддерживается")
+                    continue
+                try:
+                    info = probe(self.ffmpeg, path)
+                    clip = self.project.import_file(path, info)      # копия файла в папку проекта
+                except (MediaError, OSError) as e:
+                    errors.append(f"{path.name}: {e}")
+                    continue
+                room = max(0.5, total - start)
+                dur = 3.0 if info.is_image else info.duration
+                o = OverlayItem(new_id(), "image" if info.is_image else "video", clip.src, round(start, 2),
+                                round(min(dur, room), 2), width=info.width, height=info.height,
+                                src_duration=0.0 if info.is_image else info.duration,
+                                has_audio=info.has_audio, label=path.name)
+                o.set_layout(self.project.aspect, 0.5, 0.5, 0.45)
+                items.append(o)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if items:
+            self.history.push(self.project.to_dict())
+            self.project.overlays.extend(items)
+            self.timeline.select_overlay(items[-1].id)
+            self._layer_changed()
+        if errors:
+            QMessageBox.warning(self, "Worklapse", "Не всё удалось добавить:\n\n" + "\n".join(errors))
+
+    def _on_overlay_select(self, oid) -> None:
+        o = self.project.overlay_by_id(oid) if oid else None
+        if o is None:
+            if self.side.currentWidget() is self.overlay_panel:
+                self.side.setCurrentWidget(self.inspector)
+        else:
+            self.player.pause()
+            if not (o.start <= self.player.t < o.end):
+                self.player.seek(o.start + min(0.5, o.duration / 2))
+            self.overlay_panel.set_item(o, self.project.aspect)
+            self.side.setCurrentWidget(self.overlay_panel)
+        self._sync_preview()
+        self._update_actions()
+
+    def _layer_changed(self) -> None:
+        """Правка текста или наложения — без перемотки видео."""
+        self._text_changed()
+        o = self.project.overlay_by_id(self.timeline.selected_overlay) if self.timeline.selected_overlay else None
+        if o is not None:
+            self.overlay_panel.set_item(o, self.project.aspect)
+
+    def _on_overlay_edit(self, oid: str, what: str, value) -> None:
+        o = self.project.overlay_by_id(oid)
+        if o is None:
+            return
+        if what == "delete":
+            self.history.push(self.project.to_dict())
+            self.project.overlays.remove(o)
+            self.timeline.select_overlay(None)
+            self._layer_changed()
+            return
+        self.history.push(self.project.to_dict(), key=f"ov-{what}:{oid}")
+        aspect = self.project.aspect
+        cx, cy, sc = o.layout_for(aspect)
+        if what == "start":
+            o.start = max(0.0, float(value))
+        elif what == "duration":
+            o.duration = max(0.2, float(value))
+        elif what == "scale":
+            o.set_layout(aspect, cx, cy, float(value))
+        elif what == "place":
+            o.set_layout(aspect, value[0], value[1], sc)
+        elif what == "fill":
+            W, H = ASPECTS[aspect]
+            ar = (o.height / o.width) if o.width and o.height else 9 / 16
+            o.set_layout(aspect, 0.5, 0.5, max(1.0, (H / W) / ar))   # закрыть весь кадр
+        elif what == "muted":
+            o.muted = bool(value)
+        elif what in ("opacity", "radius", "shadow"):
+            setattr(o, what, value)
+        self._layer_changed()
+
+    def _on_overlay_pressed(self, oid: str) -> None:
+        self.player.pause()
+        self.timeline.select_overlay(oid)
+        self.history.push(self.project.to_dict())
+
+    def _on_overlay_changed(self, oid: str, cx: float, cy: float, scale: float) -> None:
+        o = self.project.overlay_by_id(oid)
+        if o is not None:
+            o.set_layout(self.project.aspect, cx, cy, scale)
+            self._sync_preview()
+            self.overlay_panel.set_item(o, self.project.aspect)
+            self._save_timer.start()
+
+    def _on_overlay_wheel(self, oid: str, factor: float) -> None:
+        o = self.project.overlay_by_id(oid)
+        if o is None:
+            return
+        self.history.push(self.project.to_dict(), key=f"ov-wheel:{oid}")
+        cx, cy, sc = o.layout_for(self.project.aspect)
+        o.set_layout(self.project.aspect, cx, cy, sc * factor)
+        self._layer_changed()
+
     def delete_selected(self) -> None:
+        if self.timeline.selected_overlay:
+            self._on_overlay_edit(self.timeline.selected_overlay, "delete", None)
+            return
         if self.timeline.selected_text:
             self._on_text_edit(self.timeline.selected_text, "delete", None)
             return
@@ -631,11 +786,13 @@ class EditorWindow(QMainWindow):
         # тексты рисуются в основном потоке (так надёжнее для шрифтов), дальше — FFmpeg в фоне
         layers_dir = paths.temp_root() / f"text_{int(time.time())}"
         text_layers = render_text_layers(snapshot, layers_dir)
+        overlay_layers = render_overlay_layers(snapshot, layers_dir)
 
         def work() -> None:
             try:
                 enc = self.encoder_getter()
                 path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
+                                      overlay_layers=overlay_layers,
                                       progress=lambda f, t: bridge.progress.emit(f, t), cancel=cancel)
                 bridge.done.emit(str(path))
             except ExportCancelled:

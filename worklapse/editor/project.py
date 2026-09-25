@@ -104,6 +104,7 @@ class Project:
     version: int = 1
     texts: list = field(default_factory=list)       # TextItem — тексты поверх ролика
     text_style: dict = field(default_factory=dict)  # общий стиль текстов (отличия от стандартного)
+    overlays: list = field(default_factory=list)    # OverlayItem — картинки/видео поверх ролика
 
     # ---------- время ----------
 
@@ -132,6 +133,9 @@ class Project:
 
     def text_by_id(self, text_id: str):
         return next((t for t in self.texts if t.id == text_id), None)
+
+    def overlay_by_id(self, oid: str):
+        return next((o for o in self.overlays if o.id == oid), None)
 
     def texts_at(self, t: float) -> list:
         return [x for x in self.texts if x.start <= t < x.end]
@@ -208,6 +212,7 @@ class Project:
             "clips": [asdict(c) for c in self.clips],
             "texts": [asdict(t) for t in self.texts],
             "text_style": copy.deepcopy(self.text_style),
+            "overlays": [asdict(o) for o in self.overlays],
         }
 
     def restore(self, data: dict) -> None:
@@ -220,6 +225,11 @@ class Project:
         tknown = {f.name for f in fields(TextItem)}
         self.texts = [TextItem(**{k: v for k, v in t.items() if k in tknown}) for t in data.get("texts", [])]
         self.text_style = copy.deepcopy(data.get("text_style", {}))
+        from worklapse.editor.overlay import OverlayItem
+
+        oknown = {f.name for f in fields(OverlayItem)}
+        self.overlays = [OverlayItem(**{k: v for k, v in o.items() if k in oknown})
+                         for o in data.get("overlays", [])]
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"

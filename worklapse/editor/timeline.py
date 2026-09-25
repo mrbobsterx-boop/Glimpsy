@@ -23,7 +23,8 @@ from worklapse.editor.project import Project
 RULER_H = 24
 TEXT_Y = 30          # дорожка текстов
 TEXT_H = 22
-TRACK_Y = 58         # дорожка видео и фото
+OVL_Y = 56           # дорожка наложений (картинки/видео поверх ролика)
+TRACK_Y = 84         # дорожка видео и фото
 TRACK_H = 64
 EDGE_PX = 8
 GAP = 2
@@ -36,7 +37,9 @@ COL_SELECT = QColor("#ffffff")
 COL_PLAYHEAD = QColor("#ffffff")
 COL_DROP = QColor("#3e9bff")
 COL_TEXT = QColor("#b5892a")
+COL_OVL = QColor("#7d5fb2")
 MIN_TEXT_S = 0.2
+LANES = ("text", "overlay")
 
 
 def fmt_time(t: float, precise: bool = False) -> str:
@@ -51,6 +54,8 @@ class TimelineWidget(QWidget):
     changed = Signal()                          # после правки
     files_dropped = Signal(list, int)           # пути, позиция вставки
     text_selected = Signal(object)              # id текста или None
+    overlay_selected = Signal(object)           # id наложения или None
+    overlay_files_dropped = Signal(list, float) # пути, время начала
 
     def __init__(self, project: Project, thumbs: Thumbnailer) -> None:
         super().__init__()
@@ -63,7 +68,9 @@ class TimelineWidget(QWidget):
         self.selected: str | None = None       # главный выбранный фрагмент
         self.selection: list[str] = []          # все выбранные (Shift/Ctrl+щелчок)
         self.selected_text: str | None = None
-        self._text_orig = (0.0, 0.0)
+        self.selected_overlay: str | None = None
+        self._lane = "text"
+        self._lane_orig = (0.0, 0.0, 0.0)       # начало, длительность, in_s — в момент нажатия
         self._mode: str | None = None  # playhead / trim_l / trim_r / press / drag
         self._press: QPointF | None = None
         self._drag_idx = -1
@@ -84,9 +91,20 @@ class TimelineWidget(QWidget):
     def t_of(self, x: float) -> float:
         return max(0.0, (x - 12 + self.offset) / self.pps)
 
+    def _lane_items(self, kind: str) -> list:
+        return self.project.texts if kind == "text" else self.project.overlays
+
+    @staticmethod
+    def _lane_y(kind: str) -> float:
+        return TEXT_Y if kind == "text" else OVL_Y
+
+    def lane_rects(self, kind: str) -> list[QRectF]:
+        y = self._lane_y(kind)
+        return [QRectF(self.x_of(t.start) + 1, y, max(6.0, t.duration * self.pps - 2), TEXT_H)
+                for t in self._lane_items(kind)]
+
     def text_rects(self) -> list[QRectF]:
-        return [QRectF(self.x_of(t.start) + 1, TEXT_Y, max(6.0, t.duration * self.pps - 2), TEXT_H)
-                for t in self.project.texts]
+        return self.lane_rects("text")
 
     def clip_rects(self) -> list[QRectF]:
         rects, t = [], 0.0
@@ -132,7 +150,8 @@ class TimelineWidget(QWidget):
         if self._mode == "drag" and self._drop_idx >= 0:
             x = rects[self._drop_idx].left() if self._drop_idx < len(rects) else (rects[-1].right() if rects else 12)
             p.fillRect(QRectF(x - 2, TRACK_Y - 6, 4, TRACK_H + 12), COL_DROP)
-        self._paint_texts(p)
+        self._paint_lane(p, "text")
+        self._paint_lane(p, "overlay")
         if not self.project.clips:
             p.setPen(COL_RULER)
             p.drawText(QRectF(0, TRACK_Y, self.width(), TRACK_H), Qt.AlignmentFlag.AlignCenter,
@@ -144,28 +163,34 @@ class TimelineWidget(QWidget):
         p.setBrush(COL_PLAYHEAD)
         p.drawPolygon([QPointF(x - 6, 2), QPointF(x + 6, 2), QPointF(x, 10)])
 
-    def _paint_texts(self, p: QPainter) -> None:
+    def _paint_lane(self, p: QPainter, kind: str) -> None:
         f = QFont(self.font())
         f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
         p.setFont(f)
+        y = self._lane_y(kind)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, 12))
-        p.drawRoundedRect(QRectF(0, TEXT_Y, self.width(), TEXT_H), 4, 4)
-        if not self.project.texts:
+        p.drawRoundedRect(QRectF(0, y, self.width(), TEXT_H), 4, 4)
+        items = self._lane_items(kind)
+        if not items:
             p.setPen(QColor(COL_RULER.red(), COL_RULER.green(), COL_RULER.blue(), 140))
-            p.drawText(QRectF(12, TEXT_Y, self.width(), TEXT_H), Qt.AlignmentFlag.AlignVCenter,
-                       "T  тексты — кнопка «T Текст» сверху")
+            hint = ("T  тексты — кнопка «T Текст» сверху" if kind == "text"
+                    else "▣  наложения — кнопка «▣ Наложение» или перетащите сюда картинку/видео")
+            p.drawText(QRectF(12, y, self.width(), TEXT_H), Qt.AlignmentFlag.AlignVCenter, hint)
             return
-        for t, r in zip(self.project.texts, self.text_rects()):
+        selected = self.selected_text if kind == "text" else self.selected_overlay
+        for t, r in zip(items, self.lane_rects(kind)):
             if r.right() < 0 or r.left() > self.width():
                 continue
-            p.setPen(QPen(COL_SELECT, 2) if t.id == self.selected_text else Qt.PenStyle.NoPen)
-            p.setBrush(COL_TEXT)
+            p.setPen(QPen(COL_SELECT, 2) if t.id == selected else Qt.PenStyle.NoPen)
+            p.setBrush(COL_TEXT if kind == "text" else COL_OVL)
             p.drawRoundedRect(r, 4, 4)
             p.setPen(QColor("#ffffff"))
-            label = (t.text.strip().splitlines() or [""])[0]
-            p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                       "T  " + label)
+            if kind == "text":
+                label = "T  " + (t.text.strip().splitlines() or [""])[0]
+            else:
+                label = ("▣  " if t.kind == "image" else "▶  ") + t.label
+            p.drawText(r.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
 
     def _paint_ruler(self, p: QPainter) -> None:
         # шаг подписей подбираем так, чтобы они не слипались
@@ -232,28 +257,46 @@ class TimelineWidget(QWidget):
 
     # ---------- мышь ----------
 
-    def _hit_text(self, pos: QPointF) -> tuple[int, str]:
-        if not (TEXT_Y - 2 <= pos.y() <= TEXT_Y + TEXT_H + 2):
-            return -1, ""
-        # последние сверху — проверяем с конца
-        for i in range(len(self.project.texts) - 1, -1, -1):
-            r = self.text_rects()[i]
-            if r.left() - 2 <= pos.x() <= r.right() + 2:
-                if pos.x() - r.left() <= EDGE_PX:
-                    return i, "t_left"
-                if r.right() - pos.x() <= EDGE_PX:
-                    return i, "t_right"
-                return i, "t_move"
-        return -1, ""
+    def _hit_lane(self, pos: QPointF) -> tuple[str, int, str]:
+        for kind in LANES:
+            y = self._lane_y(kind)
+            if not (y - 2 <= pos.y() <= y + TEXT_H + 2):
+                continue
+            rects = self.lane_rects(kind)
+            for i in range(len(rects) - 1, -1, -1):          # последние — сверху
+                r = rects[i]
+                if r.left() - 2 <= pos.x() <= r.right() + 2:
+                    if pos.x() - r.left() <= EDGE_PX:
+                        return kind, i, "l_left"
+                    if r.right() - pos.x() <= EDGE_PX:
+                        return kind, i, "l_right"
+                    return kind, i, "l_move"
+        return "", -1, ""
 
-    def select_text(self, text_id: str | None) -> None:
-        if text_id is not None and self.selection:
+    def _select_layer(self, kind: str, item_id: str | None) -> None:
+        """Выбрать текст или наложение (выбор фрагментов и другой дорожки снимается)."""
+        if item_id is not None and self.selection:
             self.selected, self.selection = None, []
             self.selection_changed.emit(None)
-        if text_id != self.selected_text:
-            self.selected_text = text_id
-            self.text_selected.emit(text_id)
+        other = "overlay" if kind == "text" else "text"
+        if item_id is not None:
+            self._set_lane_selection(other, None)
+        self._set_lane_selection(kind, item_id)
         self.update()
+
+    def _set_lane_selection(self, kind: str, item_id: str | None) -> None:
+        if kind == "text" and item_id != self.selected_text:
+            self.selected_text = item_id
+            self.text_selected.emit(item_id)
+        elif kind == "overlay" and item_id != self.selected_overlay:
+            self.selected_overlay = item_id
+            self.overlay_selected.emit(item_id)
+
+    def select_text(self, text_id: str | None) -> None:
+        self._select_layer("text", text_id)
+
+    def select_overlay(self, overlay_id: str | None) -> None:
+        self._select_layer("overlay", overlay_id)
 
     def _hit(self, pos: QPointF) -> tuple[int, str]:
         if pos.y() < TRACK_Y - 4 or pos.y() > TRACK_Y + TRACK_H + 4:
@@ -276,20 +319,20 @@ class TimelineWidget(QWidget):
             self._mode = "playhead"
             self.seek_requested.emit(self.t_of(pos.x()))
             return
-        ti, tpart = self._hit_text(pos)
-        if ti >= 0:
-            t = self.project.texts[ti]
-            self.select_text(t.id)
-            self._drag_idx = ti
-            self._mode = tpart
-            self._text_orig = (t.start, t.duration)
-            self.about_to_change.emit(f"textmove:{t.id}")
+        kind, li, lpart = self._hit_lane(pos)
+        if li >= 0:
+            t = self._lane_items(kind)[li]
+            self._select_layer(kind, t.id)
+            self._lane, self._drag_idx, self._mode = kind, li, lpart
+            self._lane_orig = (t.start, t.duration, getattr(t, "in_s", 0.0))
+            self.about_to_change.emit(f"lanemove:{t.id}")
             self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
             return
         idx, part = self._hit(pos)
         if idx < 0:
             self._select(None)
-            self.select_text(None)
+            self._select_layer("text", None)
+            self._select_layer("overlay", None)
             self._mode = "playhead"
             self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
             return
@@ -312,22 +355,13 @@ class TimelineWidget(QWidget):
         pos = e.position()
         if self._mode is None:
             _, part = self._hit(pos)
-            _, tpart = self._hit_text(pos)
+            _, _, lpart = self._hit_lane(pos)
             self.setCursor(Qt.CursorShape.SizeHorCursor if part in ("trim_l", "trim_r") or
-                           tpart in ("t_left", "t_right") else Qt.CursorShape.ArrowCursor)
+                           lpart in ("l_left", "l_right") else Qt.CursorShape.ArrowCursor)
             return
-        if self._mode in ("t_move", "t_left", "t_right"):
-            t = self.project.texts[self._drag_idx]
-            s0, d0 = self._text_orig
-            dt = (pos.x() - self._press.x()) / self.pps
-            if self._mode == "t_move":
-                t.start = max(0.0, s0 + dt)
-            elif self._mode == "t_left":
-                end = s0 + d0
-                t.start = max(0.0, min(end - MIN_TEXT_S, s0 + dt))
-                t.duration = end - t.start
-            else:
-                t.duration = max(MIN_TEXT_S, d0 + dt)
+        if self._mode in ("l_move", "l_left", "l_right"):
+            self._drag_lane_item(self._lane_items(self._lane)[self._drag_idx],
+                                 (pos.x() - self._press.x()) / self.pps)
             self.changed.emit()
             return
         if self._mode == "playhead":
@@ -349,6 +383,23 @@ class TimelineWidget(QWidget):
                 self._drop_idx = self._drop_index(pos.x())
                 self.update()
 
+    def _drag_lane_item(self, t, dt: float) -> None:
+        """Сдвиг текста/наложения по времени или изменение длины за край."""
+        s0, d0, in0 = self._lane_orig
+        video = getattr(t, "kind", "") == "video"
+        limit = (t.src_duration - in0) if video and t.src_duration else float("inf")
+        if self._mode == "l_move":
+            t.start = max(0.0, s0 + dt)
+        elif self._mode == "l_left":
+            end = s0 + d0
+            lo = max(0.0, s0 - in0) if video else 0.0      # у видео нельзя уйти раньше его начала
+            t.start = max(lo, min(end - MIN_TEXT_S, s0 + dt))
+            t.duration = end - t.start
+            if video:
+                t.in_s = max(0.0, in0 + (t.start - s0))
+        else:
+            t.duration = max(MIN_TEXT_S, min(limit, d0 + dt))
+
     def mouseReleaseEvent(self, _e) -> None:
         if self._mode == "drag" and self._drop_idx not in (-1, self._drag_idx, self._drag_idx + 1):
             self.about_to_change.emit("move")
@@ -366,9 +417,9 @@ class TimelineWidget(QWidget):
         return len(self.project.clips)
 
     def _select(self, clip_id: str | None) -> None:
-        if clip_id is not None and self.selected_text is not None:
-            self.selected_text = None
-            self.text_selected.emit(None)
+        if clip_id is not None:
+            self._set_lane_selection("text", None)
+            self._set_lane_selection("overlay", None)
         changed = clip_id != self.selected or self.selection != ([clip_id] if clip_id else [])
         self.selected = clip_id
         self.selection = [clip_id] if clip_id else []
@@ -396,8 +447,9 @@ class TimelineWidget(QWidget):
     def prune_selection(self) -> None:
         """Убрать из выбора фрагменты, которых больше нет (после удаления/отмены)."""
         if self.selected_text and self.project.text_by_id(self.selected_text) is None:
-            self.selected_text = None
-            self.text_selected.emit(None)
+            self._set_lane_selection("text", None)
+        if self.selected_overlay and self.project.overlay_by_id(self.selected_overlay) is None:
+            self._set_lane_selection("overlay", None)
         ids = {c.id for c in self.project.clips}
         self.selection = [i for i in self.selection if i in ids]
         if self.selected not in ids:
@@ -433,6 +485,11 @@ class TimelineWidget(QWidget):
 
     def dropEvent(self, e) -> None:
         files = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        if files and e.position().y() < TRACK_Y - 4:        # на дорожку наложений/текстов
+            self._mode, self._drop_idx = None, -1
+            self.update()
+            self.overlay_files_dropped.emit([str(Path(f)) for f in files], self.t_of(e.position().x()))
+            return
         idx = self._drop_index(e.position().x())
         self._mode, self._drop_idx = None, -1
         self.update()

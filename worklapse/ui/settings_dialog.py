@@ -128,6 +128,10 @@ class SettingsDialog(QDialog):
         self.encoder.setCurrentIndex(max(0, self.encoder.findData(self.s.encoder)))
         self.autostart = QCheckBox("Начинать запись сразу при запуске программы")
         self.autostart.setChecked(self.s.autostart_recording)
+        from worklapse import autostart
+
+        self.login = QCheckBox("Запускать Worklapse вместе с компьютером")
+        self.login.setChecked(autostart.is_enabled())   # правда — в системе, а не в файле настроек
 
         f.addRow("Частота кадров:", self.fps)
         f.addRow("Кольцевой буфер:", self.buffer)
@@ -143,6 +147,7 @@ class SettingsDialog(QDialog):
             f.addRow("", _hint("На Wayland монитор выбирается в системном окне «Поделиться экраном»."))
         f.addRow("Видеокодек:", self.encoder)
         f.addRow("", self.autostart)
+        f.addRow("", self.login)
         return w
 
     def _hotkeys_tab(self) -> QWidget:
@@ -241,6 +246,7 @@ class SettingsDialog(QDialog):
             s.monitor_mode, s.manual_monitor = "manual", int(mode.split(":")[1])
         s.encoder = self.encoder.currentData()
         s.autostart_recording = self.autostart.isChecked()
+        s.launch_at_login = self.login.isChecked()
         s.important_before_s = self.imp_before.value()
         s.important_after_s = self.imp_after.value()
         s.blacklist = [x.strip() for x in self.blacklist.toPlainText().splitlines() if x.strip()]

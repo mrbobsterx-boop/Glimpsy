@@ -154,9 +154,20 @@ class TrayController(QObject):
             f"  {self.s.hotkey_important} — важный момент\n"
             f"  {self.s.hotkey_pause} — пауза / продолжить\n"
             f"  {self.s.hotkey_finish} — завершить и собрать ролик")
+        from PySide6.QtWidgets import QCheckBox
+
+        from worklapse import autostart
+
+        login = QCheckBox("Запускать Worklapse вместе с компьютером")
+        login.setChecked(True)
+        box.setCheckBox(login)
         b_settings = box.addButton("Открыть настройки", QMessageBox.ButtonRole.ActionRole)
         box.addButton("Понятно", QMessageBox.ButtonRole.AcceptRole)
         box.exec()
+        err = autostart.set_enabled(login.isChecked())
+        self.s.launch_at_login = autostart.is_enabled()
+        if err:
+            self.show_message("Автозапуск", f"Не удалось включить автозапуск: {err}")
         if box.clickedButton() == b_settings:
             self.open_settings()
 
@@ -294,6 +305,12 @@ class TrayController(QObject):
     def _apply(self, new: Settings) -> None:
         hotkeys_changed = (new.hotkey_important, new.hotkey_pause, new.hotkey_finish) != (
             self.s.hotkey_important, self.s.hotkey_pause, self.s.hotkey_finish)
+        from worklapse import autostart
+
+        if new.launch_at_login != autostart.is_enabled():
+            err = autostart.set_enabled(new.launch_at_login)
+            if err:
+                self.show_message("Автозапуск", f"Не удалось изменить автозапуск: {err}")
         # обновляем объект настроек «на месте», чтобы все ссылки видели новые значения
         self.s.__dict__.update(new.__dict__)
         save_settings(self.s)

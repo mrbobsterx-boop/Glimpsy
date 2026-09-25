@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 import json
 
 from worklapse.editor.project import ASPECTS, DEFAULT_FRAME, frame_rect
+from worklapse.editor.overlay import overlay_rect, shadow_pad, styled_image
 from worklapse.editor.text import anim_state, placement, render_text
 
 HANDLE = 10        # размер уголка, пикс.
@@ -30,6 +31,9 @@ class PreviewWidget(QWidget):
     wheel_zoom = Signal(float)
     text_pressed = Signal(str)                   # щёлкнули по тексту
     text_moved = Signal(str, float, float)       # новый центр текста (доли кадра)
+    overlay_pressed = Signal(str)
+    overlay_changed = Signal(str, float, float, float)   # id, центр X, центр Y, ширина (доли кадра)
+    overlay_wheel = Signal(str, float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -47,6 +51,10 @@ class PreviewWidget(QWidget):
         self.selected_text: str | None = None
         self._text_cache: dict[str, QImage] = {}
         self._text_drag: tuple[str, float, float] | None = None   # id, центр x, y в начале
+        self.overlays: list = []       # [(OverlayItem, QImage источника)] — видимые сейчас
+        self.selected_overlay: str | None = None
+        self._ov_cache: dict[str, QImage] = {}
+        self._ov_drag: tuple | None = None   # (id, режим, cx, cy, ширина)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 220)
         self.setMouseTracking(True)
@@ -70,6 +78,54 @@ class PreviewWidget(QWidget):
             self.frame = frame
         self.editable = editable
         self.update()
+
+    def set_overlays(self, overlays: list, selected: str | None) -> None:
+        self.overlays, self.selected_overlay = overlays, selected
+        self.update()
+
+    def _ov_rect(self, item) -> QRectF:
+        c = self.canvas_rect()
+        x, y, w, h = overlay_rect(item, self.aspect, c.width(), c.height())
+        return QRectF(c.x() + x, c.y() + y, w, h)
+
+    def _paint_overlays(self, p: QPainter) -> None:
+        canvas = self.canvas_rect()
+        p.save()
+        p.setClipRect(canvas)
+        for item, src in self.overlays:
+            r = self._ov_rect(item)
+            w, h = max(2, int(r.width())), max(2, int(r.height()))
+            key = f"{item.id}|{src.cacheKey() if src is not None else 0}|{w}|{h}|{item.radius}|{item.shadow}|{item.opacity}"
+            img = self._ov_cache.get(key)
+            if img is None:
+                if len(self._ov_cache) > 60:
+                    self._ov_cache.clear()
+                img = self._ov_cache[key] = styled_image(src if src is not None else QImage(), w, h,
+                                                         item.radius, item.shadow, item.opacity)
+            pad = shadow_pad(w, h)
+            p.drawImage(QPointF(r.x() - pad, r.y() - pad), img)
+        p.restore()
+        for item, _src in self.overlays:
+            if item.id == self.selected_overlay:
+                r = self._ov_rect(item)
+                p.setPen(QPen(QColor("#c9a7ff"), 1, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(r)
+                p.setPen(QPen(QColor("#7d5fb2"), 1))
+                p.setBrush(QColor("#ffffff"))
+                for c in self._corners(r):
+                    p.drawRect(QRectF(c.x() - HANDLE / 2, c.y() - HANDLE / 2, HANDLE, HANDLE))
+
+    def _hit_overlay(self, pos: QPointF):
+        """(наложение, «scale» если за уголок выбранного, иначе «move») или (None, "")."""
+        for item, _src in reversed(self.overlays):
+            r = self._ov_rect(item)
+            if item.id == self.selected_overlay and any(
+                    abs(pos.x() - c.x()) <= HANDLE and abs(pos.y() - c.y()) <= HANDLE for c in self._corners(r)):
+                return item, "scale"
+            if r.contains(pos):
+                return item, "move"
+        return None, ""
 
     def set_texts(self, texts: list, t: float, selected: str | None) -> None:
         self.texts, self.t, self.selected_text = texts, t, selected
@@ -152,6 +208,7 @@ class PreviewWidget(QWidget):
         if img.isNull():
             p.setPen(QColor("#777"))
             p.drawText(canvas, Qt.AlignmentFlag.AlignCenter, "Нет кадра")
+            self._paint_overlays(p)
             self._paint_texts(p)
             return
         fr = self._frame_rect()
@@ -172,8 +229,9 @@ class PreviewWidget(QWidget):
         p.setClipRect(canvas)
         p.drawImage(fr, img)
         p.restore()
+        self._paint_overlays(p)
         self._paint_texts(p)
-        if self.editable and self.selected_text is None:
+        if self.editable and self.selected_text is None and self.selected_overlay is None:
             # рамка и уголки выбранного фрагмента (за пределами экрана видны пунктиром)
             p.setPen(QPen(QColor("#ffffff"), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -207,6 +265,12 @@ class PreviewWidget(QWidget):
             x, y = hit.pos_for(self.aspect)
             self._text_drag = (hit.id, x, y)
             return
+        ov, mode = self._hit_overlay(pos)
+        if ov is not None:                  # наложения — поверх видео, под текстами
+            self.overlay_pressed.emit(ov.id)
+            self._press = pos
+            self._ov_drag = (ov.id, mode, *ov.layout_for(self.aspect), self._ov_rect(ov).center())
+            return
         if self.image.isNull():
             return
         if not self.canvas_rect().contains(pos) and not self._hit_corner(pos):
@@ -227,9 +291,27 @@ class PreviewWidget(QWidget):
             self._guides = (snap, False)
             self.text_moved.emit(tid, 0.5 if snap else nx, ny)
             return
+        if self._ov_drag is not None:
+            oid, mode, cx, cy, sc, center = self._ov_drag
+            c = self.canvas_rect()
+            if mode == "move":
+                nx = cx + (pos.x() - self._press.x()) / c.width()
+                ny = cy + (pos.y() - self._press.y()) / c.height()
+                snap_x, snap_y = abs(nx - 0.5) < SNAP, abs(ny - 0.5) < SNAP
+                self._guides = (snap_x, snap_y)
+                self.overlay_changed.emit(oid, 0.5 if snap_x else nx, 0.5 if snap_y else ny, sc)
+            else:
+                d0 = math.dist((self._press.x(), self._press.y()), (center.x(), center.y())) or 1.0
+                d1 = math.dist((pos.x(), pos.y()), (center.x(), center.y()))
+                self.overlay_changed.emit(oid, cx, cy, sc * d1 / d0)
+            return
         if self._drag is None:
             if self._hit_text(pos) is not None:
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
+                return
+            ov, mode = self._hit_overlay(pos)
+            if ov is not None:
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor if mode == "scale" else Qt.CursorShape.SizeAllCursor)
                 return
             self.setCursor(Qt.CursorShape.SizeFDiagCursor if self.editable and self._hit_corner(pos)
                            else Qt.CursorShape.OpenHandCursor if self.canvas_rect().contains(pos)
@@ -254,6 +336,12 @@ class PreviewWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _e) -> None:
+        if self._ov_drag is not None:
+            self._ov_drag = None
+            self._guides = (False, False)
+            self.edit_finished.emit()
+            self.update()
+            return
         if self._text_drag is not None:
             self._text_drag = None
             self._guides = (False, False)
@@ -267,10 +355,14 @@ class PreviewWidget(QWidget):
             self.update()
 
     def wheelEvent(self, e) -> None:
-        if self.image.isNull():
-            return
         steps = (e.angleDelta().y() or e.angleDelta().x()) / 120
-        if steps:
+        if not steps:
+            return
+        ov, _ = self._hit_overlay(e.position())
+        if ov is not None and ov.id == self.selected_overlay:
+            self.overlay_wheel.emit(ov.id, 1.06 ** steps)     # колёсико над наложением — его размер
+            return
+        if not self.image.isNull():
             self.wheel_zoom.emit(1.06 ** steps)
 
 
