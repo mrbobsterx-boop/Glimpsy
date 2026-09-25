@@ -55,17 +55,33 @@ class Clip:
     zoom_strength: float = 1.8    # во сколько раз приближать при автозуме
     clicks: list = field(default_factory=list)   # клики мыши: [t от начала файла, x, y]
     click_fx: bool = True         # подсвечивать клики расходящимся кругом
+    # движение для другого формата, если отличается: {"9:16": "follow"} (иначе — как motion)
+    motions: dict = field(default_factory=dict)
+    score: float = -1.0           # насколько активным был момент при записи (0…1; −1 — неизвестно)
+    base_speed: float = 0.0       # скорость до автомонтажа (чтобы повторный запуск не ускорял ещё раз)
 
     def clicks_shown(self) -> list:
         return self.clicks if self.click_fx and self.kind == "video" else []
 
+    def motion_raw(self, aspect: str) -> str:
+        """Выбранный режим движения для формата (без проверок)."""
+        return self.motions.get(aspect, self.motion)
+
+    def set_motion(self, aspect: str, mode: str) -> None:
+        """16:9 — основной режим; 9:16 может отличаться (например, «за курсором»)."""
+        if aspect == "9:16":
+            self.motions["9:16"] = mode
+        else:
+            self.motion = mode
+
     def motion_for(self, aspect: str) -> str:
-        """Режим движения с учётом формата: «следовать» имеет смысл только для 9:16."""
+        """Режим движения с учётом формата: «за курсором» имеет смысл только для 9:16."""
         if not self.cursor or self.kind != "video":
             return "none"
-        if self.motion.startswith("follow") and aspect != "9:16":
+        mode = self.motion_raw(aspect)
+        if mode.startswith("follow") and aspect != "9:16":
             return "none"
-        return self.motion
+        return mode
 
     @property
     def duration(self) -> float:
@@ -307,7 +323,8 @@ class Project:
                               cursor=c.get("cursor", []), clicks=c.get("clicks", []),
                               has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
                               motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
-                              zoom_strength=float(c.get("zoom_strength", 1.8))))
+                              zoom_strength=float(c.get("zoom_strength", 1.8)),
+                              score=float(c.get("score", -1))))
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
             # у потоков к имени добавлен номер: project_ГГГГММДД_ЧЧММСС_1

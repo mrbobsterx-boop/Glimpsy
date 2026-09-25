@@ -69,7 +69,9 @@ class Inspector(QWidget):
         self.motion_group = QButtonGroup(self)
         self.motion_btns: dict[str, QPushButton] = {}
         layout = (("none", "Без движения", 0, 0, 3, "Кадр стоит на месте"),
-                  ("autozoom", "Автозум к курсору", 1, 0, 3, "Приближение к кликам и туда, где работает курсор (Z)"),
+                  ("autozoom", "Автозум к курсору", 1, 0, 2, "Приближение к кликам и туда, где работает курсор (Z)"),
+                  ("pushin", "Наезд", 1, 2, 1, "Камера медленно приближается за время фрагмента — "
+                                              "для важных моментов"),
                   ("follow_hard", "Жёстко", 3, 0, 1, "Курсор всегда в центре кадра — кадр едет сразу за ним"),
                   ("follow", "Плавно", 3, 1, 1, "Кадр мягко догоняет курсор и стоит, пока курсор в середине"),
                   ("follow_zoom", "Зона + зум", 3, 2, 1, "Крупнее (×1.5), едет и вверх-вниз, большая «мёртвая зона»"))
@@ -205,7 +207,8 @@ class Inspector(QWidget):
         self.out_s.setValue(clip.out_s)
         self.photo_dur.setValue(clip.out_s - clip.in_s)
         has_cursor = is_video and bool(clip.cursor)
-        (self.motion_btns.get(clip.motion) or self.motion_btns["none"]).setChecked(True)
+        mode = clip.motion_raw(aspect)
+        (self.motion_btns.get(mode) or self.motion_btns["none"]).setChecked(True)
         self.motion.setEnabled(has_cursor)
         for key, b in self.motion_btns.items():
             if is_follow(key):
@@ -215,13 +218,13 @@ class Inspector(QWidget):
         self.click_fx.setEnabled(bool(clip.clicks) or count > 1)
         self.click_fx.setText(f"Подсвечивать клики ({len(clip.clicks)})" if clip.clicks or count > 1
                               else "Подсвечивать клики (в этом фрагменте кликов нет)")
-        self.strength.setEnabled(has_cursor and clip.motion == "autozoom")
+        self.strength.setEnabled(has_cursor and mode == "autozoom")
         if not has_cursor:
             self.motion_hint.setText("Только для записей экрана Glimpsy — в них сохранено, где был курсор.")
         elif aspect != "9:16":
             self.motion_hint.setText("Кадр плавно приближается к кликам и туда, где работает курсор. "
                                      "«За курсором» — в формате 9:16 (переключатель вверху).")
-        elif is_follow(clip.motion):
+        elif is_follow(mode):
             self.motion_hint.setText("Узкий кадр 9:16 едет за курсором — важное не уходит за край. "
                                      "Ctrl+A — выбрать все фрагменты и включить сразу для всех.")
         else:

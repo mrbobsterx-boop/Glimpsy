@@ -28,7 +28,8 @@ PAN_TAU = 0.35              # плавность переезда
 FOLLOW_TAU = 0.5
 TIGHT, LOOSE = 0.12, 0.25   # «курсор в небольшой области»: разброс в долях экрана
 
-MODES = {"none": "Без движения", "autozoom": "Автозум к курсору", "follow_hard": "За курсором: жёстко (9:16)",
+MODES = {"none": "Без движения", "autozoom": "Автозум к курсору", "pushin": "Наезд",
+         "follow_hard": "За курсором: жёстко (9:16)",
          "follow": "За курсором: плавно (9:16)", "follow_zoom": "За курсором: зона + зум (9:16)"}
 
 
@@ -91,6 +92,46 @@ def autozoom_track(cursor: list, duration: float, strength: float,
         out.append((round(t, 3), z, min(max(cx, half), 1 - half), min(max(cy, half), 1 - half)))
         t += STEP
     return out
+
+
+PUSHIN_ZOOM = 1.3            # «наезд»: к концу фрагмента кадр приближается в 1.3 раза
+
+
+def pushin_track(cursor: list, clicks: list, in_s: float, out_s: float,
+                 zoom: float = PUSHIN_ZOOM) -> list[tuple[float, float, float, float]]:
+    """Медленный наезд камеры за время фрагмента — к месту, где работал курсор (или к центру)."""
+    pts = [p for p in samples(clicks or [], out_s) if in_s <= p[0] <= out_s] or \
+          [p for p in samples(cursor, out_s) if in_s <= p[0] <= out_s]
+    if pts:
+        tx = sorted(p[1] for p in pts)[len(pts) // 2]
+        ty = sorted(p[2] for p in pts)[len(pts) // 2]
+    else:
+        tx = ty = 0.5
+    out = []
+    n = max(2, int((out_s - in_s) / STEP) + 1)
+    for i in range(n + 1):
+        k = i / n
+        e = k * k * (3 - 2 * k)                   # плавно в начале и в конце
+        z = 1 + (zoom - 1) * e
+        half = 0.5 / z
+        cx = min(max(0.5 + (tx - 0.5) * e, half), 1 - half)
+        cy = min(max(0.5 + (ty - 0.5) * e, half), 1 - half)
+        out.append((round(in_s + (out_s - in_s) * k, 3), z, cx, cy))
+    return out
+
+
+def is_zoom(mode: str) -> bool:
+    """Режимы, где кадр приближается внутри исходной картинки (формат кадра не меняется)."""
+    return mode in ("autozoom", "pushin")
+
+
+def track_for(mode: str, cursor: list, clicks: list, duration: float, strength: float,
+              in_s: float, out_s: float, src_w: int, src_h: int) -> list:
+    if mode == "autozoom":
+        return autozoom_track(cursor, duration, strength, clicks)
+    if mode == "pushin":
+        return pushin_track(cursor, clicks, in_s, out_s)
+    return follow_track(cursor, duration, src_w, src_h, mode)
 
 
 # Варианты «за курсором» (9:16): (плавность, «мёртвая зона» в долях полосы, приближение)

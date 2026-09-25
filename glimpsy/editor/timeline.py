@@ -287,10 +287,11 @@ class TimelineWidget(QWidget):
         p.setFont(f)
         fm = p.fontMetrics()
         badges = ("★ " if c.priority else "") + ("без звука · " if c.muted and c.has_audio else "")
-        if abs(c.speed - 1.0) > 1e-3:
-            badges += f"×{c.speed:g} · "
-        if c.motion != "none" and c.cursor:
-            badges += "за курсором · " if c.motion.startswith("follow") else "зум · "
+        if round(c.speed, 2) != 1.0:
+            badges += f"×{round(c.speed, 2):g} · "
+        mode = c.motion_for(self.project.aspect) if self.project is not None else "none"
+        if mode != "none":
+            badges += {"pushin": "наезд · "}.get(mode, "за курсором · " if mode.startswith("follow") else "зум · ")
         top = badges + (c.label or "")
         for text, right in ((top, False), (f"{c.duration:.1f} с", True)):
             w = min(r.width() - 8, fm.horizontalAdvance(text) + 12)

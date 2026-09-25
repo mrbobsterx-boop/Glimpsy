@@ -187,6 +187,10 @@ class EditorWindow(QMainWindow):
             sl.addWidget(b)
             b.setChecked(value == self.project.aspect)
         self.aspect_group.buttonClicked.connect(lambda b: self._on_aspect(b.property("aspect")))
+        self.montage_btn = theme.mark(QPushButton(theme.icon("wand-sparkles", theme.ACCENT_HOVER, 16), "  Автомонтаж"),
+                                      "ghost")
+        self.montage_btn.setToolTip("Автозум, клики, темп, наезды, 9:16 и склейки под музыку — одной кнопкой")
+        self.montage_btn.clicked.connect(self.auto_montage)
         self.export_btn = theme.mark(QPushButton(theme.icon("download", "#FFFFFF", 16), "  Экспорт"), "primary")
         self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E)")
         self.export_btn.clicked.connect(self.export)
@@ -200,6 +204,8 @@ class EditorWindow(QMainWindow):
         tl.addWidget(theme.mark(QLabel("·"), "muted"))
         tl.addWidget(name)
         tl.addStretch(1)
+        tl.addWidget(self.montage_btn)
+        tl.addSpacing(6)
         tl.addWidget(seg)
         tl.addSpacing(6)
         tl.addWidget(self.export_btn)
@@ -417,15 +423,14 @@ class EditorWindow(QMainWindow):
         if idx is None or self.project.clips[idx].id != c.id:
             return full
         t_src = c.in_s + local * c.speed
-        key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), len(c.clicks), c.width, c.height)
+        key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), len(c.clicks), c.width, c.height,
+               c.in_s, c.out_s)
         track = self._motion_cache.get(key)
         if track is None:
-            if mode == "autozoom":
-                track = motion.autozoom_track(c.cursor, c.src_duration, c.zoom_strength, c.clicks)
-            else:
-                track = motion.follow_track(c.cursor, c.src_duration, c.width, c.height, mode)
+            track = motion.track_for(mode, c.cursor, c.clicks, c.src_duration, c.zoom_strength,
+                                     c.in_s, c.out_s, c.width, c.height)
             self._motion_cache[key] = track
-        if mode == "autozoom":
+        if motion.is_zoom(mode):
             z, cx, cy = motion.value_at(track, t_src)
             return cx - 0.5 / z, cy - 0.5 / z, 1 / z, 1 / z
         return motion.follow_crop(track, t_src, c.width, c.height)
@@ -514,7 +519,7 @@ class EditorWindow(QMainWindow):
             elif what == "frame_y":
                 c.set_frame(aspect, z, x, value)
             elif what == "motion" and c.kind == "video":
-                c.motion = value
+                c.set_motion(aspect, value)
             elif what == "zoom_strength" and c.kind == "video":
                 c.zoom_strength = float(value)
             elif what == "click_fx" and c.kind == "video":
@@ -1054,6 +1059,34 @@ class EditorWindow(QMainWindow):
             return
         self.statusBar().showMessage("В буфере обмена нет видео или картинки", 3000)
 
+    def auto_montage(self) -> None:
+        from glimpsy.editor import automontage
+        from glimpsy.editor.automontage_dialog import AutomontageDialog
+
+        if not self.project.clips:
+            return
+        dlg = AutomontageDialog(self.project.music is not None, self)
+        if not dlg.exec():
+            return
+        opts = dlg.options()
+        self.player.pause()
+        beats, period = [], 0.0
+        if opts.beats and self.project.music is not None:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                beats, period = automontage.music_beats(self.ffmpeg, self.project)
+            except Exception:
+                log.exception("Не удалось найти доли музыки")
+            finally:
+                QApplication.restoreOverrideCursor()
+        self.history.push(self.project.to_dict())
+        report = automontage.apply(self.project, opts, beats, period)
+        self._changed()
+        text = "Автомонтаж: " + report.summary()
+        if report.notes:
+            text += " (" + "; ".join(report.notes) + ")"
+        self.statusBar().showMessage(text + ". Отменить — Ctrl+Z", 10000)
+
     def show_stats(self) -> None:
         from glimpsy.editor.stats_dialog import StatsDialog
         StatsDialog(self.project, self).exec()
@@ -1077,7 +1110,7 @@ class EditorWindow(QMainWindow):
         if c is None or not any(x.kind == "video" and x.cursor for x in targets):
             self.statusBar().showMessage("Автозум — только для записей экрана: в них сохранено, где был курсор", 4000)
             return
-        on = not all(x.motion == "autozoom" for x in targets if x.cursor)
+        on = not all(x.motion_raw(self.project.aspect) == "autozoom" for x in targets if x.cursor)
         self._on_inspector(c.id, "motion", "autozoom" if on else "none")
         self.statusBar().showMessage(f"Автозум {'включён' if on else 'выключен'} ({len(targets)} фр.)", 2500)
 
