@@ -53,6 +53,11 @@ class Clip:
     frames: dict = field(default_factory=dict)
     motion: str = "none"          # none / autozoom / follow — движение кадра по курсору
     zoom_strength: float = 1.8    # во сколько раз приближать при автозуме
+    clicks: list = field(default_factory=list)   # клики мыши: [t от начала файла, x, y]
+    click_fx: bool = True         # подсвечивать клики расходящимся кругом
+
+    def clicks_shown(self) -> list:
+        return self.clicks if self.click_fx and self.kind == "video" else []
 
     def motion_for(self, aspect: str) -> str:
         """Режим движения с учётом формата: «следовать» имеет смысл только для 9:16."""
@@ -297,7 +302,9 @@ class Project:
             # Фрагменты уже ускорены при автосборке, поэтому здесь их скорость — ×1
             clips.append(Clip(new_id(), "video", c["file"], dur, 0.0, dur, width=w, height=h,
                               label=label, priority=bool(c.get("priority")), recorded_at=when,
-                              cursor=c.get("cursor", [])))
+                              cursor=c.get("cursor", []), clicks=c.get("clicks", []),
+                              motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
+                              zoom_strength=float(c.get("zoom_strength", 1.8))))
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
             created = time.mktime(time.strptime(directory.name.split("_", 1)[1], "%Y%m%d_%H%M%S"))

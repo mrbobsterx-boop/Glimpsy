@@ -249,6 +249,7 @@ class EditorWindow(QMainWindow):
         else:
             self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
         self.preview.set_src_crop(self._motion_crop(c))
+        self.preview.set_ripples(self._ripples(c))
         t = self.player.t
         visible = self.project.texts_at(t)
         sel = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
@@ -271,6 +272,16 @@ class EditorWindow(QMainWindow):
         local = max(0.0, min(o.duration, t - o.start))
         return self.thumbs.get(path, float(round(o.in_s + local)), 360)
 
+    def _ripples(self, c: Clip | None) -> list:
+        """Круги кликов, которые видны сейчас (в долях исходного кадра)."""
+        if c is None or not c.clicks_shown():
+            return []
+        idx, local = self.project.locate(self.player.t)
+        if idx is None or self.project.clips[idx].id != c.id:
+            return []
+        from worklapse.editor.clicks import active
+        return active(c.clicks, c.in_s + local * c.speed, c.speed)
+
     def _motion_crop(self, c: Clip | None) -> tuple[float, float, float, float]:
         """Какую часть кадра показать сейчас (автозум или слежение за курсором)."""
         full = (0.0, 0.0, 1.0, 1.0)
@@ -283,11 +294,11 @@ class EditorWindow(QMainWindow):
         if idx is None or self.project.clips[idx].id != c.id:
             return full
         t_src = c.in_s + local * c.speed
-        key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), c.width, c.height)
+        key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), len(c.clicks), c.width, c.height)
         track = self._motion_cache.get(key)
         if track is None:
             if mode == "autozoom":
-                track = motion.autozoom_track(c.cursor, c.src_duration, c.zoom_strength)
+                track = motion.autozoom_track(c.cursor, c.src_duration, c.zoom_strength, c.clicks)
             else:
                 track = motion.follow_track(c.cursor, c.src_duration, c.width, c.height)
             self._motion_cache[key] = track
@@ -385,6 +396,8 @@ class EditorWindow(QMainWindow):
                 c.motion = value
             elif what == "zoom_strength" and c.kind == "video":
                 c.zoom_strength = float(value)
+            elif what == "click_fx" and c.kind == "video":
+                c.click_fx = bool(value)
             elif what == "frame_fit":
                 c.set_frame(aspect, *DEFAULT_FRAME)
             elif what == "frame_fill":

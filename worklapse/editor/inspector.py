@@ -66,11 +66,14 @@ class Inspector(QWidget):
         self.motion.currentIndexChanged.connect(lambda _: self._emit("motion", self.motion.currentData()))
         self.strength = QDoubleSpinBox(minimum=1.2, maximum=4.0, singleStep=0.1, decimals=1, suffix=" ×")
         self.strength.valueChanged.connect(lambda v: self._emit("zoom_strength", v))
+        self.click_fx = QCheckBox("Подсвечивать клики")
+        self.click_fx.setToolTip("В месте клика расходится круг — зрителю видно, куда вы нажали")
+        self.click_fx.toggled.connect(lambda on: self._emit("click_fx", on))
         self.motion_hint = QLabel()
         self.motion_hint.setWordWrap(True)
         self.motion_hint.setStyleSheet("color: #8b8d98; font-size: 11px;")
         # у переносимых подписей в QFormLayout Qt иногда занижает высоту — задаём её явно
-        self.motion_hint.setMinimumHeight(self.motion_hint.fontMetrics().lineSpacing() * 3 + 4)
+        self.motion_hint.setMinimumHeight(self.motion_hint.fontMetrics().lineSpacing() * 4 + 4)
 
         self.frame_title = QLabel()
         self.frame_title.setStyleSheet("font-weight: 600; margin-top: 6px;")
@@ -109,6 +112,7 @@ class Inspector(QWidget):
         self.form.addRow(self.motion_title)
         self.form.addRow("Режим:", self.motion)
         self.form.addRow("Сила зума:", self.strength)
+        self.form.addRow(self.click_fx)
         self.form.addRow(self.motion_hint)
         self.form.addRow(self.frame_title)
         self.form.addRow("Масштаб:", self.zoom)
@@ -135,7 +139,7 @@ class Inspector(QWidget):
         self.set_clip(None)
 
     FRAME_ROWS = ("frame_title", "zoom", "pos_x", "pos_y", "frame_btns")
-    MOTION_ROWS = ("motion_title", "motion", "strength", "motion_hint")
+    MOTION_ROWS = ("motion_title", "motion", "strength", "click_fx", "motion_hint")
 
     def set_clip(self, clip: Clip | None, aspect: str = "16:9", count: int = 1) -> None:
         """Показать свойства фрагмента. count > 1 — выбрано несколько: правки идут во все."""
@@ -185,13 +189,17 @@ class Inspector(QWidget):
         if follow_item is not None:
             follow_item.setEnabled(aspect == "9:16")
         self.strength.setValue(clip.zoom_strength)
+        self.click_fx.setChecked(clip.click_fx and bool(clip.clicks))
+        self.click_fx.setEnabled(bool(clip.clicks) or count > 1)
+        self.click_fx.setText(f"Подсвечивать клики ({len(clip.clicks)})" if clip.clicks or count > 1
+                              else "Подсвечивать клики (в этом фрагменте кликов нет)")
         self.strength.setEnabled(has_cursor and clip.motion == "autozoom")
         if not has_cursor:
             self.motion_hint.setText("Только для записей экрана Worklapse — в них сохранено, где был курсор.")
         elif clip.motion == "follow" and aspect != "9:16":
             self.motion_hint.setText("«Следовать за курсором» работает в формате 9:16.")
         else:
-            self.motion_hint.setText("Кадр плавно приближается туда, где работает курсор. "
+            self.motion_hint.setText("Кадр плавно приближается к кликам и туда, где работает курсор. "
                                      "Ctrl+A — включить сразу для всех фрагментов.")
         for n in self.MOTION_ROWS:
             self._set_row_visible(getattr(self, n), is_video)

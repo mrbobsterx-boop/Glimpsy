@@ -57,7 +57,7 @@ def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> 
         return "", None
     dur = clip.src_duration
     if mode == "autozoom":
-        track = motion.autozoom_track(clip.cursor, dur, clip.zoom_strength)
+        track = motion.autozoom_track(clip.cursor, dur, clip.zoom_strength, clip.clicks)
         return motion.autozoom_filter(track, clip.in_s, clip.out_s, src_w, src_h, fps) + ",", None
     track = motion.follow_track(clip.cursor, dur, src_w, src_h)
     band_w = int(min(src_w, src_h * 9 / 16)) // 2 * 2
@@ -71,6 +71,11 @@ def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspe
     if aspect and src_size:
         moving, new_ar = motion_filter(clip, aspect, src_size[0], src_size[1], fps)
     head = f"[0:v]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
+    from worklapse.editor.clicks import ripple_graph
+    ripples = ripple_graph("0:v", "src", clip.clicks_shown(), clip.in_s, clip.out_s, clip.speed,
+                           src_size[0] if src_size else clip.width)
+    if ripples:        # круги кликов рисуются на исходном кадре, до зума и кадрирования
+        head = f"{ripples};[src]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
     zoom, fx, fy = clip.frame_for(aspect) if aspect else DEFAULT_FRAME
     src_ar = new_ar or ((clip.width / clip.height) if clip.width and clip.height else W / H)
     if (zoom, fx, fy) == DEFAULT_FRAME and abs(src_ar - W / H) < 0.02:
@@ -102,7 +107,7 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
     if not use_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur_out:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
     src_size = None
-    if clip.motion_for(project.aspect) != "none":
+    if clip.motion_for(project.aspect) != "none" or clip.clicks_shown():
         # для движения по курсору нужен настоящий размер кадра файла (он может быть уменьшен при записи)
         from worklapse.editor.media import probe
         info = probe(ffmpeg, src)

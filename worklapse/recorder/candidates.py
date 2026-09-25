@@ -31,6 +31,7 @@ class Candidate:
     priority: bool = False
     activity: list[float] = field(default_factory=list)    # оценка каждой секунды файла
     cursor: list[list[float]] = field(default_factory=list)  # [t от начала файла, x 0..1, y 0..1]
+    clicks: list[list[float]] = field(default_factory=list)  # клики: [t от начала файла, x, y]
 
     @property
     def duration(self) -> float:

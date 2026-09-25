@@ -40,9 +40,19 @@ def _smooth(prev: float, target: float, dt: float, tau: float) -> float:
     return prev + (target - prev) * (1 - math.exp(-dt / tau))
 
 
-def autozoom_track(cursor: list, duration: float, strength: float) -> list[tuple[float, float, float, float]]:
-    """[(t, масштаб, центр x, центр y)] с шагом STEP. Масштаб 1 — весь кадр."""
+CLICK_BEFORE, CLICK_AFTER = 0.35, 1.1   # приближаемся чуть заранее и держим после клика
+
+
+def autozoom_track(cursor: list, duration: float, strength: float,
+                   clicks: list | None = None) -> list[tuple[float, float, float, float]]:
+    """[(t, масштаб, центр x, центр y)] с шагом STEP. Масштаб 1 — весь кадр.
+
+    Клики важнее всего: вокруг клика кадр приближается именно к нему (как в Screen Studio).
+    """
     pts = samples(cursor, duration)
+    taps = samples(clicks or [], duration)
+    if not pts and taps:
+        pts = taps
     if not pts or duration <= 0:
         return [(0.0, 1.0, 0.5, 0.5), (max(duration, STEP), 1.0, 0.5, 0.5)]
     out = []
@@ -61,7 +71,12 @@ def autozoom_track(cursor: list, duration: float, strength: float) -> list[tuple
             last_c = (mx, my)
         else:
             spread = 1.0          # нет данных — кадр целиком
-        if spread < TIGHT:
+        tap = min((c for c in taps if c[0] - CLICK_BEFORE <= t <= c[0] + CLICK_AFTER),
+                  key=lambda c: abs(c[0] - t), default=None)
+        if tap is not None:
+            target = strength
+            last_c = (tap[1], tap[2])
+        elif spread < TIGHT:
             target = strength
         elif spread < LOOSE:
             target = 1 + (strength - 1) * 0.4
@@ -145,12 +160,16 @@ def piecewise(keys: list[tuple], idx: int, var: str = "it") -> str:
 def autozoom_filter(track: list, in_s: float, out_s: float, w: int, h: int, fps: int) -> str:
     keys = _keys(track, in_s, out_s)
     z, cx, cy = piecewise(keys, 1), piecewise(keys, 2), piecewise(keys, 3)
-    return (f"zoompan=z='{z}':x='max(0,min(iw-iw/zoom,({cx})*iw-iw/zoom/2))':"
-            f"y='max(0,min(ih-ih/zoom,({cy})*ih-ih/zoom/2))':d=1:s={w}x{h}:fps={fps}")
+    # время кадров — с нуля от начала фрагмента (после -ss у .ts оно может начинаться не с нуля)
+    return (f"setpts=PTS-STARTPTS,zoompan=z='{z}':x='max(0,min(iw-iw/zoom,({cx})*iw-iw/zoom/2))':"
+            f"y='max(0,min(ih-ih/zoom,({cy})*ih-ih/zoom/2))':d=1:s={w}x{h}:fps={fps},"
+            # zoompan иногда выдаёт кадры с повторяющимся временем (запись .ts) — тогда следующий
+            # fps начинает «досыпать» кадры без конца и съедает память. Нумеруем кадры заново.
+            f"setpts=N/({fps}*TB)")
 
 
 def follow_filter(track: list, in_s: float, out_s: float, w: int, h: int) -> str:
     keys = _keys(track, in_s, out_s)
     cx = piecewise(keys, 1, "t")
     bw = int(min(w, h * 9 / 16)) // 2 * 2
-    return f"crop=w={bw}:h={h // 2 * 2}:x='max(0,min(iw-{bw},({cx})*iw-{bw}/2))':y=0"
+    return f"setpts=PTS-STARTPTS,crop=w={bw}:h={h // 2 * 2}:x='max(0,min(iw-{bw},({cx})*iw-{bw}/2))':y=0"

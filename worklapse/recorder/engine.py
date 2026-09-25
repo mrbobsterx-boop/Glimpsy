@@ -517,6 +517,8 @@ class RecorderEngine(QObject):
             width=run.capture.width, height=run.capture.height,
             score=act.score(max(t0, ws), min(t1, we)), priority=priority,
             activity=[round(v, 3) for v in act.per_second(ws, we)], cursor=cursor,
+            clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)]
+                    for t, x, y in act.clicks_between(ws, we, run.monitor.index)],
         )
         pool.add(cand)
         removed = pool.prune(self.plan.pool_size)

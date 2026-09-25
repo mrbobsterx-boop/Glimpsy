@@ -37,6 +37,9 @@ class Settings:
     output_width: int = 1920
     output_height: int = 1080
     oversample: float = 2.5            # во сколько раз больше кандидатов хранить, чем нужно
+    fx_zoom: bool = True               # плавно приближать кадр к кликам и месту работы
+    fx_zoom_strength: float = 1.8      # во сколько раз приближать
+    fx_clicks: bool = True             # подсвечивать клики расходящимся кругом
 
     # --- Запись ---
     fps: int = 30
@@ -86,6 +89,7 @@ class Settings:
         self.buffer_s = max(int(need), min(int(self.buffer_s), 300))
         self.idle_pause_s = max(10, min(int(self.idle_pause_s), 3600))
         self.oversample = max(1.5, min(float(self.oversample), 4.0))
+        self.fx_zoom_strength = max(1.2, min(float(self.fx_zoom_strength), 3.0))
         self.record_max_height = max(480, min(int(self.record_max_height), 4320))
         if self.camera_mode not in ("off", "rare", "sometimes", "often"):
             self.camera_mode = "off"

@@ -169,12 +169,18 @@ class Assembler:
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         rendered: list[Path] = []
+        clean: dict[int, Path] = {}
         for i, p in enumerate(pieces):
             progress(i / (len(pieces) + 1), f"Фрагмент {i + 1} из {len(pieces)}")
             out = work / f"piece_{i:04d}.mp4"
             fade = "in" if i == 0 else ("out" if i == len(pieces) - 1 else "")
             self._render_piece(session_dir / p.cand.file, p, out, fade)
             rendered.append(out)
+            if project_dir is not None and self._has_effects(p):
+                # в редактор — чистый фрагмент: там зум и клики накладываются заново и их можно выключить
+                clean_out = work / f"clean_{i:04d}.mp4"
+                self._render_piece(session_dir / p.cand.file, p, clean_out, fade, effects=False)
+                clean[i] = clean_out
 
         progress(len(pieces) / (len(pieces) + 1), "Склейка")
         out_dir = Path(self.s.output_dir)
@@ -198,12 +204,38 @@ class Assembler:
         shutil.move(str(tmp_final), final)
 
         if project_dir is not None:
-            self._save_project(project_dir, pieces, rendered, final, cams, session_dir / "camera")
+            self._save_project(project_dir, pieces, [clean.get(i, r) for i, r in enumerate(rendered)], final,
+                               cams, session_dir / "camera")
         progress(1.0, "Готово")
         return final
 
-    def _render_piece(self, src: Path, p: Piece, out: Path, fade: str) -> None:
+    def _effects_graph(self, p: Piece, W: int, H: int, fps: int) -> tuple[str, str]:
+        """Круги кликов и приближение к месту работы. Возвращает (граф до ускорения, метку выхода)."""
+        from worklapse.editor import motion
+        from worklapse.editor.clicks import ripple_graph
+
+        c = p.cand
+        t0, t1 = p.offset, p.offset + p.source_s
+        parts, label = [], "0:v"
+        # ширина видео в записи (высокие экраны при записи уменьшаются до record_max_height)
+        rh = min(c.height, self.s.record_max_height) if c.height else 0
+        stream_w = int(c.width * rh / c.height) if c.height else c.width
+        if self.s.fx_clicks and c.clicks:
+            rip = ripple_graph("0:v", "rip", c.clicks, t0, t1, p.speed, stream_w)
+            if rip:
+                parts.append(rip)
+                label = "rip"
+        if self.s.fx_zoom and (c.cursor or c.clicks) and c.width and c.height:
+            k = min(W / c.width, H / c.height)
+            zw, zh = max(2, int(c.width * k) // 2 * 2), max(2, int(c.height * k) // 2 * 2)
+            track = motion.autozoom_track(c.cursor, c.duration, self.s.fx_zoom_strength, c.clicks)
+            parts.append(f"[{label}]{motion.autozoom_filter(track, t0, t1, zw, zh, fps)}[zm]")
+            label = "zm"
+        return ";".join(parts), label
+
+    def _render_piece(self, src: Path, p: Piece, out: Path, fade: str, effects: bool = True) -> None:
         W, H, fps = self.s.output_width, self.s.output_height, self.s.fps
+        pre, label = self._effects_graph(p, W, H, fps) if effects else ("", "0:v")
         vf = [f"setpts=(PTS-STARTPTS)/{p.speed:.4f}", f"fps={fps}",
               f"scale={W}:{H}:force_original_aspect_ratio=decrease",
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114", "setsar=1"]
@@ -213,19 +245,32 @@ class Assembler:
             vf.append(f"fade=t=out:st={max(0.0, p.out_s - 0.5):.3f}:d=0.5")
 
         def cmd(enc: Encoder) -> list[str]:
+            graph = (pre + ";" if pre else "") + f"[{label}]" + ",".join(vf + [enc.filter_suffix]) + "[v]"
             return [*enc.global_args, "-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(src),
-                    "-vf", ",".join(vf + [enc.filter_suffix]), "-an", *enc.args("final", fps),
+                    "-filter_complex", graph, "-map", "[v]", "-an", *enc.args("final", fps),
                     "-video_track_timescale", "90000", str(out)]
 
         try:
             self._ffmpeg(cmd(self.encoder))
         except AssemblyError:
-            if not self.encoder.hw:
+            if self.encoder.hw:
+                # аппаратный кодек подвёл — пробуем программный, результат важнее скорости
+                log.warning("Аппаратный кодек не справился, пробуем программный")
+                self.encoder = software_encoder()
+                try:
+                    self._ffmpeg(cmd(self.encoder))
+                    return
+                except AssemblyError:
+                    if not pre:
+                        raise
+            elif not pre:
                 raise
-            # аппаратный кодек подвёл — пробуем программный, результат важнее скорости
-            log.warning("Аппаратный кодек не справился, пробуем программный")
-            self.encoder = software_encoder()
-            self._ffmpeg(cmd(self.encoder))
+            log.exception("Эффекты (зум/клики) не получились — фрагмент без них")
+            self._render_piece(src, p, out, fade, effects=False)
+
+    def _has_effects(self, p: Piece) -> bool:
+        c = p.cand
+        return bool((self.s.fx_clicks and c.clicks) or (self.s.fx_zoom and (c.cursor or c.clicks)))
 
     def _add_camera(self, src: Path, cams: list[CamPlacement], cam_dir: Path, out: Path) -> None:
         """Второй проход: окошки с камеры поверх склеенного ролика."""
@@ -281,11 +326,17 @@ class Assembler:
             c = p.cand
             cursor = [[round((t - p.offset) / p.speed, 3), x, y] for t, x, y in c.cursor
                       if p.offset <= t <= p.offset + p.source_s]
+            clicks = [[round((t - p.offset) / p.speed, 3), x, y] for t, x, y in c.clicks
+                      if p.offset <= t <= p.offset + p.source_s]
             items.append({
                 "file": dest.name, "duration": round(p.out_s, 3), "speed": p.speed,
                 "recorded_at": c.wall_start + p.offset, "monitor": c.monitor,
                 "source_size": [c.width, c.height], "priority": c.priority, "score": round(c.score, 3),
-                "cursor": cursor,
+                "cursor": cursor, "clicks": clicks,
+                # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
+                "motion": "autozoom" if self.s.fx_zoom and (cursor or clicks) else "none",
+                "click_fx": bool(self.s.fx_clicks),
+                "zoom_strength": self.s.fx_zoom_strength,
             })
         camera = []
         for i, c in enumerate(cams or []):

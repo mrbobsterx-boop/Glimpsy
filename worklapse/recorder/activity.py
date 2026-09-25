@@ -50,6 +50,7 @@ class ActivityTracker:
         self.last_screen_change_time = time.time()
         self._listeners: list = []
         self.cursor_track: collections.deque[tuple[float, int, float, float]] = collections.deque(maxlen=HISTORY_S * 10)
+        self.click_times: collections.deque[float] = collections.deque(maxlen=HISTORY_S * 5)   # для подсветки кликов
 
     # ---------- слушатели ----------
 
@@ -122,6 +123,8 @@ class ActivityTracker:
         with self._lock:
             b = self._bin(now)
             setattr(b, kind, getattr(b, kind) + amount)
+            if kind == "clicks" and amount >= 1:        # нажатие кнопки мыши (прокрутка — 0.5)
+                self.click_times.append(now)
         self.last_input_time = now
 
     def _mark_input(self, t: float) -> None:
@@ -160,6 +163,16 @@ class ActivityTracker:
 
     def cursor_between(self, t0: float, t1: float) -> list[tuple[float, int, float, float]]:
         return [c for c in list(self.cursor_track) if t0 <= c[0] <= t1]
+
+    def clicks_between(self, t0: float, t1: float, monitor: int) -> list[tuple[float, float, float]]:
+        """Клики [(время, x, y)] на мониторе. Где был курсор — берём из ближайшей точки дорожки курсора."""
+        track = [c for c in list(self.cursor_track) if c[1] == monitor and t0 - 0.3 <= c[0] <= t1 + 0.3]
+        out = []
+        for t in [t for t in list(self.click_times) if t0 <= t <= t1]:
+            near = min(track, key=lambda c: abs(c[0] - t), default=None)
+            if near is not None and abs(near[0] - t) <= 0.25:
+                out.append((t, near[2], near[3]))
+        return out
 
     def idle_for(self, now: float) -> float:
         """Сколько секунд пользователь ничего не делает."""

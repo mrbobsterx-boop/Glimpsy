@@ -42,6 +42,7 @@ class PreviewWidget(QWidget):
         self.frame = DEFAULT_FRAME
         self.editable = False
         self.src_crop = (0.0, 0.0, 1.0, 1.0)   # какая часть исходного кадра видна (автозум/слежение)
+        self.ripples: list = []                  # круги кликов: [(x, y, прогресс)] в долях исходного кадра
         self._bg_cache: tuple[int, QImage] | None = None
         self._drag: str | None = None      # move / scale
         self._press = QPointF()
@@ -78,6 +79,31 @@ class PreviewWidget(QWidget):
         if crop != self.src_crop:
             self.src_crop = crop
             self.update()
+
+    def set_ripples(self, ripples: list) -> None:
+        if ripples or self.ripples:
+            self.ripples = ripples
+            self.update()
+
+    def _paint_ripples(self, p: QPainter, fr: QRectF) -> None:
+        """Круги кликов — те же формулы, что у FFmpeg при экспорте (worklapse/editor/clicks.py)."""
+        from worklapse.editor import clicks as ck
+
+        sx, sy, sw, sh = self.src_crop
+        size = ck.SIZE * fr.width() / sw               # размер круга в пикселях просмотра
+        r, g, b = ck.COLOR
+        for x, y, prog in self.ripples:
+            cx = fr.x() + (x - sx) / sw * fr.width()
+            cy = fr.y() + (y - sy) / sh * fr.height()
+            rad = size / 2 * ck.radius_at(prog)
+            fade = 1 - prog
+            th = max(1.5, size * 0.06)
+            p.setBrush(QColor(r, g, b, int(ck.FILL_ALPHA * fade)))
+            p.setPen(QPen(QColor(25, 20, 15, int(150 * fade)), th * 2.4))
+            p.drawEllipse(QPointF(cx, cy), rad, rad)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(r, g, b, int(255 * fade)), th))
+            p.drawEllipse(QPointF(cx, cy), rad, rad)
 
     def set_frame(self, frame: tuple[float, float, float], editable: bool) -> None:
         if self._drag is None:          # во время перетаскивания рамку ведёт мышь
@@ -236,6 +262,8 @@ class PreviewWidget(QWidget):
         p.setClipRect(canvas)
         sx, sy, sw, sh = self.src_crop
         p.drawImage(fr, img, QRectF(sx * img.width(), sy * img.height(), sw * img.width(), sh * img.height()))
+        if self.ripples:
+            self._paint_ripples(p, fr)
         p.restore()
         self._paint_overlays(p)
         self._paint_texts(p)

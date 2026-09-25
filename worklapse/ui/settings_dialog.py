@@ -100,6 +100,20 @@ class SettingsDialog(QDialog):
                            "фрагменты и ускорение ×1.6."))
         f.addRow("", self.plan_hint)
         f.addRow("Разрешение ролика:", self.resolution)
+        self.fx_zoom = QCheckBox("Плавно приближать к кликам и месту работы")
+        self.fx_zoom.setChecked(self.s.fx_zoom)
+        self.fx_strength = QDoubleSpinBox(minimum=1.2, maximum=3.0, singleStep=0.1, decimals=1, suffix=" ×")
+        self.fx_strength.setValue(self.s.fx_zoom_strength)
+        self.fx_strength.setEnabled(self.s.fx_zoom)
+        self.fx_zoom.toggled.connect(self.fx_strength.setEnabled)
+        self.fx_clicks = QCheckBox("Подсвечивать клики кругом")
+        self.fx_clicks.setChecked(self.s.fx_clicks)
+        f.addRow("Эффекты:", self.fx_zoom)
+        f.addRow("   сила приближения:", self.fx_strength)
+        f.addRow("", self.fx_clicks)
+        f.addRow("", _hint("Как в Screen Studio: камера сама наезжает туда, где вы кликаете и работаете, "
+                           "а клик отмечается расходящимся кругом. В редакторе эффекты можно выключить "
+                           "у любого фрагмента."))
         f.addRow("Папка для роликов:", out_row)
         f.addRow("", _hint("Можно выбрать папку Google Drive / Яндекс Диска / Dropbox — "
                            "ролики будут сами загружаться в облако. Черновики туда не попадают."))
@@ -289,6 +303,9 @@ class SettingsDialog(QDialog):
         s.clip_max_s = max(self.clip_min.value(), self.clip_max.value())
         s.pace = self.pace.currentData()
         s.output_width, s.output_height = self.resolution.currentData()
+        s.fx_zoom = self.fx_zoom.isChecked()
+        s.fx_zoom_strength = self.fx_strength.value()
+        s.fx_clicks = self.fx_clicks.isChecked()
         s.output_dir = self.output.text().strip() or s.output_dir
         s.fps = self.fps.value()
         s.buffer_s = self.buffer.value()
