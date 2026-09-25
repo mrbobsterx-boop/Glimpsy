@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 # mss нужно импортировать до всего остального: на Windows он включает правильную работу
 # с масштабированием экрана (DPI), иначе координаты мониторов и курсора не совпадут.
@@ -35,6 +36,44 @@ def setup_logging() -> None:
     root.addHandler(handler)
     if sys.stderr:
         root.addHandler(logging.StreamHandler())
+    _setup_crash_reports()
+
+
+_crash_file = None
+
+
+def _setup_crash_reports() -> None:
+    """Чтобы любое падение оставило след в журнале, даже если программа закрылась сама:
+      • ошибки Python — в worklapse.log;
+      • предупреждения и ошибки Qt (видео, звук, графика) — туда же;
+      • аварийное падение внутри библиотек — стек в crash.log рядом."""
+    global _crash_file
+    import faulthandler
+
+    try:
+        _crash_file = open(paths.log_dir() / "crash.log", "a", encoding="utf-8")
+        _crash_file.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {APP_NAME} {__version__} ===\n")
+        _crash_file.flush()
+        faulthandler.enable(_crash_file, all_threads=True)
+    except OSError:
+        pass
+
+    def excepthook(kind, value, tb) -> None:
+        logging.getLogger("worklapse.crash").critical("Необработанная ошибка", exc_info=(kind, value, tb))
+
+    sys.excepthook = excepthook
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    qt_log = logging.getLogger("qt")
+    levels = {QtMsgType.QtWarningMsg: logging.WARNING, QtMsgType.QtCriticalMsg: logging.ERROR,
+              QtMsgType.QtFatalMsg: logging.CRITICAL}
+
+    def qt_handler(mode, context, message) -> None:
+        level = levels.get(mode)
+        if level is not None:
+            qt_log.log(level, "%s: %s", context.category or "qt", message)
+
+    qInstallMessageHandler(qt_handler)
 
 
 def main() -> None:
@@ -98,6 +137,8 @@ def main() -> None:
 
     if "--editor" in sys.argv:        # ярлык «Worklapse — редактор»
         tray.open_editor()
+    if "--open" in sys.argv[:-1]:      # открыть проект сразу (для проверки): --open ПАПКА_ПРОЕКТА
+        QTimer.singleShot(500, lambda: tray._open_project(Path(sys.argv[sys.argv.index("--open") + 1])))
 
     # Ctrl+C в терминале корректно закрывает программу (удобно при разработке)
     signal.signal(signal.SIGINT, lambda *_: tray.quit())

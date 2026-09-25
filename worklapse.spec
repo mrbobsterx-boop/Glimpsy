@@ -45,6 +45,13 @@ a = Analysis(
               "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtSql", "PySide6.QtTest"],
     noarchive=False,
 )
+# Linux: системные библиотеки C++ берём с компьютера пользователя, а не со сборочной машины.
+# Драйверы видеокарты (Mesa, NVIDIA) собраны под свежую libstdc++ системы; со старой копией из
+# сборки они не загружаются или роняют программу (видео в редакторе, аппаратный кодек).
+if sys.platform.startswith("linux"):
+    SYSTEM_ONLY = ("libstdc++.so", "libgcc_s.so")
+    a.binaries = [b for b in a.binaries if not Path(b[0]).name.startswith(SYSTEM_ONLY)]
+
 pyz = PYZ(a.pure)
 
 icon = str(ROOT / "assets" / "icon.png")
