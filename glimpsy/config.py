@@ -53,6 +53,13 @@ class Settings:
     autostart_recording: bool = True   # начинать запись сразу при запуске программы
     launch_at_login: bool = False      # запускать вместе с компьютером (реально хранится в системе)
 
+    # --- Звук ---
+    audio_mic: bool = True             # записывать микрофон
+    audio_mic_device: str = ""         # пусто — микрофон по умолчанию
+    audio_system: bool = True          # записывать звук компьютера (то, что играет в колонках)
+    voice_mode: bool = True            # пока вы говорите — запись идёт целиком, со звуком и без ускорения
+    voice_sensitivity: float = 1.0     # 0.5 — только громкая речь, 2 — даже тихий голос
+
     # --- Веб-камера (по умолчанию выключена: камера не включается без вашего согласия) ---
     camera_mode: str = "off"           # off / rare / sometimes / often
     camera_device: str = ""            # пусто — первая найденная камера
@@ -96,6 +103,7 @@ class Settings:
         self.idle_pause_s = max(10, min(int(self.idle_pause_s), 3600))
         self.oversample = max(1.5, min(float(self.oversample), 4.0))
         self.fx_zoom_strength = max(1.2, min(float(self.fx_zoom_strength), 3.0))
+        self.voice_sensitivity = max(0.4, min(float(self.voice_sensitivity), 3.0))
         self.record_max_height = max(480, min(int(self.record_max_height), 4320))
         if self.camera_mode not in ("off", "rare", "sometimes", "often"):
             self.camera_mode = "off"

@@ -36,6 +36,19 @@ log = logging.getLogger(__name__)
 Progress = Callable[[float, str], None]
 
 
+def _atempo(speed: float) -> list[str]:
+    """Скорость звука без «мультяшного» голоса (atempo работает шагами 0.5–2)."""
+    parts, s = [], speed
+    while s > 2.0:
+        parts.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5:
+        parts.append("atempo=0.5")
+        s /= 0.5
+    parts.append(f"atempo={s:.5f}")
+    return parts
+
+
 @dataclass
 class Piece:
     cand: Candidate
@@ -70,18 +83,32 @@ def best_window(activity: list[float], length_s: float, duration: float, rng: ra
 
 def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.Random | None = None) -> list[Piece]:
     rng = rng or random.Random()
-    usable = [c for c in cands if c.duration >= s.clip_min_s * plan.speed * 0.8]
+    voice = sorted((c for c in cands if c.voice_id), key=lambda c: (c.voice_id, c.voice_part))
+    spoken = [(c.wall_start, c.wall_end) for c in voice]
+
+    def overlaps_voice(c: Candidate) -> bool:
+        return any(c.wall_start < b and a < c.wall_end for a, b in spoken)
+
+    usable = [c for c in cands if not c.voice_id and c.duration >= s.clip_min_s * plan.speed * 0.8
+              and not overlaps_voice(c)]
     priority = [c for c in usable if c.priority]
     regular = sorted([c for c in usable if not c.priority], key=lambda c: c.wall_start)
 
     pieces: list[Piece] = []
+    # речь — целиком, без ускорения и без обрезки; в «бюджет» длины ролика она не входит
+    for c in voice:
+        start = max(0.0, c.want_start - c.wall_start)
+        src = min(c.want_end, c.wall_end) - c.wall_start - start
+        if src > 0.3:
+            pieces.append(Piece(c, start, src, 1.0))
+    voice_s = sum(p.out_s for p in pieces)
     for c in priority:
         # важный момент берём целиком (сколько просили до/после нажатия)
         start = max(0.0, c.want_start - c.wall_start)
         src = min(c.want_end, c.wall_end) - c.wall_start - start
         pieces.append(Piece(c, start, max(0.5, src), plan.speed))
 
-    budget = s.target_length_s - sum(p.out_s for p in pieces)
+    budget = s.target_length_s - (sum(p.out_s for p in pieces) - voice_s)
     k = max(0, round(budget / plan.clip_out_s))
     chosen: list[Candidate] = []
     if k >= len(regular):
@@ -170,16 +197,22 @@ class Assembler:
         work.mkdir(parents=True)
         rendered: list[Path] = []
         clean: dict[int, Path] = {}
+        # звук: в ролике — только речь (голосовой режим); у обычных фрагментов звук сохраняется
+        # в проекте редактора (выключенным) — его можно включить у любого фрагмента
+        has_audio = any(p.cand.audio for p in pieces)
+        self._session_dir = session_dir
         for i, p in enumerate(pieces):
             progress(i / (len(pieces) + 1), f"Фрагмент {i + 1} из {len(pieces)}")
             out = work / f"piece_{i:04d}.mp4"
             fade = "in" if i == 0 else ("out" if i == len(pieces) - 1 else "")
-            self._render_piece(session_dir / p.cand.file, p, out, fade)
+            self._render_piece(session_dir / p.cand.file, p, out, fade, audio="voice" if has_audio else "none")
             rendered.append(out)
-            if project_dir is not None and self._has_effects(p):
+            audio_differs = bool(p.cand.audio) and not p.cand.voice_id
+            if project_dir is not None and (self._has_effects(p) or audio_differs):
                 # в редактор — чистый фрагмент: там зум и клики накладываются заново и их можно выключить
                 clean_out = work / f"clean_{i:04d}.mp4"
-                self._render_piece(session_dir / p.cand.file, p, clean_out, fade, effects=False)
+                self._render_piece(session_dir / p.cand.file, p, clean_out, fade, effects=False,
+                                   audio="all" if has_audio else "none")
                 clean[i] = clean_out
 
         progress(len(pieces) / (len(pieces) + 1), "Склейка")
@@ -236,7 +269,9 @@ class Assembler:
             label = "zm"
         return ";".join(parts), label
 
-    def _render_piece(self, src: Path, p: Piece, out: Path, fade: str, effects: bool = True) -> None:
+    def _render_piece(self, src: Path, p: Piece, out: Path, fade: str, effects: bool = True,
+                      audio: str = "none") -> None:
+        """audio: none — без звука; voice — звук только у речи (у остальных тишина); all — звук у всех."""
         W, H, fps = self.s.output_width, self.s.output_height, self.s.fps
         pre, label = self._effects_graph(p, W, H, fps) if effects else ("", "0:v")
         vf = [f"setpts=(PTS-STARTPTS)/{p.speed:.4f}", f"fps={fps}",
@@ -247,10 +282,26 @@ class Assembler:
         elif fade == "out":
             vf.append(f"fade=t=out:st={max(0.0, p.out_s - 0.5):.3f}:d=0.5")
 
+        c = p.cand
+        a_in: list[str] = []
+        a_graph, a_map = "", ["-an"]
+        if audio != "none":
+            wav = self._session_dir / c.audio if c.audio else None
+            if wav is not None and wav.exists() and (audio == "all" or c.voice_id):
+                a_in = ["-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(wav)]
+                chain = "asetpts=PTS-STARTPTS," + ",".join(_atempo(p.speed))
+                if not c.voice_id:                           # мягкие края — без щелчков на склейках
+                    chain += f",afade=t=in:d=0.03,afade=t=out:st={max(0.0, p.out_s - 0.05):.3f}:d=0.05"
+            else:
+                a_in = ["-f", "lavfi", "-t", f"{p.out_s:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+                chain = "asetpts=PTS-STARTPTS"
+            a_graph = f";[1:a]{chain},aformat=sample_rates=48000:channel_layouts=stereo,apad[a]"
+            a_map = ["-map", "[a]", "-c:a", "aac", "-b:a", "160k", "-shortest"]
+
         def cmd(enc: Encoder) -> list[str]:
-            graph = (pre + ";" if pre else "") + f"[{label}]" + ",".join(vf + [enc.filter_suffix]) + "[v]"
-            return [*enc.global_args, "-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(src),
-                    "-filter_complex", graph, "-map", "[v]", "-an", *enc.args("final", fps),
+            graph = (pre + ";" if pre else "") + f"[{label}]" + ",".join(vf + [enc.filter_suffix]) + "[v]" + a_graph
+            return [*enc.global_args, "-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(src), *a_in,
+                    "-filter_complex", graph, "-map", "[v]", *a_map, *enc.args("final", fps),
                     "-video_track_timescale", "90000", str(out)]
 
         try:
@@ -269,7 +320,7 @@ class Assembler:
             elif not pre:
                 raise
             log.exception("Эффекты (зум/клики) не получились — фрагмент без них")
-            self._render_piece(src, p, out, fade, effects=False)
+            self._render_piece(src, p, out, fade, effects=False, audio=audio)
 
     def _has_effects(self, p: Piece) -> bool:
         c = p.cand
@@ -300,7 +351,7 @@ class Assembler:
                              f"enable='between(t,{S:.3f},{E:.3f})'[v{k}]")
                 prev = f"v{k}"
             parts.append(f"[{prev}]{enc.filter_suffix}[vout]")
-            return [*args, "-filter_complex", ";".join(parts), "-map", "[vout]", "-an",
+            return [*args, "-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "0:a?", "-c:a", "copy",
                     *enc.args("final", fps), "-movflags", "+faststart", str(out)]
 
         try:
@@ -336,6 +387,7 @@ class Assembler:
                 "recorded_at": c.wall_start + p.offset, "monitor": c.monitor,
                 "source_size": [c.width, c.height], "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor, "clicks": clicks,
+                "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id, "voice": c.voice_id,
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
                 "motion": "autozoom" if self.s.fx_zoom and (cursor or clicks) else "none",
                 "click_fx": bool(self.s.fx_clicks),

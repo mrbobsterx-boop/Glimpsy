@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import copy
 
-from PySide6.QtCore import QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from glimpsy.config import PACE_LABELS, PACES, Settings
@@ -45,10 +45,11 @@ class SettingsDialog(QDialog):
             ("monitor", "Запись", "Что и как записывать", self._record_tab(monitors, on_reselect_screen)),
             ("keyboard", "Горячие клавиши", "Работают в любой программе и раскладке", self._hotkeys_tab()),
             ("eye", "Приватность", "Что никогда не попадает в запись", self._privacy_tab()),
+            ("mic", "Звук", "Микрофон, звук компьютера и голосовой режим", self._audio_tab()),
             ("video", "Камера", "Окошко с веб-камеры в углу ролика", self._camera_tab()),
             ("info", "Система", "Сведения о компьютере и записи", self._system_tab(status)),
         ]
-        self._camera_page = pages[4][3]
+        self._camera_page = pages[5][3]
         self.nav = QListWidget()
         self.nav.setObjectName("settingsNav")
         self.nav.setFixedWidth(200)
@@ -67,9 +68,11 @@ class SettingsDialog(QDialog):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setWidget(holder)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.stack.addWidget(scroll)
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.currentRowChanged.connect(lambda i: i == 4 and self._find_cameras(False))
+        self.nav.currentRowChanged.connect(lambda i: i == 5 and self._find_cameras(False))
+        self.nav.currentRowChanged.connect(lambda i: i == 4 and self._find_mics())
         self.nav.setCurrentRow(0)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         save = buttons.button(QDialogButtonBox.StandardButton.Save)
@@ -256,6 +259,64 @@ class SettingsDialog(QDialog):
                               "Ставьте паузу вручную."))
         return w
 
+    def _audio_tab(self) -> QWidget:
+        from glimpsy.recorder.audio import system_audio_supported
+
+        w = QWidget()
+        f = QFormLayout(w)
+        self.a_mic = QCheckBox("Записывать микрофон")
+        self.a_mic.setChecked(self.s.audio_mic)
+        self.a_mic_dev = QComboBox()
+        self.a_mic_dev.addItem("Микрофон по умолчанию", "")
+        if self.s.audio_mic_device:
+            self.a_mic_dev.addItem(self.s.audio_mic_device, self.s.audio_mic_device)
+            self.a_mic_dev.setCurrentIndex(1)
+        self._mics_listed = False
+        self.a_sys = QCheckBox("Записывать звук компьютера (то, что играет в колонках)")
+        self.a_sys.setChecked(self.s.audio_system and system_audio_supported())
+        self.a_sys.setEnabled(system_audio_supported())
+        self.a_voice = QCheckBox("Голосовой режим: пока я говорю — записывать целиком")
+        self.a_voice.setChecked(self.s.voice_mode)
+        self.a_sens = QSlider(Qt.Orientation.Horizontal)
+        self.a_sens.setRange(40, 300)
+        self.a_sens.setValue(int(self.s.voice_sensitivity * 100))
+        sens_row = QHBoxLayout()
+        sens_row.addWidget(theme.mark(QLabel("громкая речь"), "hint"))
+        sens_row.addWidget(self.a_sens, 1)
+        sens_row.addWidget(theme.mark(QLabel("тихий голос"), "hint"))
+        for widget in (self.a_mic_dev, self.a_voice, self.a_sens):
+            self.a_mic.toggled.connect(widget.setEnabled)
+            widget.setEnabled(self.s.audio_mic)
+        f.addRow("", self.a_mic)
+        f.addRow("Микрофон", self.a_mic_dev)
+        f.addRow("", self.a_sys)
+        if not system_audio_supported():
+            f.addRow("", _hint("На Mac звук колонок без дополнительных программ записать нельзя — "
+                               "пишется только микрофон."))
+        f.addRow("", self.a_voice)
+        f.addRow("Чувствительность", sens_row)
+        f.addRow("", _hint("Программа всё время слушает микрофон. Пока вы говорите, фрагмент не режется и "
+                           "не ускоряется — речь попадает в ролик целиком и со звуком, сколько бы вы ни "
+                           "говорили. Замолчали — дальше как обычно. У остальных фрагментов звук тоже "
+                           "сохраняется, но в ролике выключен — включить можно в редакторе. На паузе и в "
+                           "приватных приложениях микрофон не пишется. Звук остаётся только на этом "
+                           "компьютере."))
+        return w
+
+    def _find_mics(self) -> None:
+        if self._mics_listed:
+            return
+        self._mics_listed = True
+        from glimpsy.recorder.audio import list_microphones
+        current = self.a_mic_dev.currentData()
+        self.a_mic_dev.clear()
+        self.a_mic_dev.addItem("Микрофон по умолчанию", "")
+        for name in list_microphones():
+            self.a_mic_dev.addItem(name, name)
+        if current and self.a_mic_dev.findData(current) < 0:
+            self.a_mic_dev.addItem(f"{current} (не подключён)", current)
+        self.a_mic_dev.setCurrentIndex(max(0, self.a_mic_dev.findData(current)))
+
     def _camera_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
@@ -375,6 +436,11 @@ class SettingsDialog(QDialog):
         s.important_before_s = self.imp_before.value()
         s.important_after_s = self.imp_after.value()
         s.blacklist = [x.strip() for x in self.blacklist.toPlainText().splitlines() if x.strip()]
+        s.audio_mic = self.a_mic.isChecked()
+        s.audio_mic_device = self.a_mic_dev.currentData() or ""
+        s.audio_system = self.a_sys.isChecked()
+        s.voice_mode = self.a_voice.isChecked()
+        s.voice_sensitivity = self.a_sens.value() / 100
         s.camera_mode = self.cam_mode.currentData()
         s.camera_device = self.cam_device.currentData() or ""
         s.camera_clip_s = self.cam_len.value()

@@ -297,12 +297,15 @@ class Project:
             label = time.strftime("%H:%M:%S", time.localtime(when)) if when else c["file"]
             if c.get("monitor"):
                 label += f" · монитор {c['monitor']}"
+            if c.get("voice"):
+                label += " · речь"
             w, h = (c.get("source_size") or [0, 0])[:2]
             dur = float(c.get("duration", 0))
             # Фрагменты уже ускорены при автосборке, поэтому здесь их скорость — ×1
             clips.append(Clip(new_id(), "video", c["file"], dur, 0.0, dur, width=w, height=h,
                               label=label, priority=bool(c.get("priority")), recorded_at=when,
                               cursor=c.get("cursor", []), clicks=c.get("clicks", []),
+                              has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
                               motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
                               zoom_strength=float(c.get("zoom_strength", 1.8))))
         output = meta.get("output", "")

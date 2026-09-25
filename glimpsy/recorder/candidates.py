@@ -32,6 +32,9 @@ class Candidate:
     activity: list[float] = field(default_factory=list)    # оценка каждой секунды файла
     cursor: list[list[float]] = field(default_factory=list)  # [t от начала файла, x 0..1, y 0..1]
     clicks: list[list[float]] = field(default_factory=list)  # клики: [t от начала файла, x, y]
+    audio: str = ""               # звук (микрофон + колонки) за то же время, .wav рядом
+    voice_id: int = 0             # >0 — кусок речи (голосовой режим): идёт целиком, со звуком
+    voice_part: int = 0           # номер куска внутри одной речи
 
     @property
     def duration(self) -> float:
@@ -86,10 +89,12 @@ class CandidatePool:
             victim = pick_victim(regular)
             self.items.remove(victim)
             removed.append(victim)
-            try:
-                (self.dir / victim.file).unlink(missing_ok=True)
-            except OSError:
-                pass
+            for name in (victim.file, victim.audio):
+                if name:
+                    try:
+                        (self.dir / name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
         return removed
 
     @property

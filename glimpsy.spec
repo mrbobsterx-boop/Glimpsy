@@ -87,6 +87,7 @@ if IS_MAC and not ONEFILE:
             "LSUIElement": True,             # только иконка в строке меню, без значка в Dock
             "NSHighResolutionCapable": True,
             "NSCameraUsageDescription": "Glimpsy может иногда сохранять фрагменты с веб-камеры.",
+            "NSMicrophoneUsageDescription": "Glimpsy записывает ваш голос, пока вы рассказываете о работе.",
             "NSAppleEventsUsageDescription": "Glimpsy проверяет активное приложение для чёрного списка.",
         },
     )

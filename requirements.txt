@@ -8,3 +8,4 @@ psutil>=5.9           # имя программы активного окна (B
 jeepney>=0.8 ; sys_platform == "linux"                  # D-Bus для порталов Wayland (MIT)
 python-xlib>=0.33 ; sys_platform == "linux"             # активное окно на X11 (LGPL)
 pyobjc-framework-Cocoa>=10.0 ; sys_platform == "darwin" # активное окно на macOS (MIT)
+soundcard>=0.4.3        # микрофон и звук колонок (BSD)

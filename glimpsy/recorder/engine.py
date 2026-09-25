@@ -36,6 +36,7 @@ from glimpsy.recorder.candidates import Candidate, CandidatePool
 from glimpsy.recorder.encoder import Encoder, pick_encoder, software_encoder
 from glimpsy.recorder.pacing import Plan, make_plan, save_probability
 from glimpsy.recorder.ring_buffer import BufferRun
+from glimpsy.recorder.audio import AudioCapture, write_wav
 from glimpsy.recorder.webcam import MODES as CAM_MODES, CamClip, CamStore, Webcam
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class Deferred:
     t0: float
     t1: float
     priority: bool
+    voice: tuple[int, int] | None = None     # (номер речи, номер куска) — для голосового режима
 
 
 class RecorderEngine(QObject):
@@ -126,6 +128,9 @@ class RecorderEngine(QObject):
         # статистика дня: только для вас, в ролик не попадает
         self.stats = {"active_s": 0, "idle_s": 0, "paused_s": 0, "private_s": 0, "apps": {}, "important": 0}
         self._stats_second = 0
+        self.audio: AudioCapture | None = None
+        self._voice: dict | None = None          # идущая речь: {"id", "from", "part"}
+        self._voice_count = 0
         self._stats_saved = 0.0
         self._cur_app = ""
         self._cam_next = 0.0
@@ -240,6 +245,7 @@ class RecorderEngine(QObject):
             self.notify.emit("Glimpsy", err)
         self.cam_store = CamStore(self.session_dir)
         self._setup_camera()
+        self._setup_audio()
 
     def _handle(self, cmd: tuple) -> str | None:
         kind = cmd[0]
@@ -248,6 +254,7 @@ class RecorderEngine(QObject):
             if self._user_paused:
                 self._close_run()
                 self._cam_stop()
+                self._audio_run(False)
                 self._set_state(State.PAUSED)
             else:
                 if self.activity:
@@ -264,6 +271,7 @@ class RecorderEngine(QObject):
         elif kind == "finish":
             self._save_stats()
             self._close_run()
+            self._audio_run(False)
             self._cam_finish()
             self._stop_listeners()
             self._assemble()
@@ -271,6 +279,7 @@ class RecorderEngine(QObject):
         elif kind == "stop":
             self._save_stats()
             self._close_run()
+            self._audio_run(False)
             self._cam_stop()
             self._stop_listeners()
             if self.pool:
@@ -327,9 +336,13 @@ class RecorderEngine(QObject):
         if self._private:
             self._close_run()     # в буфер не попадает ни одного кадра приватного окна
             self._cam_stop()
+            self._audio_run(False)    # и ни звука (например, звонок в мессенджере)
             self._set_state(State.PRIVATE)
             return
 
+        self._audio_run(True)
+        if self.audio is not None and self.audio.voice.speaking().speaking:
+            act.last_input_time = now     # вы говорите — значит, вы здесь (не автопауза)
         idle = act.idle_for(now) > self.s.idle_pause_s
         if idle and self.services.input_events_supported:
             # Можем отследить возвращение пользователя по мыши/клавиатуре → запись полностью стоит
@@ -365,10 +378,11 @@ class RecorderEngine(QObject):
 
         self._set_state(State.IDLE if idle else State.RECORDING)
 
-        # --- 6. отложенные сохранения («важные моменты») ---
+        # --- 6. голос и отложенные сохранения («важные моменты», концы фраз) ---
+        self._voice_tick(now)
         for d in [d for d in self._deferred if d.due <= now]:
             self._deferred.remove(d)
-            self._save(d.t0, d.t1, d.priority)
+            self._save(d.t0, d.t1, d.priority, d.voice)
 
         # --- 7. умный рандом: раз в секунду решаем, сохранять ли момент ---
         sec = int(now)
@@ -432,9 +446,18 @@ class RecorderEngine(QObject):
             return
         self.run = None
         run.stop()
+        end = run.ended_at or time.time()
         for d in list(self._deferred):
             self._deferred.remove(d)
-            self._save_from(run, d.t0, min(d.t1, run.ended_at or time.time()), d.priority)
+            self._save_from(run, d.t0, min(d.t1, end), d.priority, d.voice)
+        if self._voice is not None:
+            # речь продолжается, а прогон закончился (другой монитор, пауза) — сохраняем сказанное
+            v = self._voice
+            got = self._save_from(run, v["from"], end, True, (v["id"], v["part"]))
+            v["part"] += 1
+            v["from"] = got[1] if got else end
+            if self._user_paused or self._private:
+                self._voice = None
         run.cleanup()
 
     def _on_run_died(self, now: float) -> None:
@@ -528,14 +551,17 @@ class RecorderEngine(QObject):
         if self._rng.random() < p:
             self._save(now - L, now, priority=False)
 
-    def _save(self, t0: float, t1: float, priority: bool) -> None:
+    def _save(self, t0: float, t1: float, priority: bool, voice: tuple[int, int] | None = None):
         if self.run is not None:
-            self._save_from(self.run, t0, t1, priority)
+            return self._save_from(self.run, t0, t1, priority, voice)
+        return None
 
-    def _save_from(self, run: BufferRun, t0: float, t1: float, priority: bool) -> None:
+    def _save_from(self, run: BufferRun, t0: float, t1: float, priority: bool,
+                   voice: tuple[int, int] | None = None) -> tuple[float, float] | None:
+        """Сохранить фрагмент [t0, t1] из буфера. Возвращает реальное время (начало, конец) или None."""
         pool, act = self.pool, self.activity
         if pool is None or act is None:
-            return
+            return None
         run.poll()
         cid, path = pool.new_file()
         try:
@@ -543,13 +569,23 @@ class RecorderEngine(QObject):
         except OSError:
             log.exception("Не удалось сохранить фрагмент")
             got = None
-        min_len = self.s.clip_min_s * self.plan.speed
+        min_len = 0.8 if voice else self.s.clip_min_s * self.plan.speed
         if got is None or (got[1] - got[0]) < min_len * 0.8:
             path.unlink(missing_ok=True)
-            if priority:
+            if priority and not voice:
                 self.notify.emit("Glimpsy", "Важный момент слишком короткий — не сохранён.")
-            return
+            return None
         ws, we = got
+        audio_name = ""
+        if self.audio is not None:
+            samples = self.audio.extract(ws, we)
+            if samples is not None and len(samples) and float(abs(samples).max()) > 1e-4:
+                audio_name = path.with_suffix(".wav").name
+                try:
+                    write_wav(path.with_suffix(".wav"), samples)
+                except OSError:
+                    log.exception("Не удалось сохранить звук")
+                    audio_name = ""
         cursor = [[round(t - ws, 2), round(x, 4), round(y, 4)]
                   for t, m, x, y in act.cursor_between(ws, we) if m == run.monitor.index]
         cand = Candidate(
@@ -560,14 +596,17 @@ class RecorderEngine(QObject):
             activity=[round(v, 3) for v in act.per_second(ws, we)], cursor=cursor,
             clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)]
                     for t, x, y in act.clicks_between(ws, we, run.monitor.index)],
+            audio=audio_name, voice_id=voice[0] if voice else 0, voice_part=voice[1] if voice else 0,
         )
         pool.add(cand)
         removed = pool.prune(self.plan.pool_size)
         pool.save()
         self._last_save_end = max(self._last_save_end, we)
-        log.info("Кандидат #%s: %.1f с, оценка %.2f%s (удалено %s)", cid, we - ws, cand.score,
-                 ", ВАЖНЫЙ" if priority else "", len(removed))
+        log.info("Кандидат #%s: %.1f с, оценка %.2f%s%s%s (удалено %s)", cid, we - ws, cand.score,
+                 ", ВАЖНЫЙ" if priority and not voice else "", f", РЕЧЬ {voice[0]}.{voice[1]}" if voice else "",
+                 ", со звуком" if audio_name else "", len(removed))
         self._emit_status(time.time(), force=True)
+        return ws, we
 
     def _mark_important(self, t: float) -> None:
         if self._user_paused:
@@ -582,6 +621,60 @@ class RecorderEngine(QObject):
         self._deferred.append(Deferred(due=t + after + 1.2, t0=t - before, t1=t + after, priority=True))
         self.stats["important"] += 1
         self.notify.emit("Glimpsy", f"⭐ Важный момент отмечен (−{before} с / +{after} с)")
+
+    # ======================= звук и голос =======================
+
+    VOICE_CHUNK_S = 15.0      # длинная речь сохраняется кусками, чтобы не выпасть из буфера
+
+    def _setup_audio(self) -> None:
+        self._audio_run(False)
+        self.audio = None
+        if not (self.s.audio_mic or self.s.audio_system):
+            return
+        self.audio = AudioCapture(self.s.buffer_s, mic=self.s.audio_mic, mic_device=self.s.audio_mic_device,
+                                  system=self.s.audio_system, sensitivity=self.s.voice_sensitivity,
+                                  sources=self.audio_sources_override)
+
+    audio_sources_override: dict | None = None      # для проверок: «рекордеры» без настоящих устройств
+
+    def _audio_run(self, on: bool) -> None:
+        a = self.audio
+        if a is None:
+            return
+        if on and not a.running:
+            for problem in a.start():
+                self.notify.emit("Glimpsy", f"Звук: {problem}")
+        elif not on and a.running:
+            a.stop()
+
+    def _voice_tick(self, now: float) -> None:
+        """Голосовой режим: пока вы говорите — запись идёт целиком, кусками по 15 с."""
+        a = self.audio
+        if a is None or not self.s.voice_mode or a.mic_ring is None or self.run is None:
+            return
+        st = a.voice.speaking()
+        if st.speaking and self._voice is None:
+            self._voice_count += 1
+            start = st.start
+            if self.run.available_from is not None:
+                start = max(start, self.run.available_from)
+            self._voice = {"id": self._voice_count, "from": start, "part": 0}
+            self.stats["voice_count"] = self.stats.get("voice_count", 0) + 1
+            log.info("Речь №%s началась", self._voice_count)
+        v = self._voice
+        if v is not None and st.speaking and now - v["from"] >= self.VOICE_CHUNK_S:
+            got = self._save(v["from"], now - 0.5, True, (v["id"], v["part"]))
+            v["part"] += 1
+            v["from"] = got[1] if got else now - 0.5
+        for _start, end in a.voice.pop_finished():
+            if v is None:
+                continue
+            # конец фразы — сохраняем чуть позже, когда эти секунды точно окажутся в буфере
+            self._deferred.append(Deferred(due=end + 1.5, t0=v["from"], t1=end, priority=True,
+                                           voice=(v["id"], v["part"])))
+            self.stats["voice_s"] = self.stats.get("voice_s", 0) + round(end - _start)
+            log.info("Речь №%s закончилась (%.1f с)", v["id"], end - _start)
+            self._voice = v = None
 
     # ======================= веб-камера =======================
 
@@ -685,11 +778,15 @@ class RecorderEngine(QObject):
         if restart:
             self._close_run()
         camera_changed = s.camera_mode != old.camera_mode or s.camera_device != old.camera_device
+        audio_changed = (s.audio_mic, s.audio_mic_device, s.audio_system, s.voice_sensitivity) != \
+            (old.audio_mic, old.audio_mic_device, old.audio_system, old.voice_sensitivity)
         if self.pool:
             self.pool.prune(self.plan.pool_size)
             self.pool.save()
         if camera_changed and self.cam_store is not None:
             self._setup_camera()
+        if audio_changed and self.cam_store is not None:
+            self._setup_audio()
 
     def _stop_listeners(self) -> None:
         if self.activity:
