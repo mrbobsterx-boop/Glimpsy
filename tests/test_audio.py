@@ -116,3 +116,24 @@ def test_assembly_voice_audio(tmp_path):
     meta = json.loads((tmp_path / "p" / "project.json").read_text())
     flags = [(c["has_audio"], c["muted"], c["voice"]) for c in meta["clips"]]
     assert flags == [(True, True, 0), (True, False, 1)]
+
+
+def test_audio_start_failure_reported_once(monkeypatch):
+    """Звук не включился — сообщаем один раз и не пытаемся снова каждые 100 мс."""
+    from glimpsy.recorder import audio
+
+    calls = []
+
+    def broken(self, problems):
+        calls.append(1)
+        problems.append("звук недоступен: нет файла")
+        return []
+
+    monkeypatch.setattr(audio.AudioCapture, "_openers", broken)
+    a = audio.AudioCapture(30, mic=True, system=False)
+    assert a.start() == ["звук недоступен: нет файла"]
+    for _ in range(50):
+        assert a.start() == []
+    assert len(calls) == 1
+    a._next_try = 0.0                 # прошла минута — пробуем снова, но молча
+    assert a.start() == [] and len(calls) == 2

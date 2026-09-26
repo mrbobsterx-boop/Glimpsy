@@ -198,6 +198,10 @@ class AudioCapture:
         self.mic_device = mic_device
         self._sources_override = sources          # для проверок: готовые «рекордеры» вместо устройств
         self.threads: list[_Source] = []
+        self._next_try = 0.0                      # не чаще раза в RETRY_S пробуем снова, если не вышло
+        self._reported: set[str] = set()          # о каждой проблеме сообщаем один раз
+
+    RETRY_S = 60.0
 
     @property
     def enabled(self) -> bool:
@@ -207,13 +211,20 @@ class AudioCapture:
         """Запустить запись. Возвращает список проблем (устройство не найдено и т. п.)."""
         if self.threads:
             return []
-        problems = []
+        now = time.monotonic()
+        if now < self._next_try:
+            return []
+        problems: list[str] = []
         openers = self._openers(problems)
         for name, opener, ring, cb in openers:
             t = _Source(name, opener, ring, cb)
             t.start()
             self.threads.append(t)
-        return problems
+        if not openers:
+            self._next_try = now + self.RETRY_S
+        fresh = [p for p in problems if p not in self._reported]
+        self._reported.update(problems)
+        return fresh
 
     def _openers(self, problems: list[str]) -> list:
         if self._sources_override is not None:

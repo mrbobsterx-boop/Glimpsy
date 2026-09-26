@@ -107,6 +107,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           xvfb-run -a pyinstaller glimpsy.spec --noconfirm
+          test -f dist/Glimpsy/_internal/soundcard/pulseaudio.py.h || { echo "В сборке нет файлов soundcard — звука не будет"; exit 1; }
           bash packaging/linux/build_appimage.sh
 
       - name: Сохранить результат
