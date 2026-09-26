@@ -308,7 +308,8 @@ class MicMeter:
             except Exception as e:
                 log.exception("Проверка микрофона: не удалось открыть")
                 return f"микрофон не найден ({e})"
-            opener = lambda: mic.recorder(samplerate=RATE, channels=1, blocksize=1024)  # noqa: E731
+            # крупные порции (100 мс): меньше пробуждений — запись не рвётся, даже когда компьютер занят
+            opener = lambda: mic.recorder(samplerate=RATE, channels=1, blocksize=RATE // 10)  # noqa: E731
         self._source = _Source("mic-test", opener, Ring(1.0), self._feed)
         self._source.start()
         return ""

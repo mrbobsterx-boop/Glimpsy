@@ -212,6 +212,7 @@ class RecordDialog(QDialog):
 
     def _finish(self) -> None:
         rec = Recording()
+        wall = time.monotonic() - self._t0
         meter, cam = self._meter, self._cam
         self._meter = self._cam = None
         if meter is not None:
@@ -222,6 +223,9 @@ class RecordDialog(QDialog):
                 self.media_dir.mkdir(parents=True, exist_ok=True)
                 write_wav(path, samples)
                 rec.voice, rec.voice_s = path, len(samples) / RATE
+                # звук без потерь — секунд записано столько же, сколько прошло
+                log.info("Голос: записано %.1f с за %.1f с%s", rec.voice_s, wall,
+                         " — часть звука потеряна (компьютер не успевал)" if rec.voice_s < wall - 0.5 else "")
         if cam is not None:
             clip = cam.stop()
             if clip is not None:

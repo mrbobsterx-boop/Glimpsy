@@ -20,6 +20,9 @@ from glimpsy.editor.project import Project
 
 log = logging.getLogger(__name__)
 S = QMediaPlayer.MediaStatus
+# Музыка и голос играют сами; перематываем их, только если разошлись с видео заметно.
+# Время видео на слабом компьютере идёт неровно — частые мелкие перемотки звук и «рвали».
+RESYNC_S = 1.0
 
 
 class _Deck:
@@ -196,8 +199,8 @@ class TimelinePlayer(QObject):
         if not self._music_ready:
             return                                      # догоним, когда файл откроется
         drift = abs(self.music.position() / 1000.0 - target)
-        if force or drift > 0.25 or self.music.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-            if force or drift > 0.25:
+        if force or drift > RESYNC_S or self.music.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            if force or drift > RESYNC_S:
                 self.music.setPosition(int(target * 1000))
             self.music.play()
 
@@ -225,8 +228,8 @@ class TimelinePlayer(QObject):
             return                                      # догоним, когда файл откроется
         target = self.t - item.start + item.in_s
         drift = abs(self.voice.position() / 1000.0 - target)
-        if force or drift > 0.2 or self.voice.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-            if force or drift > 0.2:
+        if force or drift > RESYNC_S or self.voice.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            if force or drift > RESYNC_S:
                 self.voice.setPosition(int(target * 1000))
             self.voice.play()
 
@@ -320,7 +323,7 @@ class TimelinePlayer(QObject):
             self._advance()
             return
         self._music_ticks += 1
-        if self._music_ticks % 5 == 0:                  # раз в ~0,15 с сверяем музыку и голос с лентой
+        if self._music_ticks % 15 == 0:                 # раз в ~0,5 с сверяем музыку и голос с лентой
             self._music_sync()
         self.position.emit(self.t)
 
