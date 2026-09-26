@@ -29,6 +29,9 @@ class Plan:
     pool_size: int           # сколько кандидатов хранить (в 2–3 раза больше)
     candidate_s: float       # сколько секунд реального времени сохраняем на кандидата
     min_gap_s: float         # минимальный промежуток между сохранениями
+    clip_min_s: float = 2.0  # длина фрагмента в ролике: от…
+    clip_max_s: float = 5.0  # …до (в непрерывном режиме обе — continuous_s)
+    continuous: bool = False
 
     def save_interval(self, active_seconds: float) -> float:
         """Средний интервал между сохранениями.
@@ -41,6 +44,16 @@ class Plan:
 
 
 def make_plan(s: Settings) -> Plan:
+    if s.continuous:
+        # непрерывные фрагменты: каждый — ровно continuous_s секунд подряд, без ускорения,
+        # кандидат с небольшим запасом по краям, чтобы выбрать самое живое окно
+        n = s.continuous_s
+        clips_needed = max(1, math.ceil(s.target_length_s / n))
+        pool = max(clips_needed + 2, math.ceil(clips_needed * s.oversample))
+        candidate = min(s.buffer_s - 2, n + 2)
+        return Plan(speed=1.0, length_bias=0.5, clip_out_s=n, clips_needed=clips_needed, pool_size=pool,
+                    candidate_s=candidate, min_gap_s=max(candidate, 20.0), clip_min_s=n, clip_max_s=n,
+                    continuous=True)
     p = PACE_PARAMS.get(s.pace, PACE_PARAMS["medium"])
     clip_out = s.clip_min_s + (s.clip_max_s - s.clip_min_s) * p["length_bias"]
     clips_needed = max(1, math.ceil(s.target_length_s / clip_out))
@@ -51,7 +64,7 @@ def make_plan(s: Settings) -> Plan:
     return Plan(
         speed=p["speed"], length_bias=p["length_bias"], clip_out_s=clip_out,
         clips_needed=clips_needed, pool_size=pool, candidate_s=candidate,
-        min_gap_s=max(candidate, 20.0),
+        min_gap_s=max(candidate, 20.0), clip_min_s=s.clip_min_s, clip_max_s=s.clip_max_s,
     )
 
 

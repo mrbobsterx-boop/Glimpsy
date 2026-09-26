@@ -78,3 +78,16 @@ def test_select_pieces_fits_target():
 def test_best_window_finds_activity():
     act = [0, 0, 0, 0, 1, 1, 1, 0, 0, 0]
     assert best_window(act, 3, 10, random.Random(0)) == 4.0
+
+
+def test_continuous_mode_whole_pieces_at_normal_speed():
+    """Непрерывные фрагменты: каждый ровно N секунд подряд, без ускорения."""
+    s = Settings(target_length_s=60, continuous=True, continuous_s=6, pace="dynamic").validate()
+    plan = make_plan(s)
+    assert plan.speed == 1.0 and plan.clips_needed == 10 and plan.candidate_s >= 6
+    assert s.buffer_s >= 6 + 4
+    cands = [cand(i, i * 60.0, score=(i % 5) / 5, dur=8.0) for i in range(40)]
+    pieces = select_pieces(cands, plan, s, random.Random(1))
+    assert len(pieces) == 10
+    for p in pieces:
+        assert p.speed == 1.0 and abs(p.source_s - 6.0) < 1e-6

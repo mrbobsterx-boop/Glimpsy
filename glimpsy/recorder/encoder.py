@@ -29,27 +29,31 @@ class Encoder:
     filter_suffix: str = "format=yuv420p"                  # последний фильтр перед кодеком
 
     def args(self, mode: str, fps: int) -> list[str]:
-        """mode='buffer' — быстро и легко (фоновая запись), 'final' — качественно (итоговый ролик)."""
+        """mode='buffer' — быстро и легко (фоновая запись), 'final' — качественно (итоговый ролик).
+
+        Буфер тоже пишется почти без потерь: потом он кодируется ещё раз, и мелкий текст
+        на экране при двойном сжатии иначе «замыливается».
+        """
         fast = mode == "buffer"
         n = self.name
         if n == "h264_nvenc":
             a = ["-c:v", n, "-preset", "p1" if fast else "p5", "-rc", "vbr",
-                 "-cq", "27" if fast else "21", "-b:v", "0"]
+                 "-cq", "23" if fast else "21", "-b:v", "0"]
         elif n == "h264_qsv":
             a = ["-c:v", n, "-preset", "veryfast" if fast else "medium",
-                 "-global_quality", "27" if fast else "21"]
+                 "-global_quality", "23" if fast else "21"]
         elif n == "h264_amf":
             a = ["-c:v", n, "-quality", "speed" if fast else "balanced", "-rc", "cqp",
-                 "-qp_i", "25" if fast else "19", "-qp_p", "27" if fast else "21"]
+                 "-qp_i", "21" if fast else "19", "-qp_p", "23" if fast else "21"]
         elif n == "h264_videotoolbox":
             a = ["-c:v", n, "-b:v", "8M" if fast else "12M", "-allow_sw", "0"]
             if fast:
                 a += ["-realtime", "1"]
         elif n == "h264_vaapi":
-            a = ["-c:v", n, "-qp", "26" if fast else "20"]
+            a = ["-c:v", n, "-qp", "22" if fast else "20"]
         else:  # libx264 — программный запасной вариант
             a = ["-c:v", "libx264", "-preset", "ultrafast" if fast else "medium",
-                 "-crf", "26" if fast else "20"]
+                 "-crf", "22" if fast else "20"]
             if fast:
                 a += ["-tune", "zerolatency"]
         # Ключевой кадр каждую секунду — чтобы буфер можно было резать посекундно.

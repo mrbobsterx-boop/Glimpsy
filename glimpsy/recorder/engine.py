@@ -689,7 +689,7 @@ class RecorderEngine(QObject):
         except OSError:
             log.exception("Не удалось сохранить фрагмент")
             got = None
-        min_len = 0.8 if voice else self.s.clip_min_s * self.plan.speed
+        min_len = 0.8 if voice else self.plan.clip_min_s * self.plan.speed
         if got is None or (got[1] - got[0]) < min_len * 0.8:
             path.unlink(missing_ok=True)
             if priority and not voice:

@@ -144,16 +144,33 @@ class SettingsDialog(QDialog):
         out_row = QHBoxLayout()
         out_row.addWidget(self.output)
         out_row.addWidget(browse)
+        self.continuous = QCheckBox("Непрерывные фрагменты — без ускорения и склеек внутри")
+        self.continuous.setChecked(self.s.continuous)
+        self.continuous_s = QDoubleSpinBox(minimum=3, maximum=30, singleStep=1, decimals=0, suffix=" с",
+                                           value=self.s.continuous_s)
         self.plan_hint = _hint("")
-        for widget in (self.target, self.clip_min, self.clip_max):
+        for widget in (self.target, self.clip_min, self.clip_max, self.continuous_s):
             widget.valueChanged.connect(self._update_plan_hint)
         self.pace.currentIndexChanged.connect(self._update_plan_hint)
 
+        def continuous_changed(on: bool) -> None:
+            for wd in (self.clip_min, self.clip_max, self.pace):
+                wd.setEnabled(not on)
+            self.continuous_s.setEnabled(on)
+            self._update_plan_hint()
+
+        self.continuous.toggled.connect(continuous_changed)
+
         f.addRow("Длина ролика", self.target)
+        f.addRow("", self.continuous)
+        f.addRow("Длина куска", self.continuous_s)
+        f.addRow("", _hint("Каждый кусок — это ровно столько секунд подряд, с обычной скоростью: видео "
+                           "не дёргается и не рвётся. Когда вы говорите, речь, как и раньше, идёт целиком."))
         f.addRow("Длина фрагмента", clip_row)
         f.addRow("Темп", self.pace)
         f.addRow("", _hint("Спокойный — фрагменты длиннее, без ускорения. Динамичный — короткие "
                            "фрагменты и ускорение ×1.6."))
+        continuous_changed(self.s.continuous)
         f.addRow("", self.plan_hint)
         f.addRow("Разрешение ролика", self.resolution)
         self.fx_zoom = QCheckBox("Плавно приближать к кликам и месту работы")
@@ -467,6 +484,7 @@ class SettingsDialog(QDialog):
         s.target_length_s = self.target.value()
         s.clip_min_s, s.clip_max_s = self.clip_min.value(), max(self.clip_min.value(), self.clip_max.value())
         s.pace = self.pace.currentData()
+        s.continuous, s.continuous_s = self.continuous.isChecked(), self.continuous_s.value()
         plan = make_plan(s.validate())
         self.plan_hint.setText(f"≈ {plan.clips_needed} фрагментов в ролике, программа хранит до "
                                f"{plan.pool_size} кандидатов и сама решает, как часто сохранять.")
@@ -487,6 +505,7 @@ class SettingsDialog(QDialog):
         s.clip_min_s = self.clip_min.value()
         s.clip_max_s = max(self.clip_min.value(), self.clip_max.value())
         s.pace = self.pace.currentData()
+        s.continuous, s.continuous_s = self.continuous.isChecked(), self.continuous_s.value()
         s.output_width, s.output_height = self.resolution.currentData()
         s.fx_zoom = self.fx_zoom.isChecked()
         s.fx_zoom_strength = self.fx_strength.value()

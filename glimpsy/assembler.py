@@ -90,7 +90,7 @@ def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.R
     def overlaps_voice(c: Candidate) -> bool:
         return any(c.wall_start < b and a < c.wall_end for a, b in spoken)
 
-    usable = [c for c in cands if not c.voice_id and c.duration >= s.clip_min_s * plan.speed * 0.8
+    usable = [c for c in cands if not c.voice_id and c.duration >= plan.clip_min_s * plan.speed * 0.8
               and not overlaps_voice(c)]
     priority = [c for c in usable if c.priority]
     regular = sorted([c for c in usable if not c.priority], key=lambda c: c.wall_start)
@@ -123,9 +123,10 @@ def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.R
             weights = [(c.score + 0.05) ** 2 for c in group]
             chosen.append(rng.choices(group, weights=weights, k=1)[0])
 
-    mode = s.clip_min_s + (s.clip_max_s - s.clip_min_s) * plan.length_bias
+    lo, hi = plan.clip_min_s, plan.clip_max_s
+    mode = lo + (hi - lo) * plan.length_bias
     for c in chosen:
-        out_len = rng.triangular(s.clip_min_s, s.clip_max_s, mode) if s.clip_max_s > s.clip_min_s else s.clip_min_s
+        out_len = rng.triangular(lo, hi, mode) if hi > lo else lo
         src = min(out_len * plan.speed, c.duration)
         off = best_window(c.activity, src, c.duration, rng)
         pieces.append(Piece(c, off, src, plan.speed))
