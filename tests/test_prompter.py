@@ -25,7 +25,10 @@ def test_prompter_scrolls_locks_and_reports_mask(qt_app, tmp_path, monkeypatch):
     p.move(100, 120)
     p.show_prompter()
     QApplication.processEvents()
-    assert masks and masks[-1][0][2] >= 600                     # место суфлёра закрашивается в записи
+    if p._native_hidden:
+        assert masks[-1] == []                                  # Windows прячет окно от записи сама
+    else:
+        assert masks and masks[-1][0][2] >= 600                 # место суфлёра закрашивается в записи
     p.play()
     p._countdown_until = 0                                      # без отсчёта 3-2-1
     t0 = time.monotonic()

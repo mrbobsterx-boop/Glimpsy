@@ -1452,7 +1452,8 @@ class EditorWindow(QMainWindow):
                     obj is not focus and not focus.isAncestorOf(obj):
                 self._release_typing()
             return False
-        if ev.type() != QEvent.Type.KeyPress or not self.isActiveWindow():
+        # клавиши — только те, что пришли в это окно (открыто несколько редакторов или диалог — не наши)
+        if ev.type() != QEvent.Type.KeyPress or not (isinstance(obj, QWidget) and obj.window() is self):
             return False
         assert isinstance(ev, QKeyEvent)
         focus = QApplication.focusWidget()
