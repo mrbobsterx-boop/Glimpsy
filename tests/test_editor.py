@@ -768,3 +768,50 @@ def test_record_voice_and_camera_into_project(tmp_path, qt_app):
         assert not w.project.voices()
     finally:
         w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_recording_keeps_editor_usable_and_plays_along(tmp_path, qt_app):
+    """Окно записи не блокирует редактор: видео само идёт вместе с записью (без звука), голос — с этого места."""
+    import json
+    import time
+
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.window import EditorWindow
+    from tests.test_audio import _FakeRecorder
+
+    QSettings("Glimpsy", "editor").setValue("record/play_along", True)
+    QSettings("Glimpsy", "editor").setValue("record/mute", True)
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "6", "-pix_fmt", "yuv420p", str(proj / "p.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 6.0}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    w.record_mic_opener = lambda: _FakeRecorder(0.4)
+    try:
+        w.show()
+        w.player.seek(1.5)
+        w.record()
+        dlg = w._rec_dialog
+        assert dlg is not None and not dlg.isModal()               # редактор не заблокирован
+        dlg._toggle()
+        dlg._t0 = time.monotonic()
+        end = time.time() + 1.5
+        while time.time() < end:
+            dlg._tick()
+            QApplication.processEvents()
+            time.sleep(0.03)
+        assert dlg._state == "recording"
+        assert w.player.playing and w.player.volume == 0.0        # видео идёт само, без звука
+        dlg._toggle()                                              # «Стоп»
+        QApplication.processEvents()
+        voice, = w.project.voices()
+        assert voice.start == pytest.approx(1.5, abs=0.05) and voice.duration > 1.0
+        assert not w.player.playing and w.player.volume == pytest.approx(0.8)
+        assert w._rec_dialog is None
+    finally:
+        w.close()

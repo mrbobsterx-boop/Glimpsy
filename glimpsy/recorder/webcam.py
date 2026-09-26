@@ -128,7 +128,12 @@ def input_args(device: str, attempt: int = 0) -> list[str]:
         # камеры Mac капризны к частоте кадров: пробуем 30, потом 15, потом 25
         fps = (30, 15, 25)[attempt % 3]
         return ["-f", "avfoundation", "-framerate", str(fps), "-i", f"{device}:none"]
-    return ["-f", "v4l2", "-i", device]
+    # Linux: большинство веб-камер без сжатия отдают 720p лишь 10 кадров в секунду — видео дёргается.
+    # Плавные 30 кадров — только в сжатом виде (MJPEG), его и просим; не умеет — попроще.
+    q = ["-f", "v4l2", "-thread_queue_size", "512"]
+    return (q + ["-input_format", "mjpeg", "-framerate", "30", "-video_size", "1280x720", "-i", device],
+            q + ["-framerate", "30", "-i", device],
+            q + ["-i", device])[attempt % 3]
 
 
 def record_command(ffmpeg: str, in_args: list[str], seconds: float, out: Path) -> list[str]:
@@ -309,23 +314,29 @@ class CameraRecorder:
 
     def start(self, out: Path) -> str:
         """Начать. Возвращает текст ошибки или пустую строку."""
-        in_args = self.input_override or input_args(self.device)
         out.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *in_args, "-an",
-               "-vf", f"scale=-2:'min({MAX_HEIGHT},ih)',fps=30,format=yuv420p",
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-movflags", "+faststart", str(out)]
-        try:
-            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.PIPE, **subprocess_flags())
-        except OSError as e:
-            return f"камера не включилась: {e}"
-        self.out, self.started_at = out, time.time()
-        time.sleep(0.3)
-        if self._proc.poll() is not None:
-            err = (self._proc.stderr.read() if self._proc.stderr else b"").decode("utf-8", "replace")
+        variants = [self.input_override] if self.input_override else [input_args(self.device, i) for i in range(3)]
+        err = ""
+        for in_args in variants:
+            # «superfast»: камера кодируется на лету и не должна отставать даже на слабом процессоре
+            cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *in_args, "-an",
+                   "-vf", f"scale=-2:'min({MAX_HEIGHT},ih)',fps=30,format=yuv420p",
+                   "-c:v", "libx264", "-preset", "superfast", "-crf", "21", "-movflags", "+faststart", str(out)]
+            try:
+                self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.PIPE, **subprocess_flags())
+            except OSError as e:
+                return f"камера не включилась: {e}"
+            self.out, self.started_at = out, time.time()
+            time.sleep(0.8)
+            if self._proc.poll() is None:
+                log.info("Камера пишет: %s", " ".join(in_args))
+                return ""
+            text = (self._proc.stderr.read() if self._proc.stderr else b"").decode("utf-8", "replace").strip()
+            err = text.splitlines()[-1] if text else ""
+            log.info("Камера не приняла %s: %s", " ".join(in_args), err)
             self._proc = None
-            return "камера не включилась" + (f": {err.strip().splitlines()[-1]}" if err.strip() else "")
-        return ""
+        return "камера не включилась" + (f": {err}" if err else "")
 
     @property
     def alive(self) -> bool:

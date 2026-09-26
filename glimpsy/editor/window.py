@@ -1338,15 +1338,47 @@ class EditorWindow(QMainWindow):
     record_mic_opener = None          # для проверок: «микрофон» и «камера» без устройств
     record_camera_input: list[str] | None = None
 
+    _rec_dialog = None
+    _rec_start = 0.0
+    _rec_volume: float | None = None
+
     def record(self) -> None:
+        """Окно записи — поверх редактора, но не мешает им пользоваться."""
         from glimpsy.editor.record_dialog import RecordDialog
 
-        self.player.pause()
-        start = self.player.t
+        if self._rec_dialog is not None:
+            self._rec_dialog.show()
+            self._rec_dialog.raise_()
+            return
         dlg = RecordDialog(self.ffmpeg, self.project.dir / "media", self, self.record_mic_opener,
                            self.record_camera_input)
-        if dlg.exec() and dlg.result_rec is not None:
-            self.add_recording(dlg.result_rec, start)
+        dlg.started.connect(self._on_record_started)
+        dlg.recorded.connect(self._on_recorded)
+        dlg.cancelled.connect(self._on_record_ended)
+        dlg.destroyed.connect(lambda: setattr(self, "_rec_dialog", None))
+        self._rec_dialog = dlg
+        dlg.show()
+
+    def _on_record_started(self) -> None:
+        dlg = self._rec_dialog
+        self._rec_start = self.player.t          # голос ляжет на ленту с этого места
+        if dlg is not None and dlg.mute.isChecked():
+            self._rec_volume = self.player.volume
+            self.player.set_volume(0.0)
+        if dlg is not None and dlg.play_along.isChecked() and not self.player.playing:
+            self.player.play()
+
+    def _on_record_ended(self) -> None:
+        if self.player.playing:
+            self.player.pause()
+        if self._rec_volume is not None:
+            self.player.set_volume(self._rec_volume)
+            self._rec_volume = None
+        self._rec_dialog = None
+
+    def _on_recorded(self, rec) -> None:
+        self._on_record_ended()
+        self.add_recording(rec, self._rec_start)
 
     def add_recording(self, rec, start: float) -> None:
         """Записанное — на дорожки «Голос» и «Камера», с места start."""

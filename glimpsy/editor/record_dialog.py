@@ -4,6 +4,10 @@
 отсчёт 3-2-1, запись, «Стоп». Голос ложится на дорожку «Голос», видео с камеры — на
 дорожку «Камера», с места курсора на ленте. Дальше это обычные элементы: их можно
 двигать, обрезать, выключить звук, удалить или отменить (Ctrl+Z).
+
+Окно записи не мешает редактору: пока идёт запись, видео можно запускать, листать,
+смотреть — и рассказывать, что происходит. По умолчанию видео в редакторе запускается
+само вместе с записью (и без звука — чтобы звук ролика не попал в микрофон).
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout,
 )
@@ -37,11 +41,19 @@ class Recording:
 
 
 class RecordDialog(QDialog):
+    started = Signal()                 # запись пошла (после отсчёта)
+    recorded = Signal(object)          # Recording — запись закончена
+    cancelled = Signal()               # закрыли, ничего не сохранив
+
     def __init__(self, ffmpeg: str, media_dir: Path, parent=None, mic_opener=None,
                  camera_input: list[str] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Запись")
         self.setMinimumWidth(460)
+        # не блокирует редактор: плавает поверх, а редактором можно пользоваться
+        self.setModal(False)
+        self.setWindowFlag(Qt.WindowType.Tool, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.ffmpeg = ffmpeg
         self.media_dir = media_dir
         self._mic_opener = mic_opener            # для проверок: «микрофон» без устройства
@@ -84,12 +96,23 @@ class RecordDialog(QDialog):
         self.mic.currentIndexChanged.connect(lambda _i: self._preview_mic())
         self.voice.toggled.connect(lambda _on: self._preview_mic())
 
+        store = QSettings("Glimpsy", "editor")
+        self.play_along = QCheckBox("Запустить видео в редакторе вместе с записью")
+        self.play_along.setChecked(store.value("record/play_along", True, type=bool))
+        self.play_along.setToolTip("Голос сразу совпадёт с тем, что вы видите. Видео можно и остановить, "
+                                   "и перемотать — редактор во время записи работает как обычно.")
+        self.mute = QCheckBox("Без звука ролика, пока идёт запись")
+        self.mute.setChecked(store.value("record/mute", True, type=bool))
+        self.mute.setToolTip("Чтобы звук ролика из колонок не попал в микрофон")
+
         form = QFormLayout()
         form.addRow(self.voice)
         form.addRow("Микрофон", self.mic)
         form.addRow("Громкость", self.level)
         form.addRow(self.camera)
         form.addRow("Камера", self.cam)
+        form.addRow(self.play_along)
+        form.addRow(self.mute)
 
         self.status = theme.mark(QLabel(""), "title")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -148,9 +171,12 @@ class RecordDialog(QDialog):
 
     def _toggle(self) -> None:
         if self._state == "idle":
+            store = QSettings("Glimpsy", "editor")
+            store.setValue("record/play_along", self.play_along.isChecked())
+            store.setValue("record/mute", self.mute.isChecked())
             self._state = "countdown"
             self._t0 = time.monotonic() + COUNTDOWN_S
-            for w in (self.voice, self.mic, self.camera, self.cam):
+            for w in (self.voice, self.mic, self.camera, self.cam, self.play_along, self.mute):
                 w.setEnabled(False)
             self.start_btn.setText("  Стоп")
             self.start_btn.setIcon(theme.icon("square", "#FFFFFF", 14))
@@ -182,6 +208,7 @@ class RecordDialog(QDialog):
         self._state = "recording"
         self._t0 = time.monotonic()
         self._stamp = stamp
+        self.started.emit()
 
     def _finish(self) -> None:
         rec = Recording()
@@ -208,7 +235,10 @@ class RecordDialog(QDialog):
             self._reset()
             return
         self.result_rec = rec
-        self.accept()
+        self._timer.stop()
+        self.hide()
+        self.recorded.emit(rec)
+        self.deleteLater()
 
     def _reset(self) -> None:
         self._state = "idle"
@@ -216,6 +246,8 @@ class RecordDialog(QDialog):
         self.start_btn.setIcon(theme.icon("circle", "#FFFFFF", 14))
         self.voice.setEnabled(True)
         self.camera.setEnabled(self._has_camera)
+        self.play_along.setEnabled(True)
+        self.mute.setEnabled(True)
         self.mic.setEnabled(self.voice.isChecked())
         self.cam.setEnabled(self.camera.isChecked())
         self._preview_mic()
@@ -241,7 +273,7 @@ class RecordDialog(QDialog):
             self.level.setValue(int(self._meter.level * 100))
 
     def reject(self) -> None:
-        # отмена во время записи — ничего не сохраняем
+        # закрыли или «Отмена» (в том числе во время записи) — ничего не сохраняем
         self._stop_meter()
         if self._cam is not None:
             clip_path = self._cam.out
@@ -250,7 +282,10 @@ class RecordDialog(QDialog):
             if clip_path is not None:
                 clip_path.unlink(missing_ok=True)
         self._timer.stop()
+        self._state = "idle"
         super().reject()
+        self.cancelled.emit()
+        self.deleteLater()
 
     def done(self, result: int) -> None:
         self._stop_meter()
