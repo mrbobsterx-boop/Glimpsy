@@ -119,10 +119,12 @@ class TrayController(QObject):
             a.setVisible(active)
         self.a_start.setVisible(state == State.STOPPED)
         tip = f"Glimpsy — {label}\n{self.a_counts.text()}"
+        if st.get("voice"):
+            tip += "\n🔴 Пишется голос"
         if st.get("error"):
             tip += f"\n{st['error'][:200]}"
         if self.tray:
-            self.tray.setIcon(state_icon(state))
+            self.tray.setIcon(state_icon(state, voice=st.get("voice", False)))
             self.tray.setToolTip(tip)
         if self.window:
             self._win_status.setText(tip)
@@ -134,7 +136,7 @@ class TrayController(QObject):
         if self.tray:
             self.tray.setIcon(state_icon("important"))
             QTimer.singleShot(1500, lambda: self.tray and self.tray.setIcon(
-                state_icon(self.status.get("state", State.STOPPED))))
+                state_icon(self.status.get("state", State.STOPPED), voice=self.status.get("voice", False))))
 
     def _flush_muted(self) -> None:
         if not self._muted:

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import copy
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
     QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -289,11 +289,31 @@ class SettingsDialog(QDialog):
         sens_row.addWidget(theme.mark(QLabel("громкая речь"), "hint"))
         sens_row.addWidget(self.a_sens, 1)
         sens_row.addWidget(theme.mark(QLabel("тихий голос"), "hint"))
-        for widget in (self.a_mic_dev, self.a_voice, self.a_sens):
+        # проверка микрофона: полоска громкости и «Слышу вас»
+        self._meter = None
+        self._meter_timer = QTimer(self)
+        self._meter_timer.setInterval(50)
+        self._meter_timer.timeout.connect(self._meter_tick)
+        self.a_test = QPushButton("Проверить")
+        self.a_test.setCheckable(True)
+        self.a_test.toggled.connect(self._mic_test)
+        self.a_level = QProgressBar()
+        self.a_level.setRange(0, 100)
+        self.a_level.setTextVisible(False)
+        self.a_level.setFixedHeight(10)
+        self.a_heard = theme.mark(QLabel(""), "hint")
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.a_test)
+        test_row.addWidget(self.a_level, 1)
+        test_row.addWidget(self.a_heard)
+        self.a_mic_dev.currentIndexChanged.connect(lambda _i: self.a_test.isChecked() and self._restart_meter())
+        for widget in (self.a_mic_dev, self.a_voice, self.a_sens, self.a_test):
             self.a_mic.toggled.connect(widget.setEnabled)
             widget.setEnabled(self.s.audio_mic)
+        self.a_mic.toggled.connect(lambda on: on or self.a_test.setChecked(False))
         f.addRow("", self.a_mic)
         f.addRow("Микрофон", self.a_mic_dev)
+        f.addRow("Проверка", test_row)
         f.addRow("", self.a_sys)
         if not system_audio_supported():
             f.addRow("", _hint("На Mac звук колонок без дополнительных программ записать нельзя — "
@@ -307,6 +327,52 @@ class SettingsDialog(QDialog):
                            "приватных приложениях микрофон не пишется. Звук остаётся только на этом "
                            "компьютере."))
         return w
+
+    def _mic_test(self, on: bool) -> None:
+        self._stop_meter()
+        if on:
+            self.a_test.setText("Стоп")
+            self._restart_meter()
+        else:
+            self.a_test.setText("Проверить")
+            self.a_level.setValue(0)
+            self.a_heard.setText("")
+
+    def _restart_meter(self) -> None:
+        from glimpsy.recorder.audio import MicMeter
+
+        self._stop_meter()
+        self._meter = MicMeter(self.a_mic_dev.currentData() or "")
+        err = self._meter.start()
+        if err:
+            self._meter = None
+            self.a_heard.setText(f"⚠ {err}")
+            return
+        self.a_heard.setText("Скажите что-нибудь…")
+        self._meter_timer.start()
+
+    def _stop_meter(self) -> None:
+        self._meter_timer.stop()
+        if self._meter is not None:
+            self._meter.stop()
+            self._meter = None
+
+    def _meter_tick(self) -> None:
+        m = self._meter
+        if m is None:
+            return
+        if m.error:
+            self._stop_meter()
+            self.a_level.setValue(0)
+            self.a_heard.setText(f"⚠ Микрофон не отвечает: {m.error[:80]}")
+            return
+        self.a_level.setValue(int(m.level * 100))
+        if m.heard:
+            self.a_heard.setText("✅ Слышу вас")
+
+    def done(self, result: int) -> None:
+        self._stop_meter()
+        super().done(result)
 
     def _find_mics(self) -> None:
         if self._mics_listed:

@@ -19,8 +19,11 @@ COLORS = {
 }
 
 
-def state_icon(state: str, size: int = 64) -> QIcon:
-    """Значок в трее: знак Glimpsy, в центре — состояние (запись, пауза, сборка…)."""
+def state_icon(state: str, size: int = 64, voice: bool = False) -> QIcon:
+    """Значок в трее: знак Glimpsy, в центре — состояние (запись, пауза, сборка…).
+
+    voice — пишется речь: красная точка в левом верхнем углу.
+    """
     import math
 
     from PySide6.QtGui import QPen
@@ -65,6 +68,11 @@ def state_icon(state: str, size: int = 64) -> QIcon:
     else:
         d = size * 0.2
         p.drawEllipse(QRectF(c - d / 2, c - d / 2, d, d))
+    if voice:
+        d = size * 0.36
+        p.setPen(QPen(QColor("#161A22"), size * 0.05))       # тёмная обводка — видна на любом фоне
+        p.setBrush(QColor("#FF3B30"))
+        p.drawEllipse(QRectF(size * 0.03, size * 0.03, d, d))
     p.end()
     return QIcon(pm)
 

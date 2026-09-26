@@ -945,7 +945,9 @@ class RecorderEngine(QObject):
             self._emit_status(time.time(), force=True)
 
     def _emit_status(self, now: float, force: bool = False) -> None:
-        if not force and now - self._status_at < 2:
+        # пишется речь — красная точка на значке; появляется и пропадает сразу, без задержки
+        voice = self._voice is not None and self.state == State.RECORDING
+        if not force and now - self._status_at < 2 and voice == self._last_status.get("voice", False):
             return
         self._status_at = now
         pool = self.pool
@@ -960,6 +962,7 @@ class RecorderEngine(QObject):
             "encoder": self.encoder.label if self.encoder else "",
             "capture": self.services.capture.name,
             "error": self._error if self.state == State.ERROR else "",
+            "voice": voice,
         }
         if st != self._last_status or force:
             self._last_status = st

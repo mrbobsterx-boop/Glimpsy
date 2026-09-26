@@ -137,3 +137,43 @@ def test_audio_start_failure_reported_once(monkeypatch):
     assert len(calls) == 1
     a._next_try = 0.0                 # прошла минута — пробуем снова, но молча
     assert a.start() == [] and len(calls) == 2
+
+
+class _FakeRecorder:
+    """«Микрофон» для проверок: отдаёт синус заданной громкости."""
+
+    def __init__(self, amp):
+        self.amp = amp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def record(self, numframes):
+        time.sleep(numframes / RATE / 4)
+        t = np.arange(numframes) / RATE
+        return (self.amp * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+
+def test_mic_meter_hears_voice_and_silence():
+    from glimpsy.recorder.audio import MicMeter
+
+    for amp, heard in ((0.3, True), (0.0005, False)):
+        m = MicMeter(opener=lambda a=amp: _FakeRecorder(a))
+        assert m.start() == ""
+        time.sleep(0.3)
+        assert m.heard is heard and m.error == ""
+        assert (m.level > 0.6) if heard else (m.level < 0.2)
+        m.stop()
+
+
+def test_tray_icon_voice_dot(qt_app):
+    from glimpsy.ui.icons import state_icon
+
+    plain = state_icon("recording").pixmap(64, 64).toImage()
+    dot = state_icon("recording", voice=True).pixmap(64, 64).toImage()
+    c = dot.pixelColor(12, 12)
+    assert c.red() > 200 and c.green() < 100            # слева сверху — красная точка
+    assert plain.pixelColor(12, 12).red() < 100

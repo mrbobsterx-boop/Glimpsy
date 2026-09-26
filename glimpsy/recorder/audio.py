@@ -282,6 +282,60 @@ class AudioCapture:
         return np.clip(mix, -1.0, 1.0)
 
 
+class MicMeter:
+    """Проверка микрофона в настройках: слушает выбранный микрофон и показывает громкость."""
+
+    def __init__(self, device: str = "", opener=None) -> None:
+        self.device = device
+        self._opener = opener                     # для проверок: готовый «рекордер» вместо устройства
+        self._rms = 0.0
+        self._peak_at = 0.0                       # когда последний раз было громче порога речи
+        self._source: _Source | None = None
+
+    def start(self) -> str:
+        """Начать слушать. Возвращает текст ошибки или пустую строку."""
+        opener = self._opener
+        if opener is None:
+            try:
+                import soundcard as sc
+                mic = sc.get_microphone(self.device) if self.device else sc.default_microphone()
+            except Exception as e:
+                log.exception("Проверка микрофона: не удалось открыть")
+                return f"микрофон не найден ({e})"
+            opener = lambda: mic.recorder(samplerate=RATE, channels=1, blocksize=1024)  # noqa: E731
+        self._source = _Source("mic-test", opener, Ring(1.0), self._feed)
+        self._source.start()
+        return ""
+
+    def _feed(self, _t0: float, data: np.ndarray) -> None:
+        rms = float(np.sqrt(np.mean(data * data))) if len(data) else 0.0
+        self._rms = rms
+        if rms >= VoiceDetector.MIN_RMS:
+            self._peak_at = time.monotonic()
+
+    @property
+    def level(self) -> float:
+        """Громкость 0…1 (шкала в децибелах: −60 дБ — 0, 0 дБ — 1)."""
+        db = 20 * np.log10(self._rms + 1e-9)
+        return float(min(1.0, max(0.0, (db + 60) / 60)))
+
+    @property
+    def heard(self) -> bool:
+        """Слышен голос (за последние 1,5 с)."""
+        return time.monotonic() - self._peak_at < 1.5 if self._peak_at else False
+
+    @property
+    def error(self) -> str:
+        s = self._source
+        return s.error if s is not None and not s.is_alive() else ""
+
+    def stop(self) -> None:
+        if self._source is not None:
+            self._source.stop_event.set()
+            self._source.join(timeout=2)
+            self._source = None
+
+
 def write_wav(path: Path, samples: np.ndarray) -> None:
     pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2")
     with wave.open(str(path), "wb") as w:
