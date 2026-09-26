@@ -294,3 +294,58 @@ def load_clips(session_dir: Path) -> list[CamClip]:
         if (session_dir / "camera" / c.file).exists():
             out.append(c)
     return out
+
+
+class CameraRecorder:
+    """Съёмка с камеры, пока не нажмут «Стоп» (кнопка «Запись» в редакторе)."""
+
+    def __init__(self, ffmpeg: str, device: str = "", input_override: list[str] | None = None) -> None:
+        self.ffmpeg = ffmpeg
+        self.device = device
+        self.input_override = input_override      # для проверок: вход FFmpeg вместо настоящей камеры
+        self.out: Path | None = None
+        self._proc: subprocess.Popen | None = None
+        self.started_at = 0.0
+
+    def start(self, out: Path) -> str:
+        """Начать. Возвращает текст ошибки или пустую строку."""
+        in_args = self.input_override or input_args(self.device)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *in_args, "-an",
+               "-vf", f"scale=-2:'min({MAX_HEIGHT},ih)',fps=30,format=yuv420p",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-movflags", "+faststart", str(out)]
+        try:
+            self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE, **subprocess_flags())
+        except OSError as e:
+            return f"камера не включилась: {e}"
+        self.out, self.started_at = out, time.time()
+        time.sleep(0.3)
+        if self._proc.poll() is not None:
+            err = (self._proc.stderr.read() if self._proc.stderr else b"").decode("utf-8", "replace")
+            self._proc = None
+            return "камера не включилась" + (f": {err.strip().splitlines()[-1]}" if err.strip() else "")
+        return ""
+
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def stop(self) -> CamClip | None:
+        """Остановить и дописать файл. Возвращает снятое или None."""
+        proc = self._proc
+        self._proc = None
+        if proc is None or self.out is None:
+            return None
+        try:
+            if proc.poll() is None and proc.stdin:
+                proc.stdin.write(b"q")               # FFmpeg аккуратно дописывает файл
+                proc.stdin.flush()
+            proc.wait(timeout=8)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+            proc.wait()
+        if not self.out.exists() or self.out.stat().st_size < 1000:
+            return None
+        w, h, dur = _probe(self.ffmpeg, self.out)
+        return CamClip(self.out.name, self.started_at, dur, w, h) if dur > 0.2 else None

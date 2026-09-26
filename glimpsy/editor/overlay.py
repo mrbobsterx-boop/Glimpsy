@@ -18,7 +18,7 @@ SHADOW_PAD = 0.08                   # запас под тень — доля м
 @dataclass
 class OverlayItem:
     id: str
-    kind: str                       # "image" или "video"
+    kind: str                       # "image", "video" или "audio" (голос, записанный в редакторе)
     src: str                        # файл в папке проекта (media/…)
     start: float                    # когда появляется (секунды ролика)
     duration: float

@@ -283,14 +283,20 @@ class AudioCapture:
 
 
 class MicMeter:
-    """Проверка микрофона в настройках: слушает выбранный микрофон и показывает громкость."""
+    """Проверка микрофона в настройках: слушает выбранный микрофон и показывает громкость.
 
-    def __init__(self, device: str = "", opener=None) -> None:
+    keep=True — ещё и записывает всё услышанное (кнопка «Запись» в редакторе), см. samples().
+    """
+
+    def __init__(self, device: str = "", opener=None, keep: bool = False) -> None:
         self.device = device
         self._opener = opener                     # для проверок: готовый «рекордер» вместо устройства
         self._rms = 0.0
         self._peak_at = 0.0                       # когда последний раз было громче порога речи
         self._source: _Source | None = None
+        self.keep = keep
+        self._chunks: list[np.ndarray] = []
+        self.started_at = 0.0                     # когда пришёл первый звук (time.time())
 
     def start(self) -> str:
         """Начать слушать. Возвращает текст ошибки или пустую строку."""
@@ -307,7 +313,11 @@ class MicMeter:
         self._source.start()
         return ""
 
-    def _feed(self, _t0: float, data: np.ndarray) -> None:
+    def _feed(self, t0: float, data: np.ndarray) -> None:
+        if self.keep:
+            if not self._chunks:
+                self.started_at = t0
+            self._chunks.append(data.copy())
         rms = float(np.sqrt(np.mean(data * data))) if len(data) else 0.0
         self._rms = rms
         if rms >= VoiceDetector.MIN_RMS:
@@ -334,6 +344,10 @@ class MicMeter:
             self._source.stop_event.set()
             self._source.join(timeout=2)
             self._source = None
+
+    def samples(self) -> np.ndarray:
+        """Всё записанное (при keep=True), float32 моно, RATE отсчётов в секунду."""
+        return np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
 
 
 def write_wav(path: Path, samples: np.ndarray) -> None:

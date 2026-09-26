@@ -53,7 +53,7 @@ class OverlayPanel(QWidget):
         full = QPushButton("На весь кадр")
         full.clicked.connect(lambda: self._emit("fill", None))
 
-        form = QFormLayout()
+        form = self.form = QFormLayout()
         form.addRow("Появляется", self.start)
         form.addRow("Длительность", self.dur)
         form.addRow("Размер", self.size)
@@ -63,11 +63,11 @@ class OverlayPanel(QWidget):
         form.addRow(self.sound)
         form.addRow("Положение", grid)
         form.addRow(full)
+        self._visual_rows = (self.size, self.opacity, self.radius, self.shadow, grid, full)
 
-        delete = QPushButton("Удалить наложение")
+        delete = self.delete_btn = QPushButton("Удалить наложение")
         delete.clicked.connect(lambda: self._emit("delete", None))
-        hint = QLabel("В просмотре наложение перетаскивается мышью, размер — уголки или колёсико. "
-                      "На ленте его можно двигать по времени и тянуть за края.")
+        hint = self.hint = QLabel()
         hint.setWordWrap(True)
         hint.setProperty("role", "hint")
 
@@ -83,20 +83,27 @@ class OverlayPanel(QWidget):
         if item is None:
             return
         self._loading = True
-        kind = "Картинка" if item.kind == "image" else "Видео"
-        self.title.setText(f"{kind} поверх ролика: {item.label}")
+        audio = item.kind == "audio"
+        kind = {"image": "Картинка", "audio": "Голос"}.get(item.kind, "Видео")
+        self.title.setText(f"Голос: {item.label}" if audio else f"{kind} поверх ролика: {item.label}")
+        for row in self._visual_rows:              # у голоса нет картинки — только время и звук
+            self.form.setRowVisible(row, not audio)
+        self.delete_btn.setText("Удалить запись голоса" if audio else "Удалить наложение")
+        self.hint.setText("На ленте голос можно двигать по времени и обрезать за края." if audio else
+                          "В просмотре наложение перетаскивается мышью, размер — уголки или колёсико. "
+                          "На ленте его можно двигать по времени и тянуть за края.")
         self.start.setValue(item.start)
-        self.dur.setMaximum(max(0.2, item.src_duration - item.in_s) if item.kind == "video" and item.src_duration
+        self.dur.setMaximum(max(0.2, item.src_duration - item.in_s) if item.kind != "image" and item.src_duration
                             else 36000)
         self.dur.setValue(item.duration)
         self.size.setValue(int(round(item.layout_for(aspect)[2] * 100)))
         self.opacity.setValue(int(round(item.opacity * 100)))
         self.radius.setValue(int(round(item.radius * 100)))
         self.shadow.setChecked(item.shadow)
-        self.sound.setVisible(item.kind == "video")
+        self.sound.setVisible(item.kind != "image")
         self.sound.setEnabled(item.has_audio)
         self.sound.setChecked(item.has_audio and not item.muted)
-        self.sound.setText("Звук видео" if item.has_audio else "Звук (в файле его нет)")
+        self.sound.setText(("Звук включён" if audio else "Звук видео") if item.has_audio else "Звук (в файле его нет)")
         self._loading = False
 
     def _emit(self, what: str, value) -> None:

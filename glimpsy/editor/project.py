@@ -28,10 +28,11 @@ MIN_ZOOM, MAX_ZOOM = 0.2, 5.0
 DEFAULT_FRAME = (1.0, 0.0, 0.0)   # масштаб, сдвиг по X и по Y (в долях ширины/высоты кадра ролика)
 
 # Дорожки над видео — сверху вниз (верхняя дорожка перекрывает нижние).
-# Субтитры и текст — надписи; наложение, медиа и камера — картинки и видео поверх ролика.
-TRACK_KINDS = ("subtitles", "text", "overlay", "media", "camera")
+# Субтитры и текст — надписи; наложение, медиа и камера — картинки и видео поверх ролика;
+# голос — записанный в редакторе звук (без картинки).
+TRACK_KINDS = ("subtitles", "text", "overlay", "media", "camera", "voice")
 TRACK_NAMES = {"subtitles": "Субтитры", "text": "Текст", "overlay": "Наложение", "media": "Медиа",
-               "camera": "Камера"}
+               "camera": "Камера", "voice": "Голос"}
 TEXT_KINDS = ("subtitles", "text")
 DEFAULT_TRACKS = ("subtitles", "text", "overlay")      # есть всегда; медиа и камера — когда понадобятся
 
@@ -246,9 +247,13 @@ class Project:
         return [x for x in pool if x.track == track_id]
 
     def overlays_by_depth(self) -> list:
-        """Наложения в порядке рисования: сначала нижние дорожки, верхние — поверх."""
+        """Картинки и видео поверх ролика в порядке рисования: сначала нижние дорожки, верхние — поверх."""
         rank = {tr.id: i for i, tr in enumerate(self.tracks)}
-        return sorted(self.overlays, key=lambda o: -rank.get(o.track, len(rank)))
+        return sorted((o for o in self.overlays if o.kind != "audio"), key=lambda o: -rank.get(o.track, len(rank)))
+
+    def voices(self) -> list:
+        """Записанный голос (звук без картинки)."""
+        return sorted((o for o in self.overlays if o.kind == "audio"), key=lambda o: o.start)
 
     def normalize_tracks(self) -> None:
         """Каждая вещь — на подходящей дорожке; обязательные дорожки есть всегда."""
@@ -261,8 +266,10 @@ class Project:
                 t.track = self.track_for("subtitles" if t.auto else "text").id
         for o in self.overlays:
             tr = self.track_by_id(o.track)
-            if tr is None or tr.kind in TEXT_KINDS:
-                o.track = self.track_for(o.track if o.track in ("camera", "media") else "overlay").id
+            audio = o.kind == "audio"
+            if tr is None or tr.kind in TEXT_KINDS or (tr.kind == "voice") != audio:
+                kind = "voice" if audio else (o.track if o.track in ("camera", "media") else "overlay")
+                o.track = self.track_for(kind).id
 
     # ---------- правки ----------
 

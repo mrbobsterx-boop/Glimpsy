@@ -703,3 +703,65 @@ def test_left_panels_and_subtitles_list(tmp_path, qt_app):
         assert not w.subs_panel.isVisible() and QSettings("Glimpsy", "editor").value("left_panel") == ""
     finally:
         w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_record_voice_and_camera_into_project(tmp_path, qt_app):
+    """«Запись» в редакторе: голос — на дорожку «Голос», камера — на «Камеру»; голос слышен в экспорте."""
+    import json
+    import time
+
+    import numpy as np
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.record_dialog import RecordDialog
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.audio import RATE
+    from tests.test_audio import _FakeRecorder
+
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "4", "-pix_fmt", "yuv420p",
+                    "-shortest", str(proj / "p.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 4.0,
+                                                              "has_audio": True}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        dlg = RecordDialog(FFMPEG, proj / "media", w, mic_opener=lambda: _FakeRecorder(0.4),
+                           camera_input=["-f", "lavfi", "-i", "testsrc=size=320x240:rate=30"])
+        dlg.camera.setChecked(True)
+        dlg._toggle()                                   # «Начать запись» → отсчёт
+        dlg._t0 = time.monotonic()                      # без ожидания 3-2-1
+        end = time.time() + 2.0
+        while time.time() < end:
+            dlg._tick()
+            QApplication.processEvents()
+            time.sleep(0.05)
+        assert dlg._state == "recording"
+        dlg._toggle()                                   # «Стоп»
+        rec = dlg.result_rec
+        assert rec is not None and rec.voice is not None and rec.camera is not None
+        assert rec.voice_s > 1.0 and rec.camera.duration > 0.5
+        w.player.seek(0.5)
+        w.add_recording(rec, 0.5)
+        voice, = w.project.voices()
+        assert w.project.track_by_id(voice.track).kind == "voice" and voice.start == 0.5
+        cams = [o for o in w.project.overlays if o.kind == "video"]
+        assert len(cams) == 1 and w.project.track_by_id(cams[0].track).kind == "camera"
+        assert voice not in w.project.overlays_by_depth()           # у голоса нет картинки
+        w.overlay_panel.set_item(voice, "16:9")
+        assert w.overlay_panel.title.text().startswith("Голос")
+
+        from glimpsy.editor.export import export_project
+        out = export_project(FFMPEG, w.project, tmp_path / "o.mp4", software_encoder())
+        pcm = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(out), "-vn", "-ac", "1", "-ar", str(RATE),
+                              "-f", "f32le", "-"], capture_output=True).stdout
+        a = np.frombuffer(pcm, np.float32)
+        loud = lambda t0, t1: float(np.sqrt(np.mean(a[int(t0 * RATE):int(t1 * RATE)] ** 2)))  # noqa: E731
+        assert loud(0.0, 0.4) < 0.01 and loud(0.8, 1.2) > 0.1     # голос звучит с 0,5 с
+        w.undo()
+        assert not w.project.voices()
+    finally:
+        w.close()

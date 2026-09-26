@@ -44,16 +44,17 @@ COL_DROP = QColor(theme.ACCENT)
 COL_TEXT = QColor("#D0932F")
 COL_OVL = QColor("#7E62D6")
 TRACK_COLORS = {"subtitles": QColor("#B8762A"), "text": COL_TEXT, "overlay": COL_OVL,
-                "media": QColor("#3E7FC4"), "camera": QColor("#C2517A")}
+                "media": QColor("#3E7FC4"), "camera": QColor("#C2517A"), "voice": QColor("#3A9E8C")}
 COL_MUSIC = QColor("#2E9A6E")
 COL_LANE = QColor(255, 255, 255, 9)
 LANE_ICONS = {"subtitles": "captions", "text": "type", "overlay": "layers", "media": "image-plus",
-              "camera": "video", "music": "music"}
+              "camera": "video", "voice": "mic", "music": "music"}
 LANE_HINTS = {"subtitles": "Субтитры — кнопка «Субтитры» слева",
               "text": "Текст — кнопка «Текст» слева или клавиша T",
               "overlay": "Наложение — кнопка слева или перетащите сюда картинку или видео",
               "media": "Медиа — кнопка «Медиа» слева, панель «Файлы» или перетащите сюда файл",
-              "camera": "Камера — кнопка «Запись» слева"}
+              "camera": "Камера — кнопка «Запись» слева",
+              "voice": "Голос — кнопка «Запись» слева"}
 MIN_TEXT_S = 0.2
 
 
@@ -238,7 +239,8 @@ class TimelineWidget(QWidget):
             p.setBrush(TRACK_COLORS[tr.kind])
             p.drawRoundedRect(r, 6, 6)
             label = (t.text.strip().splitlines() or [""])[0] if kind == "text" else t.label
-            self._chip_text(p, r, "text" if kind == "text" else ("overlay" if t.kind == "image" else "video"), label)
+            chip = "text" if kind == "text" else {"image": "overlay", "audio": "voice"}.get(t.kind, "video")
+            self._chip_text(p, r, chip, label)
         # название дорожки — маленькой меткой у левого края
         name_w = p.fontMetrics().horizontalAdvance(tr.name) + 10
         tag = QRectF(6, y + 3, name_w, TEXT_H - 6)
@@ -276,7 +278,7 @@ class TimelineWidget(QWidget):
 
     def _chip_text(self, p: QPainter, r: QRectF, kind: str, text: str) -> None:
         """Иконка и подпись внутри элемента дорожки."""
-        ic = {"text": "type", "overlay": "image-plus", "video": "film", "music": "music"}[kind]
+        ic = {"text": "type", "overlay": "image-plus", "video": "film", "music": "music", "voice": "mic"}[kind]
         p.save()
         p.setClipRect(r.adjusted(2, 0, -2, 0))
         p.drawPixmap(QPointF(r.left() + 6, r.center().y() - 6), theme.pixmap(ic, "#FFFFFF", 12))
@@ -529,7 +531,8 @@ class TimelineWidget(QWidget):
         if i < 0:
             return
         cur, dst = self.project.track_by_id(self._lane), self.project.tracks[i]
-        if cur is None or dst.id == cur.id or item_kind(dst) != item_kind(cur):
+        if cur is None or dst.id == cur.id or item_kind(dst) != item_kind(cur) or \
+                (dst.kind == "voice") != (cur.kind == "voice"):          # звук — только к звуку
             return
         item.track = dst.id
         if dst.kind == "subtitles" or cur.kind == "subtitles":
@@ -542,7 +545,7 @@ class TimelineWidget(QWidget):
     def _track_menu(self, tr: Track, at) -> None:
         m = QMenu(self)
         add = m.addMenu(theme.icon("plus", size=16), "Новая дорожка")
-        for kind in ("text", "subtitles", "overlay", "media", "camera"):
+        for kind in ("text", "subtitles", "overlay", "media", "camera", "voice"):
             add.addAction(theme.icon(LANE_ICONS[kind], size=16), TRACK_NAMES[kind],
                           lambda _=False, k=kind: self.add_track(k, tr.id if k == tr.kind else None))
         m.addAction(theme.icon("type", size=16), "Переименовать…", lambda: self._rename_track(tr))
@@ -575,7 +578,7 @@ class TimelineWidget(QWidget):
     def _drag_lane_item(self, t, dt: float) -> None:
         """Сдвиг текста/наложения по времени или изменение длины за край."""
         s0, d0, in0 = self._lane_orig
-        video = getattr(t, "kind", "") == "video"
+        video = getattr(t, "kind", "") in ("video", "audio")      # у записи есть длина — дальше не растянуть
         limit = (t.src_duration - in0) if video and t.src_duration else float("inf")
         if self._mode == "l_move":
             t.start = max(0.0, s0 + dt)

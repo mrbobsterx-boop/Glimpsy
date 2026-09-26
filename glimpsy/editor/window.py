@@ -289,6 +289,8 @@ class EditorWindow(QMainWindow):
         left("music", "music", "Музыка", "Фоновая музыка на весь ролик", self.music_lib)
         tool("square-split-horizontal", "До/после", "Вставка «Было → стало»: шторка, таймлапс или стоп-кадр",
              self.before_after)
+        tool("mic", "Запись", "Записать голос, камеру или то и другое — прямо в ролик, с места курсора",
+             self.record)
         rl.addStretch(1)
         tool("chart-column", "Статистика", "Сколько работали и где — только для вас", self.show_stats)
         self.shortcuts = ShortcutsPanel()
@@ -376,7 +378,7 @@ class EditorWindow(QMainWindow):
         add_track = theme.mark(QPushButton(theme.icon("plus", size=16), " Дорожка"), "ghost")
         add_track.setToolTip("Добавить дорожку — сколько угодно; правый щелчок по дорожке — ещё действия")
         track_menu = QMenu(add_track)
-        for kind in ("text", "subtitles", "overlay", "media", "camera"):
+        for kind in ("text", "subtitles", "overlay", "media", "camera", "voice"):
             track_menu.addAction(theme.icon(LANE_ICONS[kind], size=16), TRACK_NAMES[kind],
                                  lambda _=False, k=kind: self.timeline.add_track(k))
         add_track.setMenu(track_menu)
@@ -1330,6 +1332,45 @@ class EditorWindow(QMainWindow):
         self.timeline.select(clip.id)
         self._changed()
         self.player.seek(self.project.start_of(index))
+
+    # ---------- запись голоса и камеры ----------
+
+    record_mic_opener = None          # для проверок: «микрофон» и «камера» без устройств
+    record_camera_input: list[str] | None = None
+
+    def record(self) -> None:
+        from glimpsy.editor.record_dialog import RecordDialog
+
+        self.player.pause()
+        start = self.player.t
+        dlg = RecordDialog(self.ffmpeg, self.project.dir / "media", self, self.record_mic_opener,
+                           self.record_camera_input)
+        if dlg.exec() and dlg.result_rec is not None:
+            self.add_recording(dlg.result_rec, start)
+
+    def add_recording(self, rec, start: float) -> None:
+        """Записанное — на дорожки «Голос» и «Камера», с места start."""
+        from glimpsy.editor.overlay import camera_item
+
+        stamp = time.strftime("%H:%M")
+        self.history.push(self.project.to_dict())
+        last = None
+        if rec.voice is not None:
+            v = OverlayItem(new_id(), "audio", str(rec.voice.relative_to(self.project.dir)), round(start, 2),
+                            round(rec.voice_s, 2), src_duration=rec.voice_s, has_audio=True,
+                            label=f"Голос {stamp}", track=self.project.track_for("voice").id)
+            self.project.overlays.append(v)
+            last = v
+        if rec.camera is not None and rec.camera_path is not None:
+            c = rec.camera
+            cam = camera_item(new_id(), str(rec.camera_path.relative_to(self.project.dir)),
+                              start + rec.camera_offset, c.duration, c.width, c.height, f"Камера {stamp}")
+            cam.track = self.project.track_for("camera").id
+            self.project.overlays.append(cam)
+            last = cam
+        if last is not None:
+            self.timeline.select_overlay(last.id)
+        self._layer_changed()
 
     def show_stats(self) -> None:
         from glimpsy.editor.stats_dialog import StatsDialog

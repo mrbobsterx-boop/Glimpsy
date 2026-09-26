@@ -95,6 +95,14 @@ class TimelinePlayer(QObject):
         self._music_src: str | None = None
         self._music_ready = False
         self._music_ticks = 0
+        # записанный в редакторе голос (дорожки «Голос»)
+        self.voice = QMediaPlayer(self)
+        self.voice_audio = QAudioOutput(self)
+        self.voice.setAudioOutput(self.voice_audio)
+        self.voice.errorOccurred.connect(lambda e, s: log.warning("Голос: %s", s))
+        self.voice.mediaStatusChanged.connect(self._on_voice_status)
+        self._voice_src: str | None = None
+        self._voice_ready = False
 
     @property
     def deck(self) -> _Deck:
@@ -128,6 +136,7 @@ class TimelinePlayer(QObject):
             d.mp.pause()
             d.want = (d.want[0], False) if d.want else None
         self.music.pause()
+        self.voice.pause()
         self.playing_changed.emit(False)
 
     def seek(self, t: float) -> None:
@@ -148,6 +157,7 @@ class TimelinePlayer(QObject):
         for d in self.decks:
             d.audio.setVolume(v)
         self._music_volume()
+        self.voice_audio.setVolume(v)
 
     # ---------- музыка ----------
 
@@ -169,6 +179,7 @@ class TimelinePlayer(QObject):
         self.music_audio.setVolume(self.volume * (m.volume if m is not None else 0.0))
 
     def _music_sync(self, force: bool = False) -> None:
+        self._voice_sync(force)                         # голос сверяется с лентой вместе с музыкой
         m = self.project.music
         path = str(self.project.dir / m.src) if m is not None else None
         if path != self._music_src:
@@ -196,6 +207,33 @@ class TimelinePlayer(QObject):
             self._music_sync(force=True)
         elif status == S.EndOfMedia and self.playing:
             self._music_sync(force=True)                # повтор трека
+
+    # ---------- голос ----------
+
+    def _voice_sync(self, force: bool = False) -> None:
+        voices = self.project.voices() if hasattr(self.project, "voices") else []
+        item = next((v for v in voices if v.start <= self.t < v.end and not v.muted), None)
+        path = str(self.project.dir / item.src) if item is not None else self._voice_src
+        if path != self._voice_src:
+            self._voice_src, self._voice_ready = path, False
+            self.voice.stop()
+            self.voice.setSource(QUrl.fromLocalFile(path) if path else QUrl())
+        if item is None or not self.playing:
+            self.voice.pause()
+            return
+        if not self._voice_ready:
+            return                                      # догоним, когда файл откроется
+        target = self.t - item.start + item.in_s
+        drift = abs(self.voice.position() / 1000.0 - target)
+        if force or drift > 0.2 or self.voice.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            if force or drift > 0.2:
+                self.voice.setPosition(int(target * 1000))
+            self.voice.play()
+
+    def _on_voice_status(self, status) -> None:
+        if status in (S.LoadedMedia, S.BufferedMedia) and not self._voice_ready:
+            self._voice_ready = True
+            self._voice_sync(force=True)
 
     # ---------- внутреннее ----------
 
@@ -282,7 +320,7 @@ class TimelinePlayer(QObject):
             self._advance()
             return
         self._music_ticks += 1
-        if self._music_ticks % 15 == 0:                 # раз в ~0,5 с сверяем музыку с лентой
+        if self._music_ticks % 5 == 0:                  # раз в ~0,15 с сверяем музыку и голос с лентой
             self._music_sync()
         self.position.emit(self.t)
 
@@ -314,3 +352,4 @@ class TimelinePlayer(QObject):
         for d in self.decks:
             d.mp.stop()
         self.music.stop()
+        self.voice.stop()

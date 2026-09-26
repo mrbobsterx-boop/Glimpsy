@@ -263,7 +263,8 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         lst.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = work / "final.mp4"
-        layered = bool(text_layers or overlay_layers or getattr(project, "music", None))
+        voices = project.voices() if hasattr(project, "voices") else []
+        layered = bool(text_layers or overlay_layers or getattr(project, "music", None) or voices)
         joined = work / "joined.mp4" if layered else tmp
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
               "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)], cancel)
@@ -326,6 +327,16 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
         if it.has_audio and not it.muted:
             parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,adelay=delays={S * 1000:.0f}:all=1[a{k}]")
             audio.append(f"[a{k}]")
+
+    # записанный голос (дорожки «Голос») — только звук
+    for it in (project.voices() if hasattr(project, "voices") else []):
+        S, E = it.start, min(it.end, total)
+        if S >= total or it.muted:
+            continue
+        cmd.extend(["-ss", f"{it.in_s:.3f}", "-t", f"{E - S:.3f}", "-i", str(project.dir / it.src)])
+        n += 1
+        parts.append(f"[{n}:a]asetpts=PTS-STARTPTS,adelay=delays={S * 1000:.0f}:all=1[a{n}]")
+        audio.append(f"[a{n}]")
 
     for layer in texts:
         k = still(layer.png)
