@@ -148,23 +148,29 @@ def test_screens_record_in_parallel_audio_goes_to_active(tmp_path):
     eng.set_streams(screens)
     eng._set_streams(eng.streams)
 
-    def run_for(seconds):
-        end = time.time() + seconds
+    def run_until(cond, timeout=15.0):
+        """Крутим движок, пока не выполнится условие (под нагрузкой FFmpeg стартует дольше)."""
+        end = time.time() + timeout
         while time.time() < end:
             eng._tick(time.time())
+            if cond():
+                return True
             time.sleep(0.1)
+        return False
+
+    def bg_alive(*ids):
+        return set(eng._bg) == set(ids) and all(eng._bg[i].run.alive for i in ids)
 
     try:
-        run_for(3)
-        assert eng._stream == 1 and eng.run is not None and eng.run.monitor.index == 1
-        assert set(eng._bg) == {2} and eng._bg[2].run.alive              # второй экран — в фоне
+        assert run_until(lambda: eng.run is not None and eng.run.alive and bg_alive(2))
+        assert eng._stream == 1 and eng.run.monitor.index == 1           # второй экран — в фоне
         first, second = eng.run, eng._bg[2].run
         Services.cursor.pos = (400.0, 10.0)                              # курсор на второй экран
-        run_for(2)
-        assert eng._stream == 2 and eng.run is second                    # тот же процесс — без разрыва
-        assert set(eng._bg) == {1} and eng._bg[1].run is first
-        run_for(2)
-        now = time.time()
+        assert run_until(lambda: eng._stream == 2)
+        assert eng.run is second and eng._bg[1].run is first              # тот же процесс — без разрыва
+        assert run_until(lambda: (first.available_to or 0) - (first.available_from or 1e18) >= 3
+                         and (second.available_to or 0) - (second.available_from or 1e18) >= 3)
+        now = min(first.available_to, second.available_to)
         eng._bg_save(eng._bg[1], now - 3, now)
         eng._save(now - 3, now, priority=False)
         assert eng.pools[1].count == 1 and eng.pools[2].count == 1
@@ -173,12 +179,11 @@ def test_screens_record_in_parallel_audio_goes_to_active(tmp_path):
         # добавили поток-окно: экраны уходят в фон (только картинка), главный — окно впереди
         eng.set_streams([*screens, StreamSpec(3, "Рисунок", "window", wid=5)])
         eng._set_streams(eng.streams)
-        run_for(2)
-        assert eng._stream == 3 and not eng._screen_active
-        assert set(eng._bg) == {1, 2}
+        assert run_until(lambda: eng._stream == 3 and eng.run is not None and bg_alive(1, 2))
+        assert not eng._screen_active
         Services.active_window.win = WindowInfo("figma", "Документ", wid=9)
-        run_for(1.5)
-        assert eng._waiting and eng.run is None and set(eng._bg) == {1, 2}  # окна нет — экраны пишутся
+        assert run_until(lambda: eng._waiting and eng.run is None)
+        assert run_until(lambda: bg_alive(1, 2))                          # окна нет — экраны пишутся
         eng._emit_status(time.time(), force=True)
         assert eng._last_status["parallel"] == ["Экран 1", "Экран 2"]
     finally:
