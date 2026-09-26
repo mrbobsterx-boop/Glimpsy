@@ -363,10 +363,12 @@ class Project:
 
 
 class History:
-    """Отмена и повтор. Храним снимки проекта до каждой правки.
+    """Отмена и повтор — одна на всё, что меняет проект. Храним снимки проекта до каждой правки.
 
     Если одно и то же поле меняется много раз подряд (например, крутят скорость),
     это считается одной правкой — чтобы Ctrl+Z не приходилось жать 20 раз.
+    Снимок делается «на всякий случай» и перед простым щелчком (выбрали текст, но не сдвинули) —
+    такие пустые шаги при отмене пропускаются, поэтому Ctrl+Z всегда отменяет настоящую правку.
     """
 
     LIMIT = 200
@@ -377,30 +379,47 @@ class History:
         self._redo: list[dict] = []
         self._last_key: str | None = None
         self._last_time = 0.0
+        self._restored: dict | None = None      # что вернули последней отменой/повтором
 
     def push(self, state: dict, key: str | None = None) -> None:
         now = time.monotonic()
         if key and key == self._last_key and now - self._last_time < self.MERGE_WINDOW_S:
             self._last_time = now
             return
+        self._last_key, self._last_time = key, now
+        if self._undo and self._undo[-1] == state:
+            return                               # тот же снимок ещё раз — ничего нового
         self._undo.append(copy.deepcopy(state))
         del self._undo[:-self.LIMIT]
-        self._redo.clear()
-        self._last_key, self._last_time = key, now
+        # «Повтор» не сбрасываем сразу: снимок мог быть перед щелчком без правки.
+        # Он станет недействительным, как только проект правда изменится (см. redo).
 
     def undo(self, current: dict) -> dict | None:
-        if not self._undo:
-            return None
-        self._redo.append(copy.deepcopy(current))
-        self._last_key = None
-        return self._undo.pop()
+        self._drop_stale_redo(current)
+        while self._undo:
+            prev = self._undo.pop()
+            if prev != current:
+                self._redo.append(copy.deepcopy(current))
+                self._last_key = None
+                self._restored = copy.deepcopy(prev)
+                return prev
+        return None
 
     def redo(self, current: dict) -> dict | None:
-        if not self._redo:
-            return None
-        self._undo.append(copy.deepcopy(current))
-        self._last_key = None
-        return self._redo.pop()
+        self._drop_stale_redo(current)
+        while self._redo:
+            nxt = self._redo.pop()
+            if nxt != current:
+                self._undo.append(copy.deepcopy(current))
+                self._last_key = None
+                self._restored = copy.deepcopy(nxt)
+                return nxt
+        return None
+
+    def _drop_stale_redo(self, current: dict) -> None:
+        """После отмены что-то поменяли — повторять уже нечего."""
+        if self._redo and self._restored is not None and current != self._restored:
+            self._redo.clear()
 
     @property
     def can_undo(self) -> bool:
@@ -409,6 +428,10 @@ class History:
     @property
     def can_redo(self) -> bool:
         return bool(self._redo)
+
+    def settle(self, current: dict) -> None:
+        """Проект изменился — если это не отмена/повтор, «повтор» больше не действует."""
+        self._drop_stale_redo(current)
 
 
 def list_projects(root: Path) -> list[Path]:

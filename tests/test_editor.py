@@ -496,3 +496,67 @@ def test_library_panel_and_back_to_sessions(tmp_path, qt_app, monkeypatch):
     finally:
         w.library.set_open(False)
         w.close()
+
+
+def test_history_skips_empty_steps_and_keeps_redo():
+    """Снимки «на всякий случай» (щелчок без правки) не мешают Ctrl+Z и Ctrl+Y."""
+    from glimpsy.editor.project import History
+
+    h = History()
+    h.push({"v": 1})                      # правка 1 → 2
+    cur = {"v": 2}
+    h.push(cur)                           # щелчок по тексту: снимок, но ничего не поменялось
+    h.push(cur)
+    assert h.undo(cur) == {"v": 1}        # сразу настоящая правка
+    assert h.redo({"v": 1}) == {"v": 2}
+    assert h.undo({"v": 2}) == {"v": 1}
+    h.push({"v": 1})                      # снова щелчок без правки — повтор не пропадает
+    assert h.can_redo and h.redo({"v": 1}) == {"v": 2}
+    h.undo({"v": 2})
+    h.settle({"v": 5})                    # а настоящая новая правка — отменяет «повтор»
+    assert not h.can_redo
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_editor_keys_cut_jump_and_leaving_text(tmp_path, qt_app):
+    """Ctrl+→/← — по склейкам; щелчок мимо поля текста или Esc — ввод закончен, клавиши снова работают."""
+    import json
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QPlainTextEdit
+
+    from glimpsy.editor.window import EditorWindow
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "3", "-pix_fmt", "yuv420p", str(proj / "p.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 3.0}] * 3}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        QApplication.processEvents()
+        w.player.seek(1.0)
+        QTest.keyClick(w, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+        assert w.player.t == pytest.approx(3.0) and w.timeline.selected == w.project.clips[1].id
+        QTest.keyClick(w, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier)
+        assert w.player.t == pytest.approx(6.0)
+        QTest.keyClick(w, Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier)
+        assert w.player.t == pytest.approx(3.0)
+
+        QTest.keyClick(w, Qt.Key.Key_T)
+        box = QApplication.focusWidget()
+        assert isinstance(box, QPlainTextEdit)
+        QTest.keyClicks(box, "Hello")
+        QTest.mouseClick(w.timeline, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))   # мимо поля
+        assert not isinstance(QApplication.focusWidget(), QPlainTextEdit)
+        n = len(w.project.texts)
+        QTest.keyClick(QApplication.focusWidget() or w, Qt.Key.Key_T)            # T — снова «добавить текст»
+        assert len(w.project.texts) == n + 1
+        QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)
+        assert not isinstance(QApplication.focusWidget(), QPlainTextEdit)
+        QTest.keyClick(QApplication.focusWidget() or w, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert len(w.project.texts) == n
+    finally:
+        w.close()

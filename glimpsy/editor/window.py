@@ -549,6 +549,8 @@ class EditorWindow(QMainWindow):
         self._save_timer.start()
 
     def _save(self) -> None:
+        self.history.settle(self.project.to_dict())
+        self._update_actions()
         try:
             self.project.save()
         except OSError:
@@ -1264,12 +1266,46 @@ class EditorWindow(QMainWindow):
 
     # ---------- клавиши (в любой раскладке) ----------
 
+    def _release_typing(self) -> None:
+        """Перестать печатать: фокус уходит из поля — буквы снова работают как горячие клавиши."""
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QAbstractSpinBox, QPlainTextEdit, QTextEdit)):
+            focus.clearFocus()
+            self.timeline.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def jump_cut(self, direction: int) -> None:
+        """Ctrl+← / Ctrl+→: к предыдущей / следующей склейке (началу фрагмента)."""
+        cuts, t = [0.0], 0.0
+        for c in self.project.clips:
+            t += c.duration
+            cuts.append(t)
+        now, eps = self.player.t, 1e-3
+        target = (next((x for x in cuts if x > now + eps), None) if direction > 0
+                  else next((x for x in reversed(cuts) if x < now - eps), None))
+        if target is None:
+            return
+        self.player.pause()
+        self.player.seek(target)
+        idx = cuts.index(target)
+        if idx < len(self.project.clips):
+            self.timeline.select(self.project.clips[idx].id)
+
     def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QEvent.Type.MouseButtonPress and isinstance(obj, QWidget) and obj.window() is self:
+            # щелчок мимо поля ввода — перестаём печатать (сам щелчок работает как обычно)
+            focus = QApplication.focusWidget()
+            if isinstance(focus, (QLineEdit, QAbstractSpinBox, QPlainTextEdit, QTextEdit)) and \
+                    obj is not focus and not focus.isAncestorOf(obj):
+                self._release_typing()
+            return False
         if ev.type() != QEvent.Type.KeyPress or not self.isActiveWindow():
             return False
         assert isinstance(ev, QKeyEvent)
         focus = QApplication.focusWidget()
         typing = isinstance(focus, (QLineEdit, QAbstractSpinBox, QPlainTextEdit, QTextEdit))
+        if typing and ev.key() == Qt.Key.Key_Escape:
+            self._release_typing()
+            return True
         if self.preview._pick and ev.key() == Qt.Key.Key_Escape:
             self.preview._end_pick(None)           # отмена выбора области
             return True
@@ -1296,6 +1332,9 @@ class EditorWindow(QMainWindow):
                 return True
             if letter == "v" and not typing:
                 self.paste()
+                return True
+            if ev.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and not typing:
+                self.jump_cut(1 if ev.key() == Qt.Key.Key_Right else -1)
                 return True
             return False
         # в числовых полях буквы не вводятся — там буквенные клавиши работают как обычно
