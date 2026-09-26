@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QMenu, QButtonGroup, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
@@ -148,6 +148,7 @@ class EditorWindow(QMainWindow):
         QTimer.singleShot(0, self._initial)
 
     def _initial(self) -> None:
+        self._restore_left_panel()
         self.timeline.fit()
         self.player.seek(0.0)
         self._update_actions()
@@ -158,6 +159,7 @@ class EditorWindow(QMainWindow):
         """Сверху — логотип, формат и «Экспорт»; слева — инструменты; в центре — просмотр;
         справа — свойства; внизу — лента с её кнопками."""
         from glimpsy.editor.library_panel import LibraryPanel
+        from glimpsy.editor.subtitles_panel import SubtitlesPanel
         from glimpsy.editor.shortcuts_panel import ShortcutsPanel
 
         # --- действия (одни и те же для кнопок и горячих клавиш) ---
@@ -251,19 +253,40 @@ class EditorWindow(QMainWindow):
             rl.addWidget(b)
             return b
 
-        # отдельный «миниатюрщик» — сотни файлов в папке не задерживают кадры на ленте
-        self.library = LibraryPanel(Thumbnailer(self.ffmpeg), self.fallback_output)
-        files_btn = tool("folder-open", "Файлы", "Файлы с компьютера: видео, фото и музыка под рукой", checkable=True)
-        files_btn.setChecked(self.library.is_open())
-        files_btn.toggled.connect(self.library.set_open)
-        self.library.close_requested.connect(lambda: files_btn.setChecked(False))
+        # панели слева: открывается одна, повторный щелчок по кнопке — свернуть.
+        # Свой «миниатюрщик» у файловых панелей — сотни файлов не задерживают кадры на ленте.
+        lib_thumbs = Thumbnailer(self.ffmpeg)
+        self.library = LibraryPanel(lib_thumbs, self.fallback_output, mode="files")
+        self.media_lib = LibraryPanel(lib_thumbs, self.fallback_output, mode="media", open_file=self.add_media_dialog)
+        self.overlay_lib = LibraryPanel(lib_thumbs, self.fallback_output, mode="overlay",
+                                        open_file=self.add_overlay_dialog)
+        self.music_lib = LibraryPanel(lib_thumbs, self.fallback_output, mode="music", open_file=self.add_music_dialog)
+        self.subs_panel = SubtitlesPanel()
         self.library.add_requested.connect(lambda files: self.add_overlays(files, self.player.t, "media"))
-        tool("image-plus", "Медиа", "Видео или фото на дорожку «Медиа» — с места курсора (M). "
-             "Вставить между фрагментами видео — перетащите файл на дорожку видео или Ctrl+V", self.add_media_dialog)
+        self.media_lib.add_requested.connect(lambda files: self.add_overlays(files, self.player.t, "media"))
+        self.overlay_lib.add_requested.connect(lambda files: self.add_overlays(files, self.player.t, "overlay"))
+        self.music_lib.add_requested.connect(lambda files: files and self.set_music(Path(files[-1])))
+        self.subs_panel.recognize_requested.connect(self.auto_subtitles)
+        self.subs_panel.add_requested.connect(self.add_subtitle)
+        self.subs_panel.selected.connect(self.timeline.select_text)
+        self.subs_panel.text_edited.connect(lambda tid, text: self._on_text_edit(tid, "text", text))
+        self.subs_panel.delete_requested.connect(self._delete_texts)
+        self._left: dict[str, tuple[QToolButton, QWidget]] = {}
+
+        def left(name: str, ic: str, text: str, tip: str, panel) -> None:
+            b = tool(ic, text, tip, checkable=True)
+            b.toggled.connect(lambda on, n=name: self._toggle_left(n, on))
+            panel.close_requested.connect(lambda: b.setChecked(False))
+            self._left[name] = (b, panel)
+
+        left("files", "folder-open", "Файлы", "Файлы с компьютера: видео, фото и музыка под рукой", self.library)
+        left("media", "image-plus", "Медиа", "Видео и фото на дорожку «Медиа» — на весь кадр, с места курсора (M). "
+             "Вставить между фрагментами видео — перетащите файл на дорожку видео или Ctrl+V", self.media_lib)
         tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
-        tool("captions", "Субтитры", "Автосубтитры: распознать речь (на этом компьютере)", self.auto_subtitles)
-        tool("layers", "Наложение", "Картинка или видео поверх ролика", self.add_overlay_dialog)
-        tool("music", "Музыка", "Фоновая музыка на весь ролик", self.add_music_dialog)
+        left("subtitles", "captions", "Субтитры", "Все субтитры списком: распознать речь, исправить, удалить",
+             self.subs_panel)
+        left("overlay", "layers", "Наложение", "Картинка или видео поверх ролика", self.overlay_lib)
+        left("music", "music", "Музыка", "Фоновая музыка на весь ролик", self.music_lib)
         tool("square-split-horizontal", "До/после", "Вставка «Было → стало»: шторка, таймлапс или стоп-кадр",
              self.before_after)
         rl.addStretch(1)
@@ -389,7 +412,8 @@ class EditorWindow(QMainWindow):
         body.setContentsMargins(0, 0, 8, 8)
         body.setSpacing(6)
         body.addWidget(rail)
-        body.addWidget(self.library)
+        for _b, panel in self._left.values():
+            body.addWidget(panel)
         body.addWidget(self.shortcuts)
         body.addWidget(root, 1)
         central = QWidget()
@@ -400,6 +424,35 @@ class EditorWindow(QMainWindow):
         cv.addLayout(body, 1)
         self.setCentralWidget(central)
         self.setStyleSheet(EDITOR_QSS)
+
+    # ---------- панели слева ----------
+
+    def _restore_left_panel(self) -> None:
+        store = QSettings("Glimpsy", "editor")
+        name = store.value("left_panel", "", type=str)
+        if not name and store.value("library_open", False, type=bool):
+            name = "files"                    # раньше была только панель «Файлы»
+        if name in self._left:
+            self._left[name][0].setChecked(True)
+
+    def _toggle_left(self, name: str, on: bool) -> None:
+        btn, panel = self._left[name]
+        if on:
+            for other, (b, _p) in self._left.items():
+                if other != name and b.isChecked():
+                    b.setChecked(False)
+            panel.set_open(True)
+            if panel is self.subs_panel:
+                self.subs_panel.refresh(self.project, self.timeline.selected_text)
+            QSettings("Glimpsy", "editor").setValue("left_panel", name)
+        else:
+            panel.set_open(False)
+            if not any(b.isChecked() for b, _p in self._left.values()):
+                QSettings("Glimpsy", "editor").setValue("left_panel", "")
+
+    def toggle_left(self, name: str) -> None:
+        b = self._left[name][0]
+        b.setChecked(not b.isChecked())
 
     def _update_actions(self) -> None:
         self.a_undo.setEnabled(self.history.can_undo)
@@ -563,6 +616,7 @@ class EditorWindow(QMainWindow):
             self.overlay_panel.set_item(ov, self.project.aspect)
         self._sync_preview()
         self._update_actions()
+        self.subs_panel.refresh(self.project, self.timeline.selected_text)
         self._save_timer.start()
 
     def _save(self) -> None:
@@ -725,6 +779,27 @@ class EditorWindow(QMainWindow):
         self._text_changed()
         self.text_panel.focus_text()
 
+    def add_subtitle(self) -> None:
+        """Новый субтитр в месте курсора, на дорожку «Субтитры»."""
+        self.player.pause()
+        total = self.project.total
+        start = min(self.player.t, max(0.0, total - 0.5))
+        item = TextItem(new_id(), "Субтитр", round(start, 2), round(min(2.0, max(0.5, total - start)), 2),
+                        auto=True, track=self.project.track_for("subtitles").id)
+        self.history.push(self.project.to_dict())
+        self.project.texts.append(item)
+        self.timeline.select_text(item.id)
+        self._text_changed()
+        self.text_panel.focus_text()
+
+    def _delete_texts(self, ids: list) -> None:
+        if not ids:
+            return
+        self.history.push(self.project.to_dict())
+        self.project.texts = [t for t in self.project.texts if t.id not in set(ids)]
+        self.timeline.select_text(None)
+        self._text_changed()
+
     def _on_text_select(self, text_id) -> None:
         item = self.project.text_by_id(text_id) if text_id else None
         if item is None:
@@ -735,11 +810,13 @@ class EditorWindow(QMainWindow):
                 self.player.seek(item.start + min(0.5, item.duration / 2))
             self.text_panel.set_item(item, effective_style(item, self.project.text_style))
             self.side.setCurrentWidget(self.text_panel)
+        self.subs_panel.show_current(text_id)
         self._sync_preview()
         self._update_actions()
 
     def _text_changed(self) -> None:
         """Правка текста — без перемотки видео, только перерисовка и сохранение."""
+        self.subs_panel.refresh(self.project, self.timeline.selected_text)
         self.timeline.prune_selection()
         self.timeline.update()
         item = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
@@ -1379,7 +1456,7 @@ class EditorWindow(QMainWindow):
                 not ev.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
             action = {"z": self.toggle_autozoom, "c": self.toggle_click_fx, "t": self.add_text,
                       "f": lambda: self._frame_key("frame_fit"), "g": lambda: self._frame_key("frame_fill"),
-                      "m": self.add_media_dialog, "s": self.split}.get(letter or "")
+                      "m": lambda: self.toggle_left("media"), "s": self.split}.get(letter or "")
             if action is not None and not keys.has_shift(ev):
                 action()
                 return True

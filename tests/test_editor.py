@@ -650,3 +650,56 @@ def test_timeline_tracks_add_move_drop(tmp_path, qt_app):
         assert len(w.project.tracks) == n - 1                             # дорожка «Медиа» ушла вместе с файлом
     finally:
         w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_left_panels_and_subtitles_list(tmp_path, qt_app):
+    """Панели слева открываются по одной; субтитры — списком, правка и удаление прямо в нём."""
+    import json
+    import os
+
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.window import EditorWindow
+    QSettings("Glimpsy", "editor").setValue("left_panel", "")
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "8", "-pix_fmt", "yuv420p", str(proj / "p.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 8.0}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.resize(1280, 820)
+        w.show()
+        QApplication.processEvents()
+        w.toggle_left("media")
+        assert w.media_lib.isVisible() and not w.subs_panel.isVisible()
+        w.toggle_left("subtitles")                                   # открылась другая — прошлая свернулась
+        assert w.subs_panel.isVisible() and not w.media_lib.isVisible()
+        assert QSettings("Glimpsy", "editor").value("left_panel") == "subtitles"
+        from glimpsy.editor import subtitles as subs
+        w._apply_subtitles([subs.Segment(0.5, 2.0, "Привет всем"), subs.Segment(3.0, 5.0, "Сегодня про звук")],
+                           replace=True)
+        table = w.subs_panel.table
+        assert table.rowCount() == 2 and table.item(1, 1).text() == "Сегодня про звук"
+        table.item(1, 1).setText("Сегодня про запись")               # исправили прямо в списке
+        assert sorted(t.text for t in w.project.texts) == ["Привет всем", "Сегодня про запись"]
+        w.player.seek(6.0)
+        w.add_subtitle()
+        assert table.rowCount() == 3
+        tr = w.project.track_by_id(w.project.texts[-1].track)
+        assert tr.kind == "subtitles"
+        if os.environ.get("GLIMPSY_SHOT"):
+            w.grab().save(os.environ["GLIMPSY_SHOT"])
+        w.subs_panel.selected.emit(table.item(0, 0).data(0x0100))     # щелчок по строке — к месту
+        assert w.timeline.selected_text == table.item(0, 0).data(0x0100)
+        w._delete_texts([table.item(0, 0).data(0x0100)])
+        assert table.rowCount() == 2
+        w.undo()
+        assert table.rowCount() == 3
+        w.toggle_left("subtitles")
+        assert not w.subs_panel.isVisible() and QSettings("Glimpsy", "editor").value("left_panel") == ""
+    finally:
+        w.close()
