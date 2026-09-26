@@ -167,6 +167,11 @@ class SettingsDialog(QDialog):
         f.addRow("Эффекты", self.fx_zoom)
         f.addRow("   сила приближения", self.fx_strength)
         f.addRow("", self.fx_clicks)
+        self.smooth_cursor = QCheckBox("Плавный курсор")
+        self.smooth_cursor.setChecked(self.s.smooth_cursor)
+        self.smooth_cursor.setToolTip("Экран снимается без курсора, а Glimpsy рисует свой — он плывёт, "
+                                      "а не дёргается. Вид и размер меняются в редакторе.")
+        f.addRow("", self.smooth_cursor)
         f.addRow("", _hint("Как в Screen Studio: камера сама наезжает туда, где вы кликаете и работаете, "
                            "а клик отмечается расходящимся кругом. В редакторе эффекты можно выключить "
                            "у любого фрагмента."))
@@ -420,6 +425,7 @@ class SettingsDialog(QDialog):
         s.fx_zoom = self.fx_zoom.isChecked()
         s.fx_zoom_strength = self.fx_strength.value()
         s.fx_clicks = self.fx_clicks.isChecked()
+        s.smooth_cursor = self.smooth_cursor.isChecked()
         s.output_dir = self.output.text().strip() or s.output_dir
         s.fps = self.fps.value()
         s.buffer_s = self.buffer.value()

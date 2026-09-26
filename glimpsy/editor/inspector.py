@@ -94,6 +94,34 @@ class Inspector(QWidget):
         self.click_fx = QCheckBox("Подсвечивать клики")
         self.click_fx.setToolTip("В месте клика расходится круг — зрителю видно, куда вы нажали")
         self.click_fx.toggled.connect(lambda on: self._emit("click_fx", on))
+        # --- свой курсор (для записей без системного курсора) — общий для всего ролика ---
+        from glimpsy.editor.cursor import MAX_SIZE, MIN_SIZE, STYLES
+
+        self.cursor_title = QLabel("Курсор (во всём ролике)")
+        self.cursor_title.setProperty("role", "section")
+        self.cursor_show = QCheckBox("Показывать курсор")
+        self.cursor_show.toggled.connect(lambda on: self._emit("cursor_show", on))
+        self.cursor_styles = QWidget()
+        cs = QGridLayout(self.cursor_styles)
+        cs.setContentsMargins(0, 0, 0, 0)
+        cs.setSpacing(4)
+        self.cursor_group = QButtonGroup(self)
+        self.cursor_btns: dict[str, QPushButton] = {}
+        for i, (key, text) in enumerate(STYLES.items()):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setMinimumWidth(0)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setProperty("cursor", key)
+            b.setIcon(_cursor_icon(key))
+            self.cursor_group.addButton(b)
+            self.cursor_btns[key] = b
+            cs.addWidget(b, i // 2, i % 2)
+        self.cursor_group.buttonClicked.connect(lambda b: self._emit("cursor_style", b.property("cursor")))
+        self.cursor_size = QDoubleSpinBox(minimum=MIN_SIZE, maximum=MAX_SIZE, singleStep=0.25, decimals=2,
+                                          suffix=" ×")
+        self.cursor_size.valueChanged.connect(lambda v: self._emit("cursor_size", v))
+
         self.motion_hint = QLabel()
         self.motion_hint.setWordWrap(True)
         self.motion_hint.setProperty("role", "hint")
@@ -139,6 +167,10 @@ class Inspector(QWidget):
         self.form.addRow("Сила зума", self.strength)
         self.form.addRow(self.click_fx)
         self.form.addRow(self.motion_hint)
+        self.form.addRow(self.cursor_title)
+        self.form.addRow(self.cursor_show)
+        self.form.addRow(self.cursor_styles)
+        self.form.addRow("Размер", self.cursor_size)
         self.form.addRow(self.frame_title)
         self.form.addRow("Масштаб", self.zoom)
         self.form.addRow("Сдвиг влево/вправо", self.pos_x)
@@ -164,13 +196,15 @@ class Inspector(QWidget):
 
     FRAME_ROWS = ("frame_title", "zoom", "pos_x", "pos_y", "frame_btns")
     MOTION_ROWS = ("motion_title", "motion", "strength", "click_fx", "motion_hint")
+    CURSOR_ROWS = ("cursor_title", "cursor_show", "cursor_styles", "cursor_size")
 
-    def set_clip(self, clip: Clip | None, aspect: str = "16:9", count: int = 1) -> None:
+    def set_clip(self, clip: Clip | None, aspect: str = "16:9", count: int = 1,
+                 cursor: tuple[str, float, bool] = ("arrow", 1.0, True)) -> None:
         """Показать свойства фрагмента. count > 1 — выбрано несколько: правки идут во все."""
         self.clip, self.aspect, self.count = clip, aspect, count
         self._loading = True
         all_rows = [self.speed, self.presets, self.sound, self.in_s, self.out_s, self.photo_dur] + \
-                   [getattr(self, n) for n in self.FRAME_ROWS + self.MOTION_ROWS]
+                   [getattr(self, n) for n in self.FRAME_ROWS + self.MOTION_ROWS + self.CURSOR_ROWS]
         if clip is None:
             self.title.setText("Выберите фрагмент на ленте")
             self.info.setText("Щёлкните по фрагменту внизу, чтобы изменить скорость, звук, длину и кадр.")
@@ -232,6 +266,14 @@ class Inspector(QWidget):
                                      "Ctrl+A — включить сразу для всех фрагментов.")
         for n in self.MOTION_ROWS:
             self._set_row_visible(getattr(self, n), is_video)
+        style, size, show = cursor
+        self.cursor_show.setChecked(show)
+        (self.cursor_btns.get(style) or self.cursor_btns["arrow"]).setChecked(True)
+        self.cursor_size.setValue(size)
+        for w in (self.cursor_styles, self.cursor_size):
+            w.setEnabled(show)
+        for n in self.CURSOR_ROWS:
+            self._set_row_visible(getattr(self, n), is_video and clip.own_cursor)
         z, x, y = clip.frame_for(aspect)
         self.frame_title.setText(f"Кадр в формате {aspect}")
         self.zoom.setValue(z * 100)
@@ -255,3 +297,11 @@ class Inspector(QWidget):
         if not self._loading and self.clip is not None:
             self.edited.emit(self.clip.id, what, value)
 
+
+def _cursor_icon(style: str):
+    """Маленькая картинка курсора для кнопки выбора вида."""
+    from PySide6.QtGui import QIcon, QPixmap
+
+    from glimpsy.editor.cursor import image
+
+    return QIcon(QPixmap.fromImage(image(style, 18)))

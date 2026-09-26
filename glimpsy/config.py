@@ -40,6 +40,7 @@ class Settings:
     fx_zoom: bool = True               # плавно приближать кадр к кликам и месту работы
     fx_zoom_strength: float = 1.8      # во сколько раз приближать
     fx_clicks: bool = True             # подсвечивать клики расходящимся кругом
+    smooth_cursor: bool = True         # снимать без курсора и рисовать свой, плавный (вид — в редакторе)
 
     # --- Запись ---
     fps: int = 30

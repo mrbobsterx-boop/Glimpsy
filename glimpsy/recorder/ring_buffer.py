@@ -60,6 +60,7 @@ class BufferRun:
         self.dir = run_dir
         self.max_height = max_height
         self.on_frame_diff = on_frame_diff
+        self.own_cursor = False          # снято без курсора (его нарисует Glimpsy)
         self.segments: collections.deque[Segment] = collections.deque()
         self.started_at = 0.0
         self.ended_at: float | None = None

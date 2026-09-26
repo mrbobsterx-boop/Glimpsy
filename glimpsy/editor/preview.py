@@ -43,6 +43,8 @@ class PreviewWidget(QWidget):
         self.editable = False
         self.src_crop = (0.0, 0.0, 1.0, 1.0)   # какая часть исходного кадра видна (автозум/слежение)
         self.ripples: list = []                  # круги кликов: [(x, y, прогресс)] в долях исходного кадра
+        self.cursor = None                       # свой курсор: (x, y, стиль, размер) в долях исходного кадра
+        self._cursor_img: tuple | None = None
         self._bg_cache: tuple[int, QImage] | None = None
         self._drag: str | None = None      # move / scale
         self._press = QPointF()
@@ -84,6 +86,26 @@ class PreviewWidget(QWidget):
         if ripples or self.ripples:
             self.ripples = ripples
             self.update()
+
+    def set_cursor(self, cursor) -> None:
+        if cursor != self.cursor:
+            self.cursor = cursor
+            self.update()
+
+    def _paint_cursor(self, p: QPainter, fr: QRectF) -> None:
+        """Свой курсор — та же картинка, что в готовом ролике (glimpsy/editor/cursor.py)."""
+        from glimpsy.editor import cursor as cur
+
+        x, y, style, size = self.cursor
+        sx, sy, sw, sh = self.src_crop
+        px = max(8, int(round(cur.BASE * max(cur.MIN_SIZE, min(cur.MAX_SIZE, size)) * fr.width() / sw)))
+        if self._cursor_img is None or self._cursor_img[0] != (style, px):
+            self._cursor_img = ((style, px), cur.image(style, px))
+        img = self._cursor_img[1]
+        hx, hy = cur.hotspot(style, px)
+        cx = fr.x() + (x - sx) / sw * fr.width()
+        cy = fr.y() + (y - sy) / sh * fr.height()
+        p.drawImage(QPointF(cx - hx, cy - hy), img)
 
     def _paint_ripples(self, p: QPainter, fr: QRectF) -> None:
         """Круги кликов — те же формулы, что у FFmpeg при экспорте (glimpsy/editor/clicks.py)."""
@@ -264,6 +286,8 @@ class PreviewWidget(QWidget):
         p.drawImage(fr, img, QRectF(sx * img.width(), sy * img.height(), sw * img.width(), sh * img.height()))
         if self.ripples:
             self._paint_ripples(p, fr)
+        if self.cursor:
+            self._paint_cursor(p, fr)
         p.restore()
         self._paint_overlays(p)
         self._paint_texts(p)

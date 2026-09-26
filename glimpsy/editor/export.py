@@ -65,17 +65,29 @@ def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> 
 
 
 def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "",
-                 src_size: tuple[int, int] | None = None) -> str:
+                 src_size: tuple[int, int] | None = None, cursor_idx: int | None = None,
+                 cursor_style: tuple[str, float] = ("arrow", 1.0)) -> str:
     """Граф фильтров для картинки одного фрагмента (движение по курсору, скорость, кадрирование)."""
     moving, new_ar = ("", None)
     if aspect and src_size:
         moving, new_ar = motion_filter(clip, aspect, src_size[0], src_size[1], fps)
-    head = f"[0:v]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
     from glimpsy.editor.clicks import ripple_graph
+    parts, label = [], "0:v"
     ripples = ripple_graph("0:v", "src", clip.clicks_shown(), clip.in_s, clip.out_s, clip.speed,
                            src_size[0] if src_size else clip.width)
     if ripples:        # круги кликов рисуются на исходном кадре, до зума и кадрирования
-        head = f"{ripples};[src]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
+        parts.append(ripples)
+        label = "src"
+    if cursor_idx is not None and src_size:
+        # свой плавный курсор — поверх кругов, тоже до зума (приближается вместе с картинкой)
+        from glimpsy.editor import cursor as cur
+
+        g = cur.overlay_graph(label, "csrc", cursor_idx, clip.cursor, clip.src_duration, clip.in_s, clip.out_s,
+                              src_size[0], src_size[1], *cursor_style)
+        if g:
+            parts.append(g)
+            label = "csrc"
+    head = "".join(p + ";" for p in parts) + f"[{label}]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
     zoom, fx, fy = clip.frame_for(aspect) if aspect else DEFAULT_FRAME
     src_ar = new_ar or ((clip.width / clip.height) if clip.width and clip.height else W / H)
     if (zoom, fx, fy) == DEFAULT_FRAME and abs(src_ar - W / H) < 0.02:
@@ -107,12 +119,20 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
     if not use_audio:
         cmd += ["-f", "lavfi", "-t", f"{dur_out:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
     src_size = None
-    if clip.motion_for(project.aspect) != "none" or clip.clicks_shown():
+    style, size, show = project.cursor_style()
+    draw_cursor = clip.kind == "video" and clip.own_cursor and show and bool(clip.cursor)
+    if clip.motion_for(project.aspect) != "none" or clip.clicks_shown() or draw_cursor:
         # для движения по курсору нужен настоящий размер кадра файла (он может быть уменьшен при записи)
         from glimpsy.editor.media import probe
         info = probe(ffmpeg, src)
         src_size = (info.width, info.height)
-    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size)
+    cursor_idx = None
+    if draw_cursor and src_size:
+        from glimpsy.editor import cursor as cur
+
+        cursor_idx = 1 if use_audio else 2
+        cmd += cur.input_args(style, cur.height_px(src_size[0], size), clip.out_s - clip.in_s + 1)
+    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size, cursor_idx, (style, size))
     if use_audio:
         graph += ";[0:a]asetpts=PTS-STARTPTS," + ",".join(atempo_chain(clip.speed)) + "[a]"
         amap = "[a]"

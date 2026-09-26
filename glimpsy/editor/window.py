@@ -386,6 +386,7 @@ class EditorWindow(QMainWindow):
             self.preview.set_frame(c.frame_for(self.project.aspect), c.id in self.timeline.selection)
         self.preview.set_src_crop(self._motion_crop(c))
         self.preview.set_ripples(self._ripples(c))
+        self.preview.set_cursor(self._cursor_at(c))
         t = self.player.t
         visible = self.project.texts_at(t)
         sel = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
@@ -417,6 +418,23 @@ class EditorWindow(QMainWindow):
             return []
         from glimpsy.editor.clicks import active
         return active(c.clicks, c.in_s + local * c.speed, c.speed)
+
+    def _cursor_at(self, c: Clip | None):
+        """Свой курсор в просмотре: (x, y, стиль, размер) или None."""
+        style, size, show = self.project.cursor_style()
+        if c is None or not (c.own_cursor and show and c.cursor and c.kind == "video"):
+            return None
+        idx, local = self.project.locate(self.player.t)
+        if idx is None or self.project.clips[idx].id != c.id:
+            return None
+        from glimpsy.editor import cursor as cur
+
+        key = ("cursor", c.id, len(c.cursor), c.src_duration)
+        track = self._motion_cache.get(key)
+        if track is None:
+            track = self._motion_cache[key] = cur.smooth_track(c.cursor, c.src_duration)
+        pos = cur.position_at(track, c.in_s + local * c.speed)
+        return (pos[0], pos[1], style, size) if pos else None
 
     def _motion_crop(self, c: Clip | None) -> tuple[float, float, float, float]:
         """Какую часть кадра показать сейчас (автозум или слежение за курсором)."""
@@ -453,7 +471,7 @@ class EditorWindow(QMainWindow):
     def _refresh_inspector(self) -> None:
         sel = self.project.index_of(self.timeline.selected) if self.timeline.selected else -1
         self.inspector.set_clip(self.project.clips[sel] if sel >= 0 else None, self.project.aspect,
-                                max(1, len(self.timeline.selection)))
+                                max(1, len(self.timeline.selection)), self.project.cursor_style())
 
     def _on_select(self, _clip_id) -> None:
         self._refresh_inspector()
@@ -489,6 +507,12 @@ class EditorWindow(QMainWindow):
     def _on_inspector(self, clip_id: str, what: str, value) -> None:
         if what == "delete":
             self.delete_selected()
+            return
+        if what in ("cursor_style", "cursor_size", "cursor_show"):
+            # вид курсора — один на весь ролик
+            self.history.push(self.project.to_dict(), key=what)
+            self.project.cursor[what.split("_", 1)[1]] = value
+            self._changed()
             return
         targets = self._selected_clips() or [c for c in self.project.clips if c.id == clip_id]
         if not targets:

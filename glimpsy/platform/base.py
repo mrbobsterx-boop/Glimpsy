@@ -94,6 +94,16 @@ class CaptureBackend(ABC):
     """Источник видео для кольцевого буфера."""
 
     name: str = "base"
+    can_hide_cursor: bool = False    # умеет снимать экран без курсора (тогда курсор рисует Glimpsy)
+    hide_cursor: bool = False
+
+    def _mouse(self) -> str:
+        """Значение параметра «рисовать курсор» для FFmpeg."""
+        return "0" if self.hide_cursor and self.can_hide_cursor else "1"
+
+    @property
+    def cursor_hidden(self) -> bool:
+        return self.hide_cursor and self.can_hide_cursor
 
     @abstractmethod
     def monitors(self) -> list[Monitor]: ...

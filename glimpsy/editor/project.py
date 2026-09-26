@@ -59,6 +59,7 @@ class Clip:
     motions: dict = field(default_factory=dict)
     score: float = -1.0           # насколько активным был момент при записи (0…1; −1 — неизвестно)
     base_speed: float = 0.0       # скорость до автомонтажа (чтобы повторный запуск не ускорял ещё раз)
+    own_cursor: bool = False      # записано без курсора — курсор рисует Glimpsy (вид и размер — у проекта)
 
     def clicks_shown(self) -> list:
         return self.clicks if self.click_fx and self.kind == "video" else []
@@ -137,6 +138,15 @@ class Project:
     text_style: dict = field(default_factory=dict)  # общий стиль текстов (отличия от стандартного)
     overlays: list = field(default_factory=list)    # OverlayItem — картинки/видео поверх ролика
     music: object = None                             # MusicTrack — фоновая музыка или None
+    cursor: dict = field(default_factory=dict)       # свой курсор: {"style", "size", "show"}
+
+    def cursor_style(self) -> tuple[str, float, bool]:
+        """Вид своего курсора: (стиль, размер, показывать ли)."""
+        from glimpsy.editor.cursor import DEFAULT_STYLE, STYLES
+
+        st = self.cursor.get("style", DEFAULT_STYLE)
+        return (st if st in STYLES else DEFAULT_STYLE, float(self.cursor.get("size", 1.0)),
+                bool(self.cursor.get("show", True)))
 
     # ---------- время ----------
 
@@ -259,6 +269,7 @@ class Project:
             "text_style": copy.deepcopy(self.text_style),
             "overlays": [asdict(o) for o in self.overlays],
             "music": asdict(self.music) if self.music is not None else None,
+            "cursor": dict(self.cursor),
         }
 
     def restore(self, data: dict) -> None:
@@ -281,6 +292,7 @@ class Project:
         m = data.get("music")
         mknown = {f.name for f in fields(MusicTrack)}
         self.music = MusicTrack(**{k: v for k, v in m.items() if k in mknown}) if m else None
+        self.cursor = dict(data.get("cursor") or {})
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"
@@ -324,7 +336,7 @@ class Project:
                               has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
                               motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
                               zoom_strength=float(c.get("zoom_strength", 1.8)),
-                              score=float(c.get("score", -1))))
+                              score=float(c.get("score", -1)), own_cursor=bool(c.get("own_cursor"))))
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
             # у потоков к имени добавлен номер: project_ГГГГММДД_ЧЧММСС_1

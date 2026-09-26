@@ -213,11 +213,11 @@ class Assembler:
             self._render_piece(session_dir / p.cand.file, p, out, fade, audio="voice" if has_audio else "none")
             rendered.append(out)
             audio_differs = bool(p.cand.audio) and not p.cand.voice_id
-            if project_dir is not None and (self._has_effects(p) or audio_differs):
+            if project_dir is not None and (self._has_effects(p) or audio_differs or p.cand.own_cursor):
                 # в редактор — чистый фрагмент: там зум и клики накладываются заново и их можно выключить
                 clean_out = work / f"clean_{i:04d}.mp4"
                 self._render_piece(session_dir / p.cand.file, p, clean_out, fade, effects=False,
-                                   audio="all" if has_audio else "none")
+                                   audio="all" if has_audio else "none", cursor=False)
                 clean[i] = clean_out
 
         progress(len(pieces) / (len(pieces) + 1), "Склейка")
@@ -253,7 +253,8 @@ class Assembler:
         progress(1.0, "Готово")
         return final
 
-    def _effects_graph(self, p: Piece, W: int, H: int, fps: int, effects: bool = True) -> tuple[str, str]:
+    def _effects_graph(self, p: Piece, W: int, H: int, fps: int, effects: bool = True,
+                       cursor_idx: int | None = None) -> tuple[str, str]:
         """Круги кликов и приближение к месту работы. Возвращает (граф до ускорения, метку выхода)."""
         from glimpsy.editor import motion
         from glimpsy.editor.clicks import ripple_graph
@@ -267,14 +268,23 @@ class Assembler:
         # ширина видео в записи (высокие экраны при записи уменьшаются до record_max_height)
         rh = min(c.height, self.s.record_max_height) if c.height else 0
         stream_w = int(c.width * rh / c.height) if c.height else c.width
+        stream_h = rh
         if c.crop:
-            stream_w = int(stream_w * c.crop[2])
+            stream_w, stream_h = int(stream_w * c.crop[2]), int(rh * c.crop[3])
         cw, ch = c.size
         if effects and self.s.fx_clicks and c.clicks:
             rip = ripple_graph(label, "rip", c.clicks, t0, t1, p.speed, stream_w)
             if rip:
                 parts.append(rip)
                 label = "rip"
+        if cursor_idx is not None:        # свой плавный курсор — поверх кругов, до зума
+            from glimpsy.editor import cursor as cur
+
+            g = cur.overlay_graph(label, "cur", cursor_idx, c.cursor, c.duration, t0, t1, stream_w, stream_h,
+                                  cur.DEFAULT_STYLE, 1.0)
+            if g:
+                parts.append(g)
+                label = "cur"
         if effects and self.s.fx_zoom and (c.cursor or c.clicks) and cw and ch:
             k = min(W / cw, H / ch)
             zw, zh = max(2, int(cw * k) // 2 * 2), max(2, int(ch * k) // 2 * 2)
@@ -284,10 +294,10 @@ class Assembler:
         return ";".join(parts), label
 
     def _render_piece(self, src: Path, p: Piece, out: Path, fade: str, effects: bool = True,
-                      audio: str = "none") -> None:
-        """audio: none — без звука; voice — звук только у речи (у остальных тишина); all — звук у всех."""
+                      audio: str = "none", cursor: bool = True) -> None:
+        """audio: none — без звука; voice — звук только у речи (у остальных тишина); all — звук у всех.
+        cursor — рисовать свой курсор (если запись без курсора); в проект редактора идёт без него."""
         W, H, fps = self.s.output_width, self.s.output_height, self.s.fps
-        pre, label = self._effects_graph(p, W, H, fps, effects)
         vf = [f"setpts=(PTS-STARTPTS)/{p.speed:.4f}", f"fps={fps}",
               f"scale={W}:{H}:force_original_aspect_ratio=decrease",
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114", "setsar=1"]
@@ -312,9 +322,19 @@ class Assembler:
             a_graph = f";[1:a]{chain},aformat=sample_rates=48000:channel_layouts=stereo,apad[a]"
             a_map = ["-map", "[a]", "-c:a", "aac", "-b:a", "160k", "-shortest"]
 
+        cur_in: list[str] = []
+        draw_cursor = cursor and c.own_cursor and bool(c.cursor)
+        if draw_cursor:
+            from glimpsy.editor import cursor as cur
+
+            rh = min(c.height, self.s.record_max_height) if c.height else 0
+            sw = int(c.width * rh / c.height * (c.crop[2] if c.crop else 1)) if c.height else c.width
+            cur_in = cur.input_args(cur.DEFAULT_STYLE, cur.height_px(sw, 1.0), p.source_s + 1)
+        pre, label = self._effects_graph(p, W, H, fps, effects, (2 if a_in else 1) if draw_cursor else None)
+
         def cmd(enc: Encoder) -> list[str]:
             graph = (pre + ";" if pre else "") + f"[{label}]" + ",".join(vf + [enc.filter_suffix]) + "[v]" + a_graph
-            return [*enc.global_args, "-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(src), *a_in,
+            return [*enc.global_args, "-ss", f"{p.offset:.3f}", "-t", f"{p.source_s:.3f}", "-i", str(src), *a_in, *cur_in,
                     "-filter_complex", graph, "-map", "[v]", *a_map, *enc.args("final", fps),
                     "-video_track_timescale", "90000", str(out)]
 
@@ -329,12 +349,16 @@ class Assembler:
                     self._ffmpeg(cmd(self.encoder))
                     return
                 except AssemblyError:
-                    if not effects or not self._has_effects(p):
+                    if not pre or not (effects or draw_cursor):
                         raise
-            elif not effects or not self._has_effects(p):
+            elif not pre or not (effects or draw_cursor):
                 raise
-            log.exception("Эффекты (зум/клики) не получились — фрагмент без них")
-            self._render_piece(src, p, out, fade, effects=False, audio=audio)
+            if effects and self._has_effects(p):
+                log.exception("Эффекты (зум/клики) не получились — фрагмент без них")
+                self._render_piece(src, p, out, fade, effects=False, audio=audio, cursor=cursor)
+            else:
+                log.exception("Курсор не получился — фрагмент без него")
+                self._render_piece(src, p, out, fade, effects=False, audio=audio, cursor=False)
 
     def _has_effects(self, p: Piece) -> bool:
         c = p.cand
@@ -403,6 +427,7 @@ class Assembler:
                 "source_size": list(c.size), "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor, "clicks": clicks,
                 "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id, "voice": c.voice_id,
+                "own_cursor": c.own_cursor,
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
                 "motion": "autozoom" if self.s.fx_zoom and (cursor or clicks) else "none",
                 "click_fx": bool(self.s.fx_clicks),

@@ -536,8 +536,11 @@ class RecorderEngine(QObject):
     def _start_run(self, monitor: Monitor) -> None:
         assert self.session_dir and self.activity and self.encoder
         self._run_counter += 1
+        capture = self.services.capture
+        # плавный курсор: снимаем без системного, если знаем, где курсор (на Wayland — нет)
+        capture.hide_cursor = self.s.smooth_cursor and self.services.cursor.supported
         try:
-            cap = self.services.capture.input_for(monitor, self.s.fps)
+            cap = capture.input_for(monitor, self.s.fps)
         except Exception as e:
             log.exception("Не удалось подготовить захват")
             self._fail(f"Не удалось начать захват экрана: {e}", time.time())
@@ -552,8 +555,9 @@ class RecorderEngine(QObject):
             run.cleanup()
             self._fail(f"FFmpeg не запустился: {e}", time.time())
             return
+        run.own_cursor = capture.cursor_hidden
         self.run = run
-        log.info("Запись монитора %s", monitor.label)
+        log.info("Запись монитора %s%s", monitor.label, " (курсор рисует Glimpsy)" if run.own_cursor else "")
 
     def _close_run(self) -> None:
         """Останавливает текущий прогон. Недописанные «важные моменты» сохраняются тем, что есть."""
@@ -713,7 +717,7 @@ class RecorderEngine(QObject):
             width=run.capture.width, height=run.capture.height,
             score=act.score(max(t0, ws), min(t1, we)), priority=priority,
             activity=[round(v, 3) for v in act.per_second(ws, we)], cursor=cursor,
-            clicks=clicks, crop=crop or [],
+            clicks=clicks, crop=crop or [], own_cursor=run.own_cursor,
             audio=audio_name, voice_id=voice[0] if voice else 0, voice_part=voice[1] if voice else 0,
         )
         pool.add(cand)
@@ -912,7 +916,8 @@ class RecorderEngine(QObject):
         old = self.s
         restart = (s.fps != self.s.fps or s.encoder != self.s.encoder or
                    s.record_max_height != self.s.record_max_height or
-                   s.monitor_mode != self.s.monitor_mode or s.manual_monitor != self.s.manual_monitor)
+                   s.monitor_mode != self.s.monitor_mode or s.manual_monitor != self.s.manual_monitor or
+                   s.smooth_cursor != self.s.smooth_cursor)
         if s.encoder != self.s.encoder:
             self.encoder = pick_encoder(self.ffmpeg, s.encoder, s.fps)
         self.s = s

@@ -36,6 +36,7 @@ class Candidate:
     voice_id: int = 0             # >0 — кусок речи (голосовой режим): идёт целиком, со звуком
     voice_part: int = 0           # номер куска внутри одной речи
     crop: list[float] = field(default_factory=list)   # поток «только окно»: где окно, доли [x, y, w, h]
+    own_cursor: bool = False      # снято без курсора — курсор рисует Glimpsy (плавный)
 
     @property
     def size(self) -> tuple[int, int]:

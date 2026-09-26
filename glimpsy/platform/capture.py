@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 class X11GrabCapture(CaptureBackend):
     name = "x11grab"
+    can_hide_cursor = True
 
     def __init__(self) -> None:
         self.display = os.environ.get("DISPLAY", ":0")
@@ -36,7 +37,7 @@ class X11GrabCapture(CaptureBackend):
     def input_for(self, monitor: Monitor, fps: int) -> CaptureInput:
         return CaptureInput(
             args=[
-                "-f", "x11grab", "-draw_mouse", "1", "-framerate", str(fps),
+                "-f", "x11grab", "-draw_mouse", self._mouse(), "-framerate", str(fps),
                 "-video_size", f"{monitor.width}x{monitor.height}",
                 "-i", f"{self.display}+{monitor.x},{monitor.y}",
             ],
@@ -48,6 +49,7 @@ class GdiGrabCapture(CaptureBackend):
     """Windows, классический способ. Надёжный, но нагружает процессор сильнее ddagrab."""
 
     name = "gdigrab"
+    can_hide_cursor = True
 
     def monitors(self) -> list[Monitor]:
         return list_monitors_mss()
@@ -55,7 +57,7 @@ class GdiGrabCapture(CaptureBackend):
     def input_for(self, monitor: Monitor, fps: int) -> CaptureInput:
         return CaptureInput(
             args=[
-                "-f", "gdigrab", "-draw_mouse", "1", "-framerate", str(fps),
+                "-f", "gdigrab", "-draw_mouse", self._mouse(), "-framerate", str(fps),
                 "-offset_x", str(monitor.x), "-offset_y", str(monitor.y),
                 "-video_size", f"{monitor.width}x{monitor.height}", "-i", "desktop",
             ],
@@ -72,6 +74,7 @@ class DdaGrabCapture(CaptureBackend):
     """
 
     name = "ddagrab"
+    can_hide_cursor = True
 
     def __init__(self, ffmpeg: str) -> None:
         self.ffmpeg = ffmpeg
@@ -89,7 +92,7 @@ class DdaGrabCapture(CaptureBackend):
     def input_for(self, monitor: Monitor, fps: int) -> CaptureInput:
         idx = self._mapping.get((monitor.x, monitor.y, monitor.width, monitor.height), monitor.index - 1)
         return CaptureInput(
-            args=["-f", "lavfi", "-i", f"ddagrab=output_idx={idx}:framerate={fps}:draw_mouse=1"],
+            args=["-f", "lavfi", "-i", f"ddagrab=output_idx={idx}:framerate={fps}:draw_mouse={self._mouse()}"],
             width=monitor.width, height=monitor.height,
             # кадр живёт в видеопамяти — скачиваем его, чтобы дальше работали обычные фильтры
             pre_filter="hwdownload,format=bgra,",
@@ -154,6 +157,7 @@ class AVFoundationCapture(CaptureBackend):
     """
 
     name = "avfoundation"
+    can_hide_cursor = True
 
     def monitors(self) -> list[Monitor]:
         return list_monitors_mss()
@@ -161,7 +165,7 @@ class AVFoundationCapture(CaptureBackend):
     def input_for(self, monitor: Monitor, fps: int) -> CaptureInput:
         return CaptureInput(
             args=[
-                "-f", "avfoundation", "-capture_cursor", "1", "-capture_mouse_clicks", "0",
+                "-f", "avfoundation", "-capture_cursor", self._mouse(), "-capture_mouse_clicks", "0",
                 "-framerate", str(fps), "-pixel_format", "nv12",
                 "-i", f"Capture screen {monitor.index - 1}:none",
             ],
