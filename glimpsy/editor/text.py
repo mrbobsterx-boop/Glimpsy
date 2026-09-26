@@ -51,6 +51,7 @@ class TextItem:
     style: dict | None = None    # None — общий стиль проекта
     pos: dict = field(default_factory=dict)   # {"9:16": [x, y]} — центр текста в долях кадра
     auto: bool = False           # создан автосубтитрами (их можно пересоздать или убрать разом)
+    track: str = ""              # дорожка (id); пусто — по типу: субтитры или текст
 
     @property
     def end(self) -> float:

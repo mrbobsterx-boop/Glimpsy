@@ -199,7 +199,8 @@ def render_overlay_layers(project: Project, out_dir: Path) -> list[OverlayLayer]
     W, H = ASPECTS[project.aspect]
     out_dir.mkdir(parents=True, exist_ok=True)
     layers = []
-    for i, ov in enumerate(getattr(project, "overlays", [])):
+    ordered = project.overlays_by_depth() if hasattr(project, "overlays_by_depth") else project.overlays
+    for i, ov in enumerate(ordered):             # нижние дорожки — первыми, верхние ложатся поверх
         x, y, w, h = overlay_rect(ov, project.aspect, W, H)
         w, h = max(2, int(round(w / 2)) * 2), max(2, int(round(h / 2)) * 2)
         pad = shadow_pad(w, h)

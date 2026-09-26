@@ -27,6 +27,21 @@ MIN_SPEED = 0.25
 MIN_ZOOM, MAX_ZOOM = 0.2, 5.0
 DEFAULT_FRAME = (1.0, 0.0, 0.0)   # масштаб, сдвиг по X и по Y (в долях ширины/высоты кадра ролика)
 
+# Дорожки над видео — сверху вниз (верхняя дорожка перекрывает нижние).
+# Субтитры и текст — надписи; наложение, медиа и камера — картинки и видео поверх ролика.
+TRACK_KINDS = ("subtitles", "text", "overlay", "media", "camera")
+TRACK_NAMES = {"subtitles": "Субтитры", "text": "Текст", "overlay": "Наложение", "media": "Медиа",
+               "camera": "Камера"}
+TEXT_KINDS = ("subtitles", "text")
+DEFAULT_TRACKS = ("subtitles", "text", "overlay")      # есть всегда; медиа и камера — когда понадобятся
+
+
+@dataclass
+class Track:
+    id: str
+    kind: str          # один из TRACK_KINDS
+    name: str
+
 
 def new_id() -> str:
     return uuid.uuid4().hex[:10]
@@ -144,6 +159,10 @@ class Project:
     overlays: list = field(default_factory=list)    # OverlayItem — картинки/видео поверх ролика
     music: object = None                             # MusicTrack — фоновая музыка или None
     cursor: dict = field(default_factory=dict)       # свой курсор: {"style", "size", "show"}
+    tracks: list = field(default_factory=list)       # Track — дорожки над видео, сверху вниз
+
+    def __post_init__(self) -> None:
+        self.normalize_tracks()
 
     def cursor_style(self) -> tuple[str, float, bool]:
         """Вид своего курсора: (стиль, размер, показывать ли)."""
@@ -186,6 +205,64 @@ class Project:
 
     def texts_at(self, t: float) -> list:
         return [x for x in self.texts if x.start <= t < x.end]
+
+    # ---------- дорожки ----------
+
+    def track_by_id(self, track_id: str) -> Track | None:
+        return next((tr for tr in self.tracks if tr.id == track_id), None)
+
+    def track_for(self, kind: str) -> Track:
+        """Первая дорожка этого типа; нет — создаётся на своём месте (см. TRACK_KINDS)."""
+        tr = next((x for x in self.tracks if x.kind == kind), None)
+        return tr if tr is not None else self.add_track(kind)
+
+    def add_track(self, kind: str, after: str | None = None) -> Track:
+        """Новая дорожка: после указанной или последней того же типа (или на своё место по порядку)."""
+        n = 1
+        while self.track_by_id(kind if n == 1 else f"{kind}-{n}") is not None:
+            n += 1
+        tr = Track(kind if n == 1 else f"{kind}-{n}", kind, TRACK_NAMES[kind] + ("" if n == 1 else f" {n}"))
+        ids = [x.id for x in self.tracks]
+        if after in ids:
+            pos = ids.index(after) + 1
+        else:
+            same = [i for i, x in enumerate(self.tracks) if x.kind == kind]
+            order = TRACK_KINDS.index(kind)
+            pos = same[-1] + 1 if same else sum(1 for x in self.tracks if TRACK_KINDS.index(x.kind) < order)
+        self.tracks.insert(pos, tr)
+        return tr
+
+    def remove_track(self, track_id: str) -> None:
+        """Убрать дорожку вместе со всем, что на ней."""
+        self.tracks = [x for x in self.tracks if x.id != track_id]
+        self.texts = [t for t in self.texts if t.track != track_id]
+        self.overlays = [o for o in self.overlays if o.track != track_id]
+
+    def track_items(self, track_id: str) -> list:
+        tr = self.track_by_id(track_id)
+        if tr is None:
+            return []
+        pool = self.texts if tr.kind in TEXT_KINDS else self.overlays
+        return [x for x in pool if x.track == track_id]
+
+    def overlays_by_depth(self) -> list:
+        """Наложения в порядке рисования: сначала нижние дорожки, верхние — поверх."""
+        rank = {tr.id: i for i, tr in enumerate(self.tracks)}
+        return sorted(self.overlays, key=lambda o: -rank.get(o.track, len(rank)))
+
+    def normalize_tracks(self) -> None:
+        """Каждая вещь — на подходящей дорожке; обязательные дорожки есть всегда."""
+        self.tracks = [x for x in self.tracks if x.kind in TRACK_KINDS]
+        for kind in DEFAULT_TRACKS:
+            self.track_for(kind)
+        for t in self.texts:
+            tr = self.track_by_id(t.track)
+            if tr is None or tr.kind not in TEXT_KINDS:
+                t.track = self.track_for("subtitles" if t.auto else "text").id
+        for o in self.overlays:
+            tr = self.track_by_id(o.track)
+            if tr is None or tr.kind in TEXT_KINDS:
+                o.track = self.track_for(o.track if o.track in ("camera", "media") else "overlay").id
 
     # ---------- правки ----------
 
@@ -275,6 +352,7 @@ class Project:
             "overlays": [asdict(o) for o in self.overlays],
             "music": asdict(self.music) if self.music is not None else None,
             "cursor": dict(self.cursor),
+            "tracks": [asdict(t) for t in self.tracks],
         }
 
     def restore(self, data: dict) -> None:
@@ -298,6 +376,9 @@ class Project:
         mknown = {f.name for f in fields(MusicTrack)}
         self.music = MusicTrack(**{k: v for k, v in m.items() if k in mknown}) if m else None
         self.cursor = dict(data.get("cursor") or {})
+        self.tracks = [Track(str(t["id"]), str(t["kind"]), str(t.get("name", ""))) for t in data.get("tracks", [])
+                       if t.get("kind") in TRACK_KINDS]
+        self.normalize_tracks()
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"
@@ -359,6 +440,7 @@ class Project:
                                int(c.get("width", 0)), int(c.get("height", 0)), label)
             item.src_duration = float(c.get("src_duration", c["duration"]))
             project.overlays.append(item)
+        project.normalize_tracks()
         return project
 
 

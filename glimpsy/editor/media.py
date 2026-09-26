@@ -111,4 +111,7 @@ class Thumbnailer(QObject):
                 log.debug("Миниатюра не получилась: %s", key, exc_info=True)
             if not img.isNull():
                 self._mem[key] = img
-                self.ready.emit()
+                try:
+                    self.ready.emit()
+                except RuntimeError:          # окно уже закрыли — миниатюра больше не нужна
+                    return

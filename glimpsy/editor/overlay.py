@@ -33,6 +33,7 @@ class OverlayItem:
     shadow: bool = False
     label: str = ""
     layout: dict = field(default_factory=dict)   # {"9:16": [cx, cy, ширина]}
+    track: str = ""                 # дорожка (id); пусто — «Наложение»
 
     @property
     def end(self) -> float:
@@ -125,7 +126,7 @@ def camera_item(item_id: str, src: str, start: float, duration: float, width: in
                 label: str = "Веб-камера") -> OverlayItem:
     """Окошко с веб-камеры в правом нижнем углу («картинка в картинке») для обоих форматов."""
     o = OverlayItem(item_id, "video", src, round(start, 3), round(duration, 3), width=width, height=height,
-                    src_duration=duration, radius=CAMERA_RADIUS, label=label)
+                    src_duration=duration, radius=CAMERA_RADIUS, label=label, track="camera")
     ar = (height / width) if width and height else 9 / 16
     # 16:9 — ширина 24 % кадра, отступ 3 % от краёв
     W, H, sc = 1920, 1080, 0.24

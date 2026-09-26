@@ -19,9 +19,8 @@ from typing import Callable
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QMenu, QButtonGroup, QComboBox, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSizePolicy, QSlider, QSplitter, QStackedWidget, QStyle,
-    QTextEdit, QToolBar, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QMenu, QButtonGroup, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSlider, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from glimpsy import paths
@@ -35,7 +34,9 @@ from glimpsy.editor.inspector import Inspector
 from glimpsy.editor.media import IMAGE_EXT, VIDEO_EXT, MediaError, Thumbnailer, is_supported, probe
 from glimpsy.editor.player import TimelinePlayer
 from glimpsy.editor.preview import PreviewWidget
-from glimpsy.editor.project import ASPECTS, DEFAULT_FRAME, Clip, History, Project, cover_zoom, new_id
+from glimpsy.editor.project import (
+    ASPECTS, DEFAULT_FRAME, TRACK_NAMES, Clip, History, Project, cover_zoom, new_id,
+)
 from glimpsy.editor.text import TextItem, effective_style, load_custom_fonts
 from glimpsy.editor.text_panel import TextPanel
 from glimpsy.editor.overlay import OverlayItem
@@ -43,7 +44,7 @@ from glimpsy.editor.overlay_panel import OverlayPanel
 from glimpsy.editor.music import AUDIO_EXT, MusicTrack, probe_audio
 from glimpsy.editor.music_panel import MusicPanel
 from glimpsy.editor import subtitles as subs
-from glimpsy.editor.timeline import TimelineWidget, fmt_time
+from glimpsy.editor.timeline import LANE_ICONS, TimelineWidget, fmt_time
 from glimpsy.recorder.encoder import Encoder
 
 log = logging.getLogger(__name__)
@@ -256,8 +257,9 @@ class EditorWindow(QMainWindow):
         files_btn.setChecked(self.library.is_open())
         files_btn.toggled.connect(self.library.set_open)
         self.library.close_requested.connect(lambda: files_btn.setChecked(False))
-        self.library.add_requested.connect(lambda files: self.insert_files(files, self._insert_index()))
-        tool("image-plus", "Медиа", "Добавить видео или фото (M, Ctrl+V)", self.add_media_dialog)
+        self.library.add_requested.connect(lambda files: self.add_overlays(files, self.player.t, "media"))
+        tool("image-plus", "Медиа", "Видео или фото на дорожку «Медиа» — с места курсора (M). "
+             "Вставить между фрагментами видео — перетащите файл на дорожку видео или Ctrl+V", self.add_media_dialog)
         tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
         tool("captions", "Субтитры", "Автосубтитры: распознать речь (на этом компьютере)", self.auto_subtitles)
         tool("layers", "Наложение", "Картинка или видео поверх ролика", self.add_overlay_dialog)
@@ -348,6 +350,15 @@ class EditorWindow(QMainWindow):
         bar.addSpacing(6)
         for a in (self.a_split, self.a_delete):
             bar.addWidget(tbtn(a))
+        add_track = theme.mark(QPushButton(theme.icon("plus", size=16), " Дорожка"), "ghost")
+        add_track.setToolTip("Добавить дорожку — сколько угодно; правый щелчок по дорожке — ещё действия")
+        track_menu = QMenu(add_track)
+        for kind in ("text", "subtitles", "overlay", "media", "camera"):
+            track_menu.addAction(theme.icon(LANE_ICONS[kind], size=16), TRACK_NAMES[kind],
+                                 lambda _=False, k=kind: self.timeline.add_track(k))
+        add_track.setMenu(track_menu)
+        bar.addSpacing(6)
+        bar.addWidget(add_track)
         bar.addStretch(1)
         bar.addWidget(zoom_out)
         bar.addWidget(zoom_fit)
@@ -358,7 +369,13 @@ class EditorWindow(QMainWindow):
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(0)
         bl.addLayout(bar)
-        bl.addWidget(self.timeline, 1)
+        # дорожек может быть сколько угодно — лента прокручивается по высоте
+        self.timeline_scroll = QScrollArea()
+        self.timeline_scroll.setWidgetResizable(True)
+        self.timeline_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.timeline_scroll.setWidget(self.timeline)
+        bl.addWidget(self.timeline_scroll, 1)
 
         root = QSplitter(Qt.Orientation.Vertical)
         root.setHandleWidth(6)
@@ -366,7 +383,7 @@ class EditorWindow(QMainWindow):
         root.addWidget(bottom)
         root.setStretchFactor(0, 1)
         root.setStretchFactor(1, 0)
-        root.setSizes([600, 190])
+        root.setSizes([560, 240])
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 8, 8)
@@ -416,7 +433,7 @@ class EditorWindow(QMainWindow):
         self.preview.set_texts([(x, effective_style(x, self.project.text_style)) for x in visible], t,
                                self.timeline.selected_text)
         sel_ov = self.timeline.selected_overlay
-        shown = [o for o in self.project.overlays if o.start <= t < o.end or o.id == sel_ov]
+        shown = [o for o in self.project.overlays_by_depth() if o.start <= t < o.end or o.id == sel_ov]
         self.preview.set_overlays([(o, self._overlay_frame(o, t)) for o in shown], sel_ov)
 
     def _overlay_frame(self, o, t: float):
@@ -699,6 +716,9 @@ class EditorWindow(QMainWindow):
         total = self.project.total
         start = min(self.player.t, max(0.0, total - 0.5))
         item = TextItem(new_id(), "Текст", round(start, 2), round(min(2.5, max(0.5, total - start)), 2))
+        sel = self.project.text_by_id(self.timeline.selected_text) if self.timeline.selected_text else None
+        tr = self.project.track_by_id(sel.track) if sel is not None else None
+        item.track = tr.id if tr is not None and tr.kind == "text" else self.project.track_for("text").id
         self.history.push(self.project.to_dict())
         self.project.texts.append(item)
         self.timeline.select_text(item.id)
@@ -856,6 +876,9 @@ class EditorWindow(QMainWindow):
         self.history.push(self.project.to_dict())
         if replace:
             self.project.texts = [t for t in self.project.texts if not t.auto]
+        track = self.project.track_for("subtitles").id
+        for it in items:
+            it.track = track
         self.project.texts.extend(items)
         self.timeline.select_text(items[0].id)
         self._text_changed()
@@ -869,9 +892,11 @@ class EditorWindow(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Картинка или видео поверх ролика", str(Path.home()),
                                                 f"Картинки и видео ({exts});;Все файлы (*)")
         if files:
-            self.add_overlays(files, self.player.t)
+            self.add_overlays(files, self.player.t, "overlay")
 
-    def add_overlays(self, files: list, start: float) -> None:
+    def add_overlays(self, files: list, start: float, track: str = "") -> None:
+        """Картинки и видео поверх ролика — на дорожку track (id или род: overlay / media / camera).
+        Если такой дорожки ещё нет, она появляется; есть — файл добавляется в неё."""
         files = self._take_music(files)
         if not files:
             return
@@ -898,12 +923,23 @@ class EditorWindow(QMainWindow):
                                 round(min(dur, room), 2), width=info.width, height=info.height,
                                 src_duration=0.0 if info.is_image else info.duration,
                                 has_audio=info.has_audio, label=path.name)
-                o.set_layout(self.project.aspect, 0.5, 0.5, 0.45)
                 items.append(o)
         finally:
             QApplication.restoreOverrideCursor()
         if items:
             self.history.push(self.project.to_dict())
+            tr = self.project.track_by_id(track) if track else None
+            if tr is None or tr.kind in ("subtitles", "text"):
+                tr = self.project.track_for(track if track in ("media", "camera") else "overlay")
+            for o in items:
+                o.track = tr.id
+                if tr.kind == "media":
+                    # медиа — на весь кадр (вписано), в обоих форматах
+                    for aspect, (fw, fh) in ASPECTS.items():
+                        ar = (o.width / o.height) if o.width and o.height else 16 / 9
+                        o.set_layout(aspect, 0.5, 0.5, min(1.0, fh * ar / fw))
+                else:
+                    o.set_layout(self.project.aspect, 0.5, 0.5, 0.45)
             self.project.overlays.extend(items)
             self.timeline.select_overlay(items[-1].id)
             self._layer_changed()
@@ -1087,7 +1123,7 @@ class EditorWindow(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Добавить видео или фото", str(Path.home()),
                                                 f"Видео и фото ({exts});;Все файлы (*)")
         if files:
-            self.insert_files(files, self._insert_index())
+            self.add_overlays(files, self.player.t, "media")
 
     def _take_music(self, files: list) -> list:
         """Музыкальные файлы среди перетащенных/вставленных — ставим фоновой музыкой, остальные возвращаем."""

@@ -477,8 +477,9 @@ def test_library_panel_and_back_to_sessions(tmp_path, qt_app, monkeypatch):
         mime = w.library.list.mimeData([w.library.list.item(i) for i in range(w.library.list.count())])
         assert sorted(u.fileName() for u in mime.urls()) == ["screen.mp4", "song.mp3"]   # папка не тащится
         video = next(w.library.list.item(i) for i in range(3) if w.library.list.item(i).text().startswith("screen"))
-        w.library._on_double(video)                                  # двойной щелчок — на ленту
-        assert len(w.project.clips) == 2
+        w.library._on_double(video)                                  # двойной щелчок — на дорожку «Медиа»
+        media = w.project.track_for("media")
+        assert len(w.project.track_items(media.id)) == 1 and len(w.project.clips) == 1
         w.library._on_double(w.library.list.item(0))                 # папка — заходим внутрь
         assert w.library.folder == lib / "Проект"
         w.resize(1280, 800)
@@ -558,5 +559,94 @@ def test_editor_keys_cut_jump_and_leaving_text(tmp_path, qt_app):
         assert not isinstance(QApplication.focusWidget(), QPlainTextEdit)
         QTest.keyClick(QApplication.focusWidget() or w, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
         assert len(w.project.texts) == n
+    finally:
+        w.close()
+
+
+def test_tracks_model_and_old_projects(tmp_path):
+    """У каждого рода — своя дорожка; старые проекты раскладываются по дорожкам сами."""
+    from glimpsy.editor.overlay import OverlayItem, camera_item
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.text import TextItem
+
+    p = make_project(tmp_path)
+    assert [t.kind for t in p.tracks] == ["subtitles", "text", "overlay"]
+    old = p.to_dict()
+    old.pop("tracks")
+    old["texts"] = [vars(TextItem("a", "привет", 0, 1, auto=True)), vars(TextItem("b", "заголовок", 0, 1))]
+    old["overlays"] = [vars(OverlayItem("o", "image", "x.png", 0, 1)),
+                       vars(camera_item("c", "cam.mp4", 0, 1, 640, 360))]
+    for d in old["texts"] + old["overlays"]:
+        d.pop("track", None)
+    old["overlays"][1]["track"] = "camera"
+    q = Project(tmp_path, "t")
+    q.restore(old)
+    kinds = {x.id: q.track_by_id(x.track).kind for x in q.texts + q.overlays}
+    assert kinds == {"a": "subtitles", "b": "text", "o": "overlay", "c": "camera"}
+    assert [t.kind for t in q.tracks] == ["subtitles", "text", "overlay", "camera"]
+    # новая дорожка текста встаёт после текстовых, медиа — между наложением и камерой
+    t2 = q.add_track("text")
+    m = q.add_track("media")
+    assert [t.id for t in q.tracks] == ["subtitles", "text", t2.id, "overlay", m.id, "camera"]
+    assert t2.name == "Текст 2" and q.track_for("text").id == "text"
+    # рисуются снизу вверх: камера (ниже всех) — первой, наложение (выше) — поверх
+    assert [o.id for o in q.overlays_by_depth()] == ["c", "o"]
+    q.remove_track("camera")
+    assert q.overlay_by_id("c") is None
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_timeline_tracks_add_move_drop(tmp_path, qt_app):
+    """Лента: своя дорожка у каждого рода, перенос текста на другую дорожку, файлы на «Медиа», отмена."""
+    import json
+    import os
+
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.window import EditorWindow
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "6", "-pix_fmt", "yuv420p", str(proj / "p.mp4")], check=True)
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:size=320x180",
+                    "-frames:v", "1", str(tmp_path / "pic.png")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 6.0}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.resize(1280, 820)
+        w.show()
+        QApplication.processEvents()
+        tl = w.timeline
+        h0 = tl.needed_height()
+        w.player.seek(1.0)
+        w.add_text()
+        text = w.project.texts[-1]
+        assert w.project.track_by_id(text.track).kind == "text"
+        t2 = tl.add_track("text")
+        assert tl.needed_height() > h0
+        # перетащили текст вниз, на «Текст 2»
+        r = tl.lane_rects(text.track)[0]
+        y2 = tl.row_y([t.id for t in w.project.tracks].index(t2.id)) + 10
+        QTest.mousePress(tl, Qt.MouseButton.LeftButton, pos=r.center().toPoint())
+        QTest.mouseMove(tl, QPoint(int(r.center().x()), int(y2)))
+        QTest.mouseRelease(tl, Qt.MouseButton.LeftButton, pos=QPoint(int(r.center().x()), int(y2)))
+        assert text.track == t2.id
+        w.add_overlays([str(tmp_path / "pic.png")], 2.0, "media")
+        media = w.project.track_for("media")
+        ov = w.project.track_items(media.id)[0]
+        assert ov.layout_for("16:9")[2] == pytest.approx(1.0, abs=0.01)     # медиа — на весь кадр
+        w.add_overlays([str(tmp_path / "pic.png")], 2.5, media.id)           # в ту же дорожку
+        assert len(w.project.track_items(media.id)) == 2 and len(w.project.tracks) == 5
+        if os.environ.get("GLIMPSY_SHOT"):
+            tl.fit()
+            QApplication.processEvents()
+            w.grab().save(os.environ["GLIMPSY_SHOT"])
+        n = len(w.project.tracks)
+        w.undo()
+        w.undo()
+        assert len(w.project.tracks) == n - 1                             # дорожка «Медиа» ушла вместе с файлом
     finally:
         w.close()

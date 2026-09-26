@@ -7,6 +7,10 @@
   * потянуть за левый/правый край — обрезать;
   * колёсико — прокрутка, Ctrl+колёсико — масштаб;
   * перетащить файлы из Проводника/Finder — вставить.
+
+Над видео — дорожки (субтитры, текст, наложение, медиа, камера и сколько угодно своих):
+у каждой вещи своя строка, ничего не слипается. Элемент можно перетащить на другую дорожку
+того же рода; правый щелчок по дорожке — добавить ещё одну, переименовать или удалить.
 """
 
 from __future__ import annotations
@@ -15,19 +19,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QInputDialog, QMenu, QSizePolicy, QWidget
 
 from glimpsy.editor.media import Thumbnailer
-from glimpsy.editor.project import Project
+from glimpsy.editor.project import TEXT_KINDS, TRACK_NAMES, Project, Track
 from glimpsy.ui import theme
 
 RULER_H = 24
-TEXT_Y = 30          # дорожка текстов
-TEXT_H = 22
-OVL_Y = 56           # дорожка наложений (картинки/видео поверх ролика)
-TRACK_Y = 84         # дорожка видео и фото
-TRACK_H = 64
-MUSIC_Y = TRACK_Y + TRACK_H + 6    # дорожка музыки
+ROW_Y0 = 30          # первая дорожка над видео
+TEXT_H = 22          # высота дорожки над видео
+ROW_GAP = 4
+TRACK_H = 64         # дорожка видео и фото
 MUSIC_H = 20
 EDGE_PX = 8
 GAP = 2
@@ -41,11 +43,23 @@ COL_PLAYHEAD = QColor("#FFFFFF")
 COL_DROP = QColor(theme.ACCENT)
 COL_TEXT = QColor("#D0932F")
 COL_OVL = QColor("#7E62D6")
+TRACK_COLORS = {"subtitles": QColor("#B8762A"), "text": COL_TEXT, "overlay": COL_OVL,
+                "media": QColor("#3E7FC4"), "camera": QColor("#C2517A")}
 COL_MUSIC = QColor("#2E9A6E")
 COL_LANE = QColor(255, 255, 255, 9)
-LANE_ICONS = {"text": "type", "overlay": "layers", "music": "music"}
+LANE_ICONS = {"subtitles": "captions", "text": "type", "overlay": "layers", "media": "image-plus",
+              "camera": "video", "music": "music"}
+LANE_HINTS = {"subtitles": "Субтитры — кнопка «Субтитры» слева",
+              "text": "Текст — кнопка «Текст» слева или клавиша T",
+              "overlay": "Наложение — кнопка слева или перетащите сюда картинку или видео",
+              "media": "Медиа — кнопка «Медиа» слева, панель «Файлы» или перетащите сюда файл",
+              "camera": "Камера — кнопка «Запись» слева"}
 MIN_TEXT_S = 0.2
-LANES = ("text", "overlay")
+
+
+def item_kind(track: Track) -> str:
+    """Что лежит на дорожке: надписи (text) или картинки/видео (overlay)."""
+    return "text" if track.kind in TEXT_KINDS else "overlay"
 
 
 def fmt_time(t: float, precise: bool = False) -> str:
@@ -61,7 +75,7 @@ class TimelineWidget(QWidget):
     files_dropped = Signal(list, int)           # пути, позиция вставки
     text_selected = Signal(object)              # id текста или None
     overlay_selected = Signal(object)           # id наложения или None
-    overlay_files_dropped = Signal(list, float) # пути, время начала
+    overlay_files_dropped = Signal(list, float, str)  # пути, время начала, дорожка
     music_selected = Signal(bool)
 
     def __init__(self, project: Project, thumbs: Thumbnailer) -> None:
@@ -77,7 +91,7 @@ class TimelineWidget(QWidget):
         self.selected_text: str | None = None
         self.selected_overlay: str | None = None
         self.music_active = False
-        self._lane = "text"
+        self._lane = ""                         # id дорожки, где держим элемент
         self._lane_orig = (0.0, 0.0, 0.0)       # начало, длительность, in_s — в момент нажатия
         self._mode: str | None = None  # playhead / trim_l / trim_r / press / drag
         self._press: QPointF | None = None
@@ -87,9 +101,8 @@ class TimelineWidget(QWidget):
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.setMinimumHeight(MUSIC_Y + MUSIC_H + 10)
-        self.setMaximumHeight(MUSIC_Y + MUSIC_H + 40)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sync_height()
 
     # ---------- координаты ----------
 
@@ -99,25 +112,52 @@ class TimelineWidget(QWidget):
     def t_of(self, x: float) -> float:
         return max(0.0, (x - 12 + self.offset) / self.pps)
 
-    def _lane_items(self, kind: str) -> list:
-        return self.project.texts if kind == "text" else self.project.overlays
+    # ---------- дорожки ----------
 
-    @staticmethod
-    def _lane_y(kind: str) -> float:
-        return TEXT_Y if kind == "text" else OVL_Y
+    @property
+    def track_y(self) -> float:
+        """Где дорожка видео (под всеми дорожками надписей и наложений)."""
+        return ROW_Y0 + len(self.project.tracks) * (TEXT_H + ROW_GAP) + 2
 
-    def lane_rects(self, kind: str) -> list[QRectF]:
-        y = self._lane_y(kind)
+    @property
+    def music_y(self) -> float:
+        return self.track_y + TRACK_H + 6
+
+    def needed_height(self) -> int:
+        return int(self.music_y + MUSIC_H + 10)
+
+    def _sync_height(self) -> None:
+        h = self.needed_height()
+        if self.minimumHeight() != h:
+            self.setMinimumHeight(h)
+            self.setMaximumHeight(h)
+
+    def row_y(self, index: int) -> float:
+        return ROW_Y0 + index * (TEXT_H + ROW_GAP)
+
+    def _track_at(self, y: float) -> int:
+        """Номер дорожки над видео по высоте, или -1."""
+        for i in range(len(self.project.tracks)):
+            ry = self.row_y(i)
+            if ry - ROW_GAP / 2 <= y <= ry + TEXT_H + ROW_GAP / 2:
+                return i
+        return -1
+
+    def _lane_items(self, track_id: str) -> list:
+        return self.project.track_items(track_id)
+
+    def lane_rects(self, track_id: str) -> list[QRectF]:
+        ids = [tr.id for tr in self.project.tracks]
+        if track_id not in ids:
+            return []
+        y = self.row_y(ids.index(track_id))
         return [QRectF(self.x_of(t.start) + 1, y, max(6.0, t.duration * self.pps - 2), TEXT_H)
-                for t in self._lane_items(kind)]
-
-    def text_rects(self) -> list[QRectF]:
-        return self.lane_rects("text")
+                for t in self._lane_items(track_id)]
 
     def clip_rects(self) -> list[QRectF]:
-        rects, t = [], 0.0
+        rects, t, y = [], 0.0, self.track_y
         for c in self.project.clips:
-            rects.append(QRectF(self.x_of(t) + GAP / 2, TRACK_Y, max(4.0, c.duration * self.pps - GAP), TRACK_H))
+            rects.append(QRectF(self.x_of(t) + GAP / 2, y, max(4.0, c.duration * self.pps - GAP), TRACK_H))
             t += c.duration
         return rects
 
@@ -148,6 +188,7 @@ class TimelineWidget(QWidget):
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._sync_height()
         p.fillRect(self.rect(), COL_BG)
         self._paint_ruler(p)
         rects = self.clip_rects()
@@ -157,13 +198,13 @@ class TimelineWidget(QWidget):
             self._paint_clip(p, c, r, i == self._drag_idx and self._mode == "drag")
         if self._mode == "drag" and self._drop_idx >= 0:
             x = rects[self._drop_idx].left() if self._drop_idx < len(rects) else (rects[-1].right() if rects else 12)
-            p.fillRect(QRectF(x - 2, TRACK_Y - 6, 4, TRACK_H + 12), COL_DROP)
-        self._paint_lane(p, "text")
-        self._paint_lane(p, "overlay")
+            p.fillRect(QRectF(x - 2, self.track_y - 6, 4, TRACK_H + 12), COL_DROP)
+        for i, tr in enumerate(self.project.tracks):
+            self._paint_lane(p, tr, i)
         self._paint_music(p)
         if not self.project.clips:
             p.setPen(COL_RULER)
-            p.drawText(QRectF(0, TRACK_Y, self.width(), TRACK_H), Qt.AlignmentFlag.AlignCenter,
+            p.drawText(QRectF(0, self.track_y, self.width(), TRACK_H), Qt.AlignmentFlag.AlignCenter,
                        "Перетащите сюда видео или фото, или нажмите «Медиа» слева")
         # курсор воспроизведения
         x = self.x_of(self.playhead)
@@ -173,32 +214,43 @@ class TimelineWidget(QWidget):
         p.setBrush(COL_PLAYHEAD)
         p.drawRoundedRect(QRectF(x - 6, 2, 12, 12), 4, 4)
 
-    def _paint_lane(self, p: QPainter, kind: str) -> None:
+    def _paint_lane(self, p: QPainter, tr: Track, index: int) -> None:
         f = QFont(self.font())
         f.setPixelSize(11)
         p.setFont(f)
-        y = self._lane_y(kind)
+        y = self.row_y(index)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(COL_LANE)
         p.drawRoundedRect(QRectF(4, y, self.width() - 8, TEXT_H), 6, 6)
-        items = self._lane_items(kind)
+        items = self._lane_items(tr.id)
         if not items:
-            hint = ("Текст — кнопка «Текст» слева или клавиша T" if kind == "text"
-                    else "Наложение — кнопка слева или перетащите сюда картинку или видео")
-            self._lane_hint(p, kind, y, TEXT_H, hint)
+            hint = LANE_HINTS[tr.kind]
+            if tr.name != TRACK_NAMES[tr.kind]:
+                hint = f"{tr.name} — " + hint.split(" — ", 1)[1]
+            self._lane_hint(p, tr.kind, y, TEXT_H, hint)
             return
+        kind = item_kind(tr)
         selected = self.selected_text if kind == "text" else self.selected_overlay
-        for t, r in zip(items, self.lane_rects(kind)):
+        for t, r in zip(items, self.lane_rects(tr.id)):
             if r.right() < 0 or r.left() > self.width():
                 continue
             p.setPen(QPen(QColor("#FFFFFF"), 2) if t.id == selected else Qt.PenStyle.NoPen)
-            p.setBrush(COL_TEXT if kind == "text" else COL_OVL)
+            p.setBrush(TRACK_COLORS[tr.kind])
             p.drawRoundedRect(r, 6, 6)
             label = (t.text.strip().splitlines() or [""])[0] if kind == "text" else t.label
-            self._chip_text(p, r, kind if kind == "text" else ("overlay" if t.kind == "image" else "video"), label)
+            self._chip_text(p, r, "text" if kind == "text" else ("overlay" if t.kind == "image" else "video"), label)
+        # название дорожки — маленькой меткой у левого края
+        name_w = p.fontMetrics().horizontalAdvance(tr.name) + 10
+        tag = QRectF(6, y + 3, name_w, TEXT_H - 6)
+        if self.x_of(0) < tag.right():
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 110))
+            p.drawRoundedRect(tag, 4, 4)
+            p.setPen(QColor(255, 255, 255, 190))
+            p.drawText(tag, Qt.AlignmentFlag.AlignCenter, tr.name)
 
     def music_rect(self) -> QRectF:
-        return QRectF(self.x_of(0) + 1, MUSIC_Y, max(6.0, self.project.total * self.pps - 2), MUSIC_H)
+        return QRectF(self.x_of(0) + 1, self.music_y, max(6.0, self.project.total * self.pps - 2), MUSIC_H)
 
     def _paint_music(self, p: QPainter) -> None:
         f = QFont(self.font())
@@ -208,8 +260,8 @@ class TimelineWidget(QWidget):
         if m is None:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(COL_LANE)
-            p.drawRoundedRect(QRectF(4, MUSIC_Y, self.width() - 8, MUSIC_H), 6, 6)
-            self._lane_hint(p, "music", MUSIC_Y, MUSIC_H, "Музыка — кнопка «Музыка» слева или перетащите сюда mp3")
+            p.drawRoundedRect(QRectF(4, self.music_y, self.width() - 8, MUSIC_H), 6, 6)
+            self._lane_hint(p, "music", self.music_y, MUSIC_H, "Музыка — кнопка «Музыка» слева или перетащите сюда mp3")
             return
         r = self.music_rect()
         p.setPen(QPen(QColor("#FFFFFF"), 2) if self.music_active else Qt.PenStyle.NoPen)
@@ -325,19 +377,20 @@ class TimelineWidget(QWidget):
     # ---------- мышь ----------
 
     def _hit_lane(self, pos: QPointF) -> tuple[str, int, str]:
-        for kind in LANES:
-            y = self._lane_y(kind)
-            if not (y - 2 <= pos.y() <= y + TEXT_H + 2):
-                continue
-            rects = self.lane_rects(kind)
-            for i in range(len(rects) - 1, -1, -1):          # последние — сверху
-                r = rects[i]
-                if r.left() - 2 <= pos.x() <= r.right() + 2:
-                    if pos.x() - r.left() <= EDGE_PX:
-                        return kind, i, "l_left"
-                    if r.right() - pos.x() <= EDGE_PX:
-                        return kind, i, "l_right"
-                    return kind, i, "l_move"
+        """(id дорожки, номер элемента на ней, часть: l_left / l_right / l_move) или ("", -1, "")."""
+        i = self._track_at(pos.y())
+        if i < 0:
+            return "", -1, ""
+        tid = self.project.tracks[i].id
+        rects = self.lane_rects(tid)
+        for k in range(len(rects) - 1, -1, -1):          # последние — сверху
+            r = rects[k]
+            if r.left() - 2 <= pos.x() <= r.right() + 2:
+                if pos.x() - r.left() <= EDGE_PX:
+                    return tid, k, "l_left"
+                if r.right() - pos.x() <= EDGE_PX:
+                    return tid, k, "l_right"
+                return tid, k, "l_move"
         return "", -1, ""
 
     def _select_layer(self, kind: str, item_id: str | None) -> None:
@@ -369,7 +422,7 @@ class TimelineWidget(QWidget):
         self._select_layer("overlay", overlay_id)
 
     def _hit(self, pos: QPointF) -> tuple[int, str]:
-        if pos.y() < TRACK_Y - 4 or pos.y() > TRACK_Y + TRACK_H + 4:
+        if pos.y() < self.track_y - 4 or pos.y() > self.track_y + TRACK_H + 4:
             return -1, ""
         for i, r in enumerate(self.clip_rects()):
             if r.left() - 2 <= pos.x() <= r.right() + 2:
@@ -381,6 +434,11 @@ class TimelineWidget(QWidget):
         return -1, ""
 
     def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.RightButton:
+            i = self._track_at(e.position().y())
+            if i >= 0:
+                self._track_menu(self.project.tracks[i], e.globalPosition().toPoint())
+            return
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
@@ -389,18 +447,18 @@ class TimelineWidget(QWidget):
             self._mode = "playhead"
             self.seek_requested.emit(self.t_of(pos.x()))
             return
-        if self.project.music is not None and MUSIC_Y - 2 <= pos.y() <= MUSIC_Y + MUSIC_H + 2:
+        if self.project.music is not None and self.music_y - 2 <= pos.y() <= self.music_y + MUSIC_H + 2:
             self.select_music(True)
             self._mode = "playhead"
             self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
             return
         if self.music_active:
             self.select_music(False)
-        kind, li, lpart = self._hit_lane(pos)
+        tid, li, lpart = self._hit_lane(pos)
         if li >= 0:
-            t = self._lane_items(kind)[li]
-            self._select_layer(kind, t.id)
-            self._lane, self._drag_idx, self._mode = kind, li, lpart
+            t = self._lane_items(tid)[li]
+            self._select_layer(item_kind(self.project.track_by_id(tid)), t.id)
+            self._lane, self._drag_idx, self._mode = tid, li, lpart
             self._lane_orig = (t.start, t.duration, getattr(t, "in_s", 0.0))
             self.about_to_change.emit(f"lanemove:{t.id}")
             self.seek_requested.emit(min(self.t_of(pos.x()), self.project.total))
@@ -437,8 +495,13 @@ class TimelineWidget(QWidget):
                            lpart in ("l_left", "l_right") else Qt.CursorShape.ArrowCursor)
             return
         if self._mode in ("l_move", "l_left", "l_right"):
-            self._drag_lane_item(self._lane_items(self._lane)[self._drag_idx],
-                                 (pos.x() - self._press.x()) / self.pps)
+            items = self._lane_items(self._lane)
+            if not 0 <= self._drag_idx < len(items):
+                return
+            item = items[self._drag_idx]
+            if self._mode == "l_move":
+                self._move_to_track(item, pos.y())
+            self._drag_lane_item(item, (pos.x() - self._press.x()) / self.pps)
             self.changed.emit()
             return
         if self._mode == "playhead":
@@ -459,6 +522,55 @@ class TimelineWidget(QWidget):
             if self._mode == "drag":
                 self._drop_idx = self._drop_index(pos.x())
                 self.update()
+
+    def _move_to_track(self, item, y: float) -> None:
+        """Перетащили элемент вверх/вниз — на другую дорожку того же рода (надписи к надписям)."""
+        i = self._track_at(y)
+        if i < 0:
+            return
+        cur, dst = self.project.track_by_id(self._lane), self.project.tracks[i]
+        if cur is None or dst.id == cur.id or item_kind(dst) != item_kind(cur):
+            return
+        item.track = dst.id
+        if dst.kind == "subtitles" or cur.kind == "subtitles":
+            item.auto = dst.kind == "subtitles"
+        self._lane = dst.id
+        self._drag_idx = self._lane_items(dst.id).index(item)
+
+    # ---------- меню дорожки (правый щелчок) ----------
+
+    def _track_menu(self, tr: Track, at) -> None:
+        m = QMenu(self)
+        add = m.addMenu(theme.icon("plus", size=16), "Новая дорожка")
+        for kind in ("text", "subtitles", "overlay", "media", "camera"):
+            add.addAction(theme.icon(LANE_ICONS[kind], size=16), TRACK_NAMES[kind],
+                          lambda _=False, k=kind: self.add_track(k, tr.id if k == tr.kind else None))
+        m.addAction(theme.icon("type", size=16), "Переименовать…", lambda: self._rename_track(tr))
+        n = len(self._lane_items(tr.id))
+        m.addAction(theme.icon("trash-2", size=16),
+                    "Удалить дорожку" + (f" (и всё на ней: {n})" if n else ""), lambda: self.remove_track(tr.id))
+        m.exec(at)
+
+    def add_track(self, kind: str, after: str | None = None) -> Track:
+        self.about_to_change.emit("track")
+        tr = self.project.add_track(kind, after)
+        self.changed.emit()
+        self._sync_height()
+        return tr
+
+    def remove_track(self, track_id: str) -> None:
+        self.about_to_change.emit("track")
+        self.project.remove_track(track_id)
+        self.project.normalize_tracks()        # основные дорожки остаются всегда (пустыми)
+        self.changed.emit()
+        self._sync_height()
+
+    def _rename_track(self, tr: Track) -> None:
+        name, ok = QInputDialog.getText(self, "Дорожка", "Название дорожки:", text=tr.name)
+        if ok and name.strip() and name.strip() != tr.name:
+            self.about_to_change.emit("track")
+            tr.name = name.strip()[:40]
+            self.changed.emit()
 
     def _drag_lane_item(self, t, dt: float) -> None:
         """Сдвиг текста/наложения по времени или изменение длины за край."""
@@ -565,10 +677,13 @@ class TimelineWidget(QWidget):
 
     def dropEvent(self, e) -> None:
         files = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        if files and e.position().y() < TRACK_Y - 4:        # на дорожку наложений/текстов
+        if files and e.position().y() < self.track_y - 4:        # на дорожку над видео
             self._mode, self._drop_idx = None, -1
             self.update()
-            self.overlay_files_dropped.emit([str(Path(f)) for f in files], self.t_of(e.position().x()))
+            i = self._track_at(e.position().y())
+            tr = self.project.tracks[i] if i >= 0 else None
+            tid = tr.id if tr is not None and item_kind(tr) == "overlay" else ""
+            self.overlay_files_dropped.emit([str(Path(f)) for f in files], self.t_of(e.position().x()), tid)
             return
         idx = self._drop_index(e.position().x())
         self._mode, self._drop_idx = None, -1
