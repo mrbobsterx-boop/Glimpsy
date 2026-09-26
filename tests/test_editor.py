@@ -546,6 +546,9 @@ def test_editor_keys_cut_jump_and_leaving_text(tmp_path, qt_app):
         QTest.keyClick(w, Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier)
         assert w.player.t == pytest.approx(3.0)
 
+        # ввод текста — только в окне, которое впереди (на сборочных машинах окно само вперёд не выходит)
+        w.activateWindow()
+        assert QTest.qWaitForWindowActive(w, 5000)
         QTest.keyClick(w, Qt.Key.Key_T)
         box = QApplication.focusWidget()
         assert isinstance(box, QPlainTextEdit)
