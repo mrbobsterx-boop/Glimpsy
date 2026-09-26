@@ -9,6 +9,11 @@
   window — именно это окно (по его номеру в системе; закрыли окно — поток больше не пишется);
   app    — любое окно этой программы;
   title  — окно, в заголовке которого есть слово (например, название проекта или сайта во вкладке).
+
+Поток «экран» (screen) — весь монитор целиком. Такие потоки пишутся все сразу, одновременно
+с окнами: каждый — в свой ролик. Звук, голос, камера и «важный момент» достаются только одному:
+если есть потоки-окна — окну, которое впереди (экраны тогда пишут только картинку);
+если потоков-окон нет — экрану, где сейчас курсор.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from dataclasses import asdict, dataclass
 from glimpsy.platform.base import Monitor, WindowInfo
 
 MAX_STREAMS = 3
-MODES = ("window", "app", "title")
+MODES = ("window", "app", "title", "screen")
 
 
 @dataclass
@@ -30,9 +35,14 @@ class StreamSpec:
     wid: int = 0
     app: str = ""
     title: str = ""
+    monitor: int = 0             # screen: номер монитора (с 1)
+
+    @property
+    def is_screen(self) -> bool:
+        return self.mode == "screen"
 
     def matches(self, win: WindowInfo | None) -> bool:
-        if win is None:
+        if win is None or self.is_screen:
             return False
         if self.mode == "window":
             return bool(self.wid) and win.wid == self.wid
@@ -47,12 +57,18 @@ class StreamSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> StreamSpec:
-        return cls(**{k: d[k] for k in ("id", "name", "mode", "wid", "app", "title") if k in d})
+        return cls(**{k: d[k] for k in ("id", "name", "mode", "wid", "app", "title", "monitor")
+                   if k in d})
 
 
 def match(streams: list[StreamSpec], win: WindowInfo | None) -> StreamSpec | None:
-    """Какой поток сейчас впереди (первый подходящий)."""
+    """Какой поток-окно сейчас впереди (первый подходящий)."""
     return next((s for s in streams if s.matches(win)), None)
+
+
+def screen_for(streams: list[StreamSpec], monitor_index: int) -> StreamSpec | None:
+    """Поток «экран» для этого монитора."""
+    return next((s for s in streams if s.is_screen and s.monitor == monitor_index), None)
 
 
 def monitor_for(monitors: list[Monitor], rect: tuple[int, int, int, int] | None) -> Monitor | None:

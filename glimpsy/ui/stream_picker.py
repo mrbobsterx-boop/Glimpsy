@@ -158,5 +158,6 @@ def _esc(t: str) -> str:
 
 def describe(spec: StreamSpec) -> str:
     """Коротко для меню: «Проект А — это окно»."""
-    how = {"window": "это окно", "app": "все окна программы", "title": f"заголовок «{spec.title}»"}
+    how = {"window": "это окно", "app": "все окна программы", "title": f"заголовок «{spec.title}»",
+           "screen": "весь экран, пишется всё время"}
     return f"{spec.name} — {how.get(spec.mode, spec.mode)}"

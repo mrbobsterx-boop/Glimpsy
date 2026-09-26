@@ -83,6 +83,22 @@ class Deferred:
     voice: tuple[int, int] | None = None     # (номер речи, номер куска) — для голосового режима
 
 
+@dataclass
+class _Background:
+    """Фоновая запись потока-экрана: пишется одновременно с главной, но без звука и камеры."""
+    sid: int
+    run: BufferRun
+    tracker: ActivityTracker                 # «интересность» только по изменениям картинки этого экрана
+    last_save_end: float = 0.0
+    active_seconds: float = 0.0
+    avg_score: float = 0.0
+    last_second: int = 0
+
+    def stop(self) -> None:
+        self.run.stop()
+        self.run.cleanup()
+
+
 class RecorderEngine(QObject):
     status_changed = Signal(dict)
     notify = Signal(str, str)                 # заголовок, текст
@@ -149,6 +165,11 @@ class RecorderEngine(QObject):
         self._waiting = False
         self._win_rect: tuple[int, int, int, int] | None = None
         self._rects: list[tuple[float, tuple[int, int, int, int] | None]] = []
+        # потоки-экраны пишутся все сразу: «главный» — self.run, остальные — фоновые
+        self._bg: dict[int, _Background] = {}
+        self._bg_retry: dict[int, float] = {}
+        self._screen_active = False               # сейчас главный — поток-экран под курсором
+        self._screen_wait = False                 # курсор на экране, который не записывается
 
     # ======================= публичные команды (из интерфейса) =======================
 
@@ -277,6 +298,7 @@ class RecorderEngine(QObject):
             self._user_paused = not self._user_paused
             if self._user_paused:
                 self._close_run()
+                self._bg_stop_all()
                 self._cam_stop()
                 self._audio_run(False)
                 self._set_state(State.PAUSED)
@@ -292,11 +314,13 @@ class RecorderEngine(QObject):
             self._set_streams(cmd[1])
         elif kind == "reselect":
             self._close_run()
+            self._bg_stop_all()
             self.services.capture.reset()
             self._monitors = []
         elif kind == "finish":
             self._save_stats()
             self._close_run()
+            self._bg_stop_all()
             self._audio_run(False)
             self._cam_finish()
             self._stop_listeners()
@@ -305,6 +329,7 @@ class RecorderEngine(QObject):
         elif kind == "stop":
             self._save_stats()
             self._close_run()
+            self._bg_stop_all()
             self._audio_run(False)
             self._cam_stop()
             self._stop_listeners()
@@ -362,6 +387,7 @@ class RecorderEngine(QObject):
                          f" — совпало со словом «{hit}» из чёрного списка" if hit else "")
         if self._private:
             self._close_run()     # в буфер не попадает ни одного кадра приватного окна
+            self._bg_stop_all()
             self._cam_stop()
             self._audio_run(False)    # и ни звука (например, звонок в мессенджере)
             self._set_state(State.PRIVATE)
@@ -369,10 +395,12 @@ class RecorderEngine(QObject):
 
         if self._waiting:
             # потоки: впереди окно, которое не записывается — ждём, пока вы к нему вернётесь
+            # (потоки-экраны при этом пишутся дальше)
             self._close_run()
             self._cam_stop()
             self._audio_run(False)
             self._set_state(State.WAITING)
+            self._bg_tick(now)
             return
 
         self._audio_run(True)
@@ -382,13 +410,26 @@ class RecorderEngine(QObject):
         if idle and self.services.input_events_supported:
             # Можем отследить возвращение пользователя по мыши/клавиатуре → запись полностью стоит
             self._close_run()
+            self._bg_stop_all()
             self._cam_stop()
             self._set_state(State.IDLE)
             return
 
         # --- 4. какой монитор снимать ---
         target = self._target_monitor(cursor_mon, now)
-        if self._stream:          # поток: снимаем тот монитор, где его окно
+        if self._screen_active and target is not None:
+            # потоки-экраны: главный — экран под курсором; остальные пишутся в фоне
+            spec = streams_mod.screen_for(self._specs(), target.index)
+            self._screen_wait = spec is None
+            if spec is None:
+                self._close_run()
+                self._cam_stop()
+                self._audio_run(False)
+                self._set_state(State.WAITING)
+                self._bg_tick(now)
+                return
+            self._switch_stream(spec.id)
+        elif self._stream:        # поток-окно: снимаем тот монитор, где его окно
             target = streams_mod.monitor_for(self._monitors, self._win_rect) or target
         if target is None:
             return
@@ -430,6 +471,7 @@ class RecorderEngine(QObject):
                 self._cam_seconds += 1
                 self._maybe_save(now)
                 self._maybe_camera()
+        self._bg_tick(now)
         self._emit_status(now)
 
     def _target_monitor(self, cursor_mon: Monitor | None, now: float) -> Monitor | None:
@@ -496,12 +538,19 @@ class RecorderEngine(QObject):
 
     def _check_stream(self, win, now: float) -> None:
         """Какой поток сейчас впереди. Нет подходящего окна — запись ждёт."""
-        with self._streams_lock:
-            specs = list(self.streams)
+        specs = self._specs()
+        self._screen_active = False
         if not specs:
             self._waiting = False
             return
         spec = streams_mod.match(specs, win)
+        if spec is None and any(sp.is_screen for sp in specs) and all(sp.is_screen for sp in specs):
+            # только экраны: главный (со звуком и камерой) — экран под курсором, решается в _tick
+            self._waiting = False
+            self._screen_active = True
+            return
+        # есть потоки-окна: экраны пишутся только в фоне — картинка без звука и камеры,
+        # голос и камера идут в ролик окна, которое впереди
         self._waiting = spec is None
         if spec is None:
             return
@@ -512,18 +561,149 @@ class RecorderEngine(QObject):
         while self._rects and self._rects[0][0] < cutoff:
             self._rects.pop(0)
 
+    def _specs(self) -> list[StreamSpec]:
+        with self._streams_lock:
+            return list(self.streams)
+
+    def _screen_ids(self) -> set[int]:
+        return {sp.id for sp in self._specs() if sp.is_screen}
+
     def _switch_stream(self, sid: int) -> None:
         if sid == self._stream or self.session_dir is None:
             return
-        self._close_run()            # фрагмент прошлого окна заканчивается здесь
-        self._stream_state[self._stream] = (self._last_save_end, self._active_seconds, self._avg_score)
+        old, run, incoming = self._stream, self.run, self._bg.pop(sid, None)
+        if run is not None and old in self._screen_ids() and run.alive and self.activity is not None:
+            # экран, с которого ушли, не останавливается — его запись уходит в фон без разрыва
+            self._flush_run(run, time.time())
+            bg = _Background(old, run, ActivityTracker(False), self._last_save_end,
+                             self._active_seconds, self._avg_score)
+            run.on_frame_diff = bg.tracker.add_frame_diff
+            self._bg[old] = bg
+            self.run = None
+        else:
+            self._close_run()            # фрагмент прошлого окна заканчивается здесь
+        self._stream_state[old] = (self._last_save_end, self._active_seconds, self._avg_score)
         self._stream = sid
         self._last_save_end, self._active_seconds, self._avg_score = self._stream_state.get(sid, (0.0, 0.0, 0.0))
+        if incoming is not None and incoming.run.alive and self.activity is not None:
+            # а фоновая запись нового экрана становится главной — тоже без разрыва
+            self.run = incoming.run
+            self.run.on_frame_diff = self.activity.add_frame_diff
+            self._last_save_end, self._active_seconds, self._avg_score = \
+                incoming.last_save_end, incoming.active_seconds, incoming.avg_score
+        elif incoming is not None:
+            incoming.stop()
         self.pool = self._pool_for(sid)
         self._rects = []
         self._win_rect = None
         self._pending_monitor = None
         log.info("Запись переключилась на %s", f"поток «{self._stream_names.get(sid, sid)}»" if sid else "весь экран")
+
+    # ---------- фоновые записи экранов ----------
+
+    BG_RETRY_S = 10.0
+
+    def _bg_stop_all(self) -> None:
+        for bg in self._bg.values():
+            bg.stop()
+        self._bg.clear()
+
+    def _bg_tick(self, now: float) -> None:
+        """Все потоки-экраны, кроме главного, пишутся в фоне; раз в секунду — может, сохранить момент."""
+        mons = {m.index: m for m in self._monitors}
+        main = self._stream if self.run is not None else None
+        want = {sp.id: mons.get(sp.monitor) for sp in self._specs() if sp.is_screen and sp.id != main}
+        for sid in [s for s in self._bg if s not in want or want[s] is None or want[s] != self._bg[s].run.monitor]:
+            self._bg.pop(sid).stop()
+        for sid, mon in want.items():
+            if mon is None:
+                continue
+            bg = self._bg.get(sid)
+            if bg is not None and not bg.run.alive:
+                log.warning("Фоновая запись «%s» остановилась:\n%s", self._stream_names.get(sid, sid),
+                            bg.run.error_text()[-500:])
+                self._bg.pop(sid).stop()
+                self._bg_retry[sid] = now + self.BG_RETRY_S
+                continue
+            if bg is None:
+                if now >= self._bg_retry.get(sid, 0.0):
+                    self._bg_start(sid, mon, now)
+                continue
+            bg.run.poll()
+            bg.run.trim(self.s.buffer_s + 2)
+            sec = int(now)
+            if sec != bg.last_second:
+                bg.last_second = sec
+                bg.active_seconds += 1
+                self._bg_maybe_save(bg, now)
+
+    def _bg_start(self, sid: int, mon: Monitor, now: float) -> None:
+        assert self.session_dir and self.encoder
+        self._run_counter += 1
+        capture = self.services.capture
+        try:
+            cap = capture.input_for(mon, self.s.fps)
+        except Exception:
+            log.exception("Фоновая запись экрана %s не подготовилась", mon.label)
+            self._bg_retry[sid] = now + self.BG_RETRY_S
+            return
+        tracker = ActivityTracker(False)
+        run = BufferRun(self.ffmpeg, cap, mon, self.encoder, self.s.fps,
+                        self.session_dir / "buffer" / f"run_{self._run_counter:04d}",
+                        self.s.record_max_height, on_frame_diff=tracker.add_frame_diff)
+        try:
+            run.start()
+        except Exception:
+            log.exception("Фоновая запись экрана %s не запустилась", mon.label)
+            run.cleanup()
+            self._bg_retry[sid] = now + self.BG_RETRY_S
+            return
+        run.own_cursor = capture.cursor_hidden
+        last_end, active, avg = self._stream_state.get(sid, (0.0, 0.0, 0.0))
+        self._bg[sid] = _Background(sid, run, tracker, last_end, active, avg)
+        log.info("Фоновая запись: экран %s → поток «%s»", mon.label, self._stream_names.get(sid, sid))
+
+    def _bg_maybe_save(self, bg: _Background, now: float) -> None:
+        run, L = bg.run, self.plan.candidate_s
+        if run.available_from is None or now - run.available_from < L * 0.6 or now - bg.last_save_end < L:
+            return
+        recent = bg.tracker.score(now - L, now)
+        bg.avg_score = recent if bg.avg_score == 0 else 0.98 * bg.avg_score + 0.02 * recent
+        if self._rng.random() < save_probability(self.plan, bg.active_seconds, recent, bg.avg_score):
+            self._bg_save(bg, now - L, now)
+
+    def _bg_save(self, bg: _Background, t0: float, t1: float) -> None:
+        act, run = self.activity, bg.run
+        if act is None or self.session_dir is None:
+            return
+        pool = self._pool_for(bg.sid)
+        run.poll()
+        cid, path = pool.new_file()
+        try:
+            got = run.save_clip(t0, t1, path)
+        except OSError:
+            log.exception("Не удалось сохранить фоновый фрагмент")
+            got = None
+        if got is None or (got[1] - got[0]) < self.plan.clip_min_s * self.plan.speed * 0.8:
+            path.unlink(missing_ok=True)
+            return
+        ws, we = got
+        mi = run.monitor.index
+        pool.add(Candidate(
+            id=cid, file=path.name, wall_start=ws, wall_end=we, want_start=max(t0, ws), want_end=min(t1, we),
+            monitor=mi, width=run.capture.width, height=run.capture.height,
+            score=bg.tracker.score(max(t0, ws), min(t1, we)),
+            activity=[round(v, 3) for v in bg.tracker.per_second(ws, we)],
+            cursor=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, m, x, y in act.cursor_between(ws, we)
+                    if m == mi],
+            clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, x, y in act.clicks_between(ws, we, mi)],
+            own_cursor=run.own_cursor,
+        ))
+        removed = pool.prune(self.plan.pool_size)
+        pool.save()
+        bg.last_save_end = max(bg.last_save_end, we)
+        log.info("Кандидат #%s: %.1f с, фон, поток «%s» (удалено %s)", cid, we - ws,
+                 self._stream_names.get(bg.sid, bg.sid), len(removed))
 
     def _crop(self, mon: Monitor, t0: float, t1: float) -> list[float] | None:
         rects = [r for t, r in self._rects if r and t0 - 1 <= t <= t1 + 1]
@@ -566,7 +746,11 @@ class RecorderEngine(QObject):
             return
         self.run = None
         run.stop()
-        end = run.ended_at or time.time()
+        self._flush_run(run, run.ended_at or time.time())
+        run.cleanup()
+
+    def _flush_run(self, run: BufferRun, end: float) -> None:
+        """Главная запись заканчивается (или уходит в фон): сохранить «важные моменты» и речь."""
         for d in list(self._deferred):
             self._deferred.remove(d)
             self._save_from(run, d.t0, min(d.t1, end), d.priority, d.voice)
@@ -578,7 +762,6 @@ class RecorderEngine(QObject):
             v["from"] = got[1] if got else end
             if self._user_paused or self._private:
                 self._voice = None
-        run.cleanup()
 
     def _on_run_died(self, now: float) -> None:
         run = self.run
@@ -706,7 +889,7 @@ class RecorderEngine(QObject):
                 except OSError:
                     log.exception("Не удалось сохранить звук")
                     audio_name = ""
-        crop = self._crop(run.monitor, ws, we) if self._stream else None
+        crop = self._crop(run.monitor, ws, we) if self._stream and self._stream not in self._screen_ids() else None
         cursor = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
                                       for t, m, x, y in act.cursor_between(ws, we) if m == run.monitor.index], crop)
         clicks = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
@@ -963,6 +1146,7 @@ class RecorderEngine(QObject):
             "capture": self.services.capture.name,
             "error": self._error if self.state == State.ERROR else "",
             "voice": voice,
+            "parallel": [self._stream_names.get(s, str(s)) for s in sorted(self._bg)],
         }
         if st != self._last_status or force:
             self._last_status = st

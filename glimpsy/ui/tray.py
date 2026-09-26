@@ -119,6 +119,8 @@ class TrayController(QObject):
             a.setVisible(active)
         self.a_start.setVisible(state == State.STOPPED)
         tip = f"Glimpsy — {label}\n{self.a_counts.text()}"
+        if st.get("parallel"):
+            tip += "\nПараллельно пишутся: " + ", ".join(st["parallel"])
         if st.get("voice"):
             tip += "\n🔴 Пишется голос"
         if st.get("error"):
@@ -302,7 +304,7 @@ class TrayController(QObject):
         m = self.streams_menu
         m.clear()
         specs = self.engine.streams
-        whole = QAction("Весь экран", m, checkable=True)
+        whole = QAction("Обычная запись — весь экран", m, checkable=True)
         whole.setChecked(not specs)
         whole.triggered.connect(lambda: self.engine.set_streams([]))
         m.addAction(whole)
@@ -316,9 +318,37 @@ class TrayController(QObject):
         add = m.addAction(theme.icon("plus", size=16),
                           "Только одно окно…" if not specs else "Ещё одно окно (свой ролик)…", self._add_stream)
         add.setEnabled(len(specs) < MAX_STREAMS and self.services.active_window.supported)
-        hint = m.addAction("Каждое окно — отдельный ролик. Впереди другое окно — запись ждёт."
-                           if specs else f"До {MAX_STREAMS} окон одновременно, каждое — в свой ролик.")
+        taken = {sp.monitor for sp in specs if sp.is_screen}
+        for mon in self._monitor_list():
+            if mon.index in taken:
+                continue
+            name = "Весь экран" if len(self._monitor_list()) == 1 else f"Экран {mon.label}"
+            a = m.addAction(theme.icon("monitor", size=16), f"{name} — параллельно, свой ролик",
+                            lambda _=False, mn=mon: self._add_screen_stream(mn))
+            a.setEnabled(len(specs) < MAX_STREAMS)
+        hint = m.addAction(f"До {MAX_STREAMS} записей сразу, каждая — в свой ролик. Экраны пишутся всё "
+                           "время; окно — пока оно впереди. Звук и камера — только у окна (или у "
+                           "экрана под курсором, если окон нет).")
         hint.setEnabled(False)
+
+    def _monitor_list(self) -> list:
+        mons = list(self.engine._monitors)
+        if not mons:
+            try:
+                mons = self.services.capture.monitors()
+            except Exception:
+                log.debug("Список мониторов недоступен", exc_info=True)
+        return mons
+
+    def _add_screen_stream(self, mon) -> None:
+        from glimpsy.recorder.streams import StreamSpec
+
+        sid = self._stream_next
+        self._stream_next += 1
+        name = "Весь экран" if len(self._monitor_list()) == 1 else f"Экран {mon.label}"
+        self.engine.set_streams([*self.engine.streams, StreamSpec(sid, name, mode="screen", monitor=mon.index)])
+        if not self.engine.running:
+            self.engine.start_session()
 
     def _add_stream(self) -> None:
         from glimpsy.ui.stream_picker import StreamPicker

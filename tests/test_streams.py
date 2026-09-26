@@ -97,3 +97,90 @@ def test_assembly_crops_window(tmp_path):
     assert corner[2] > 150 and corner[0] < 80, corner
     meta = json.loads((tmp_path / "p" / "project.json").read_text())
     assert meta["stream"] == "Проект: А" and meta["clips"][0]["source_size"] == [320, 180]
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_screens_record_in_parallel_audio_goes_to_active(tmp_path):
+    """Два экрана пишутся одновременно; переход курсора меняет главный без остановки записи;
+    с потоком-окном экраны пишут только картинку, а главный — окно."""
+    from glimpsy.config import Settings
+    from glimpsy.platform.base import CaptureBackend, CaptureInput
+    from glimpsy.recorder.activity import ActivityTracker
+    from glimpsy.recorder.encoder import software_encoder
+    from glimpsy.recorder.engine import RecorderEngine
+
+    mons = [Monitor(1, 0, 0, 320, 180), Monitor(2, 320, 0, 320, 180)]
+
+    class Capture(CaptureBackend):
+        name = "test"
+
+        def monitors(self):
+            return mons
+
+        def input_for(self, monitor, fps):
+            color = "red" if monitor.index == 1 else "blue"
+            return CaptureInput(["-re", "-f", "lavfi", "-i", f"color=c={color}:size=320x180:rate={fps}"], 320, 180)
+
+    class Cursor:
+        supported = True
+        pos = (10.0, 10.0)
+
+        def position(self):
+            return self.pos
+
+    class Win:
+        supported = True
+        win = WindowInfo("krita", "Рисунок", wid=5, rect=(0, 0, 320, 180))
+
+        def active(self):
+            return self.win
+
+    class Services:
+        capture, cursor, active_window = Capture(), Cursor(), Win()
+        input_events_supported = False
+
+    eng = RecorderEngine(Settings(fps=10, idle_pause_s=3600).validate(), Services(), FFMPEG)
+    eng.session_dir = tmp_path
+    eng._load_pools(tmp_path)
+    eng.activity = ActivityTracker(False)
+    eng.encoder = software_encoder()
+    screens = [StreamSpec(1, "Экран 1", "screen", monitor=1), StreamSpec(2, "Экран 2", "screen", monitor=2)]
+    eng.set_streams(screens)
+    eng._set_streams(eng.streams)
+
+    def run_for(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            eng._tick(time.time())
+            time.sleep(0.1)
+
+    try:
+        run_for(3)
+        assert eng._stream == 1 and eng.run is not None and eng.run.monitor.index == 1
+        assert set(eng._bg) == {2} and eng._bg[2].run.alive              # второй экран — в фоне
+        first, second = eng.run, eng._bg[2].run
+        Services.cursor.pos = (400.0, 10.0)                              # курсор на второй экран
+        run_for(2)
+        assert eng._stream == 2 and eng.run is second                    # тот же процесс — без разрыва
+        assert set(eng._bg) == {1} and eng._bg[1].run is first
+        run_for(2)
+        now = time.time()
+        eng._bg_save(eng._bg[1], now - 3, now)
+        eng._save(now - 3, now, priority=False)
+        assert eng.pools[1].count == 1 and eng.pools[2].count == 1
+        assert not eng.pools[1].items[0].audio
+
+        # добавили поток-окно: экраны уходят в фон (только картинка), главный — окно впереди
+        eng.set_streams([*screens, StreamSpec(3, "Рисунок", "window", wid=5)])
+        eng._set_streams(eng.streams)
+        run_for(2)
+        assert eng._stream == 3 and not eng._screen_active
+        assert set(eng._bg) == {1, 2}
+        Services.active_window.win = WindowInfo("figma", "Документ", wid=9)
+        run_for(1.5)
+        assert eng._waiting and eng.run is None and set(eng._bg) == {1, 2}  # окна нет — экраны пишутся
+        eng._emit_status(time.time(), force=True)
+        assert eng._last_status["parallel"] == ["Экран 1", "Экран 2"]
+    finally:
+        eng._close_run()
+        eng._bg_stop_all()
