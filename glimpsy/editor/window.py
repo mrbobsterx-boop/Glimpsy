@@ -244,6 +244,8 @@ class EditorWindow(QMainWindow):
         tool("captions", "Субтитры", "Автосубтитры: распознать речь (на этом компьютере)", self.auto_subtitles)
         tool("layers", "Наложение", "Картинка или видео поверх ролика", self.add_overlay_dialog)
         tool("music", "Музыка", "Фоновая музыка на весь ролик", self.add_music_dialog)
+        tool("square-split-horizontal", "До/после", "Вставка «Было → стало»: шторка, таймлапс или стоп-кадр",
+             self.before_after)
         rl.addStretch(1)
         tool("chart-column", "Статистика", "Сколько работали и где — только для вас", self.show_stats)
         self.shortcuts = ShortcutsPanel()
@@ -1117,6 +1119,49 @@ class EditorWindow(QMainWindow):
         if report.notes:
             text += " (" + "; ".join(report.notes) + ")"
         self.statusBar().showMessage(text + ". Отменить — Ctrl+Z", 10000)
+
+    def before_after(self) -> None:
+        from glimpsy.editor import before_after as ba
+        from glimpsy.editor.before_after_dialog import BeforeAfterDialog
+
+        if not any(c.kind == "video" for c in self.project.clips):
+            QMessageBox.information(self, "Было → стало", "В проекте нет видеофрагментов.")
+            return
+        dlg = BeforeAfterDialog(self)
+        if not dlg.exec():
+            return
+        self.player.pause()
+        place = dlg.place.currentData()
+        prog = QProgressDialog("Рисую вставку…", "Отмена", 0, 1000, self)
+        prog.setWindowTitle("Было → стало")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(300)
+
+        def progress(f: float) -> bool:
+            prog.setValue(int(f * 1000))
+            QApplication.processEvents()
+            return not prog.wasCanceled()
+
+        try:
+            clip = ba.make_clip(self.ffmpeg, self.project, dlg.mode, dlg.seconds.value(), progress)
+        except ba.BeforeAfterError as e:
+            prog.close()
+            if str(e):
+                QMessageBox.warning(self, "Было → стало", str(e))
+            return
+        prog.close()
+        if place == "start":
+            index = 0
+        elif place == "here":
+            idx, local = self.project.locate(self.player.t)
+            index = 0 if idx is None else idx + (1 if local > self.project.clips[idx].duration / 2 else 0)
+        else:
+            index = len(self.project.clips)
+        self.history.push(self.project.to_dict())
+        self.project.insert(index, [clip])
+        self.timeline.select(clip.id)
+        self._changed()
+        self.player.seek(self.project.start_of(index))
 
     def show_stats(self) -> None:
         from glimpsy.editor.stats_dialog import StatsDialog
