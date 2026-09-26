@@ -74,6 +74,14 @@ class Settings:
     hotkey_important: str = "Ctrl+Alt+1"
     hotkey_pause: str = "Ctrl+Alt+2"
     hotkey_finish: str = "Ctrl+Alt+3"
+    # суфлёр: цифры одним рядом — легко запомнить и нажать не глядя
+    hotkey_prompter_show: str = "Ctrl+Alt+4"      # показать / спрятать
+    hotkey_prompter_play: str = "Ctrl+Alt+5"      # пуск / пауза
+    hotkey_prompter_slower: str = "Ctrl+Alt+6"
+    hotkey_prompter_faster: str = "Ctrl+Alt+7"
+    hotkey_prompter_back: str = "Ctrl+Alt+8"      # назад на пару строк (сбился — перечитать)
+    hotkey_prompter_lock: str = "Ctrl+Alt+9"      # закрепить (клики насквозь) / настроить
+    hotkey_prompter_top: str = "Ctrl+Alt+0"       # в начало текста
     important_before_s: int = 10
     important_after_s: int = 5
 

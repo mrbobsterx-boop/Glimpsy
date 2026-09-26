@@ -119,6 +119,7 @@ class RecorderEngine(QObject):
         self.state = State.STOPPED
         self.streams: list[StreamSpec] = []      # пусто — весь экран; иначе только эти окна
         self._streams_lock = threading.Lock()
+        self._masks: list[tuple[int, int, int, int]] = []   # что закрашивать в записи (суфлёр), в координатах рабочего стола
         self._reset_session_fields()
 
     def _reset_session_fields(self) -> None:
@@ -233,6 +234,14 @@ class RecorderEngine(QObject):
         if self.running:
             self._cmds.put(("streams", specs))
 
+    def set_masks(self, rects: list[tuple[int, int, int, int]]) -> None:
+        """Области рабочего стола, которые не должны попасть в запись (например, суфлёр)."""
+        rects = [tuple(int(v) for v in r) for r in rects]
+        if self.running:
+            self._cmds.put(("masks", rects))
+        else:
+            self._masks = rects
+
     def reselect_screen(self) -> None:
         """Wayland: заново показать системное окно выбора экрана."""
         self._cmds.put(("reselect",))
@@ -312,6 +321,8 @@ class RecorderEngine(QObject):
             self._apply_settings(cmd[1])
         elif kind == "streams":
             self._set_streams(cmd[1])
+        elif kind == "masks":
+            self._set_masks(cmd[1])
         elif kind == "reselect":
             self._close_run()
             self._bg_stop_all()
@@ -599,6 +610,35 @@ class RecorderEngine(QObject):
         self._pending_monitor = None
         log.info("Запись переключилась на %s", f"поток «{self._stream_names.get(sid, sid)}»" if sid else "весь экран")
 
+    # ---------- закрашенные области (суфлёр) ----------
+
+    def _set_masks(self, rects: list[tuple[int, int, int, int]]) -> None:
+        if rects == self._masks:
+            return
+        touched = rects + self._masks
+        self._masks = rects
+
+        def hit(mon: Monitor) -> bool:
+            return any(x < mon.x + mon.width and mon.x < x + w and y < mon.y + mon.height and mon.y < y + h
+                       for x, y, w, h in touched)
+        # запись экрана, где суфлёр появился, пропал или сдвинулся, начинается заново — уже с новой областью
+        if self.run is not None and hit(self.run.monitor):
+            self._close_run()
+        for sid in [s for s, bg in self._bg.items() if hit(bg.run.monitor)]:
+            self._bg.pop(sid).stop()
+
+    def _masks_for(self, mon: Monitor, cap) -> list[tuple[int, int, int, int]]:
+        """Области в пикселях кадра этого монитора."""
+        out = []
+        kx, ky = cap.width / mon.width, cap.height / mon.height
+        for x, y, w, h in self._masks:
+            x0, y0 = max(x, mon.x), max(y, mon.y)
+            x1, y1 = min(x + w, mon.x + mon.width), min(y + h, mon.y + mon.height)
+            if x1 > x0 and y1 > y0:
+                out.append((int((x0 - mon.x) * kx), int((y0 - mon.y) * ky),
+                            max(2, int((x1 - x0) * kx)), max(2, int((y1 - y0) * ky))))
+        return out
+
     # ---------- фоновые записи экранов ----------
 
     BG_RETRY_S = 10.0
@@ -650,7 +690,8 @@ class RecorderEngine(QObject):
         tracker = ActivityTracker(False)
         run = BufferRun(self.ffmpeg, cap, mon, self.encoder, self.s.fps,
                         self.session_dir / "buffer" / f"run_{self._run_counter:04d}",
-                        self.s.record_max_height, on_frame_diff=tracker.add_frame_diff)
+                        self.s.record_max_height, on_frame_diff=tracker.add_frame_diff,
+                        masks=self._masks_for(mon, cap))
         try:
             run.start()
         except Exception:
@@ -727,7 +768,8 @@ class RecorderEngine(QObject):
             return
         run = BufferRun(self.ffmpeg, cap, monitor, self.encoder, self.s.fps,
                         self.session_dir / "buffer" / f"run_{self._run_counter:04d}",
-                        self.s.record_max_height, on_frame_diff=self.activity.add_frame_diff)
+                        self.s.record_max_height, on_frame_diff=self.activity.add_frame_diff,
+                        masks=self._masks_for(monitor, cap))
         try:
             run.start()
         except Exception as e:

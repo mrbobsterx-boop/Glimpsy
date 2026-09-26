@@ -51,8 +51,10 @@ class Segment:
 class BufferRun:
     def __init__(self, ffmpeg: str, capture: CaptureInput, monitor: Monitor, encoder: Encoder,
                  fps: int, run_dir: Path, max_height: int,
-                 on_frame_diff: Callable[[float, float], None] | None = None) -> None:
+                 on_frame_diff: Callable[[float, float], None] | None = None,
+                 masks: list[tuple[int, int, int, int]] | None = None) -> None:
         self.ffmpeg = ffmpeg
+        self.masks = masks or []         # закрасить в записи (x, y, w, h в пикселях кадра) — например, суфлёр
         self.capture = capture
         self.monitor = monitor
         self.encoder = encoder
@@ -80,8 +82,10 @@ class BufferRun:
         # Размеры делаем чётными: этого требуют видеокодеки.
         scale = (f"scale='trunc(min(iw,iw*{self.max_height}/ih)/2)*2':"
                  f"'trunc(min(ih,{self.max_height})/2)*2'")
+        # области, которые не должны попасть в запись (суфлёр), закрашиваем сразу при захвате
+        masks = "".join(f"drawbox=x={x}:y={y}:w={w}:h={h}:color=0x14171D:t=fill," for x, y, w, h in self.masks)
         graph = (
-            f"[0:v]{cap.pre_filter}fps={self.fps},split=2[m][t];"
+            f"[0:v]{cap.pre_filter}{masks}fps={self.fps},split=2[m][t];"
             f"[m]{scale},{self.encoder.filter_suffix}[enc];"
             f"[t]fps={THUMB_FPS},scale={THUMB_W}:{THUMB_H},format=gray[th]"
         )

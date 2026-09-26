@@ -20,6 +20,11 @@ from glimpsy.recorder.webcam import MODE_LABELS as CAMERA_MODES, list_cameras
 from glimpsy.ui import theme
 from glimpsy.ui.icons import app_logo
 
+PROMPTER_KEYS = [("hotkey_prompter_show", "Показать / спрятать"), ("hotkey_prompter_play", "Пуск / пауза"),
+                 ("hotkey_prompter_slower", "Медленнее"), ("hotkey_prompter_faster", "Быстрее"),
+                 ("hotkey_prompter_back", "Назад на пару строк"), ("hotkey_prompter_lock", "Закрепить / настроить"),
+                 ("hotkey_prompter_top", "В начало текста")]
+
 RESOLUTIONS = [("1920×1080 (Full HD)", 1920, 1080), ("2560×1440 (2K)", 2560, 1440),
                ("3840×2160 (4K)", 3840, 2160), ("1280×720 (HD)", 1280, 720)]
 
@@ -260,6 +265,13 @@ class SettingsDialog(QDialog):
         f.addRow("   и после нажатия", self.imp_after)
         f.addRow("Пауза / продолжить", self.hk_pause)
         f.addRow("Собрать ролик", self.hk_finish)
+        head = QLabel("Суфлёр")
+        head.setProperty("role", "section")
+        f.addRow(head)
+        self.hk_prompter: dict[str, QLineEdit] = {}
+        for key, label in PROMPTER_KEYS:
+            self.hk_prompter[key] = QLineEdit(getattr(self.s, key))
+            f.addRow(label, self.hk_prompter[key])
         f.addRow("", _hint("Формат: Ctrl+Alt+1, Ctrl+Shift+F9, Cmd+Alt+P. Модификаторы: Ctrl, Alt (Option), "
                            "Shift, Cmd (Win)."))
         if not self.services.hotkeys.supported:
@@ -495,10 +507,13 @@ class SettingsDialog(QDialog):
             s.hotkey_important = hotkey_format.normalize(self.hk_important.text())
             s.hotkey_pause = hotkey_format.normalize(self.hk_pause.text())
             s.hotkey_finish = hotkey_format.normalize(self.hk_finish.text())
+            for key, edit in self.hk_prompter.items():
+                setattr(s, key, hotkey_format.normalize(edit.text()))
         except hotkey_format.HotkeyError as e:
             self.error.setText(str(e))
             return
-        if len({s.hotkey_important, s.hotkey_pause, s.hotkey_finish}) < 3:
+        combos = [s.hotkey_important, s.hotkey_pause, s.hotkey_finish] + [getattr(s, k) for k in self.hk_prompter]
+        if len(set(combos)) < len(combos):
             self.error.setText("Горячие клавиши не должны повторяться.")
             return
         s.target_length_s = self.target.value()

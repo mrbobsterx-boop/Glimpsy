@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QApplication, QLabel, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 
 
 class TrayController(QObject):
+    _prompter_cmd = Signal(str)          # горячие клавиши суфлёра (из потока клавиатуры) → поток интерфейса
+
     def __init__(self, app: QApplication, settings: Settings, services: PlatformServices,
                  engine: RecorderEngine) -> None:
         super().__init__()
@@ -38,6 +40,8 @@ class TrayController(QObject):
         self._editors: list = []
         self._picker = None
         self._stream_next = 1
+        self._prompter = None
+        self._prompter_cmd.connect(self._prompter_run)
 
         self.menu = QMenu()
         self.a_status = self.menu.addAction("…")
@@ -57,6 +61,7 @@ class TrayController(QObject):
         self.streams_menu.aboutToShow.connect(self._fill_streams_menu)
         self.monitor_menu = self.menu.addMenu(ic("monitor", size=16), "Монитор")
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
+        self.menu.addAction(ic("type", size=16), "Суфлёр…", lambda: self.prompter().toggle_visible())
         self.menu.addAction(ic("film", size=16), "Редактор роликов…", self.open_editor)
         self.menu.addAction(ic("folder-open", size=16), "Папка с роликами",
                             lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
@@ -95,6 +100,9 @@ class TrayController(QObject):
             "important": (self.s.hotkey_important, self.engine.mark_important),
             "pause": (self.s.hotkey_pause, self.engine.toggle_pause),
             "finish": (self.s.hotkey_finish, self.engine.finish),
+            # суфлёр: горячие клавиши приходят из другого потока — выполняем в потоке интерфейса
+            **{k: (getattr(self.s, f"hotkey_prompter_{k[3:]}"), self._prompter_call(k[3:]))
+               for k in ("pr_show", "pr_play", "pr_slower", "pr_faster", "pr_back", "pr_lock", "pr_top")},
         })
         for e in errors:
             self.show_message("Горячие клавиши", e)
@@ -350,6 +358,32 @@ class TrayController(QObject):
         if not self.engine.running:
             self.engine.start_session()
 
+    # ---------- суфлёр ----------
+
+    def prompter(self):
+        from glimpsy.ui.prompter import Prompter
+
+        if self._prompter is None:
+            def speaking() -> bool:
+                a = self.engine.audio
+                return a is not None and a.voice.speaking().speaking
+            self._prompter = Prompter(is_speaking=speaking)
+            self._prompter.masks_changed.connect(self.engine.set_masks)
+        return self._prompter
+
+    def _prompter_call(self, what: str):
+        return lambda: self._prompter_cmd.emit(what)
+
+    def _prompter_run(self, what: str) -> None:
+        p = self.prompter()
+        if what == "show":
+            p.toggle_visible()
+            return
+        if not p.isVisible():
+            p.show_prompter()
+        {"play": p.toggle_play, "slower": p.slower, "faster": p.faster, "back": p.back,
+         "lock": p.toggle_locked, "top": p.to_top}[what]()
+
     def _add_stream(self) -> None:
         from glimpsy.ui.stream_picker import StreamPicker
 
@@ -489,6 +523,8 @@ class TrayController(QObject):
             if ans != QMessageBox.StandardButton.Yes:
                 return
         self.services.hotkeys.stop()
+        if self._prompter is not None:
+            self._prompter.hide()
         self.engine.shutdown()
         self.services.capture.close()
         if self.tray:
