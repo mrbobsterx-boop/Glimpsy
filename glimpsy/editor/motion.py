@@ -29,6 +29,9 @@ FOLLOW_TAU = 0.5
 TIGHT, LOOSE = 0.12, 0.25   # «курсор в небольшой области»: разброс в долях экрана
 
 MODES = {"none": "Без движения", "autozoom": "Автозум к курсору", "pushin": "Наезд",
+         "cursor_zoom": "К стрелке", "region": "Зум на область",
+         "scroll_down": "Прокрутка вниз", "scroll_up": "Прокрутка вверх",
+         "scroll_left": "Прокрутка влево", "scroll_right": "Прокрутка вправо",
          "follow_hard": "За курсором: жёстко (9:16)",
          "follow": "За курсором: плавно (9:16)", "follow_zoom": "За курсором: зона + зум (9:16)"}
 
@@ -120,17 +123,94 @@ def pushin_track(cursor: list, clicks: list, in_s: float, out_s: float,
     return out
 
 
+CURSOR_ZOOM_TAU = 0.3        # «к стрелке»: как быстро камера догоняет курсор
+REGION_EASE = 0.6            # «зум на область»: наезд и отъезд, с
+SCROLL_ZOOM = 1.5            # прокрутка: приближение, чтобы было куда ехать
+
+
+def cursor_zoom_track(cursor: list, duration: float, strength: float) -> list[tuple[float, float, float, float]]:
+    """Кадр всё время приближен и едет за стрелкой (плавно)."""
+    pts = samples(cursor, duration)
+    z = max(1.0, strength)
+    half = 0.5 / z
+    if not pts or duration <= 0:
+        return [(0.0, z, 0.5, 0.5), (max(duration, STEP), z, 0.5, 0.5)]
+    out = []
+    cx, cy = pts[0][1], pts[0][2]
+    t, j = 0.0, 0
+    while t <= duration + 1e-6:
+        while j < len(pts) - 1 and pts[j + 1][0] <= t:
+            j += 1
+        cx = _smooth(cx, pts[j][1], STEP, CURSOR_ZOOM_TAU)
+        cy = _smooth(cy, pts[j][2], STEP, CURSOR_ZOOM_TAU)
+        out.append((round(t, 3), z, min(max(cx, half), 1 - half), min(max(cy, half), 1 - half)))
+        t += STEP
+    return out
+
+
+def region_track(region: list, in_s: float, out_s: float) -> list[tuple[float, float, float, float]]:
+    """Плавный наезд на выбранную область, держим, в конце — плавный отъезд."""
+    if not region or len(region) < 4 or region[2] <= 0 or region[3] <= 0:
+        return [(in_s, 1.0, 0.5, 0.5), (max(out_s, in_s + STEP), 1.0, 0.5, 0.5)]
+    x, y, w, h = region
+    zt = max(1.0, min(4.0, 1 / max(w, h)))
+    tx, ty = x + w / 2, y + h / 2
+    dur = max(STEP, out_s - in_s)
+    ease = min(REGION_EASE, dur / 3)
+    out = []
+    n = max(2, int(dur / STEP) + 1)
+    for i in range(n + 1):
+        t = dur * i / n
+        k = min(1.0, t / ease, (dur - t) / ease) if ease > 0 else 1.0
+        e = k * k * (3 - 2 * k)
+        z = 1 + (zt - 1) * e
+        half = 0.5 / z
+        cx = min(max(0.5 + (tx - 0.5) * e, half), 1 - half)
+        cy = min(max(0.5 + (ty - 0.5) * e, half), 1 - half)
+        out.append((round(in_s + t, 3), z, cx, cy))
+    return out
+
+
+def scroll_track(direction: str, in_s: float, out_s: float, zoom: float = SCROLL_ZOOM) -> list:
+    """Плавный проезд камеры по приближенному кадру: вниз, вверх, влево или вправо."""
+    z = max(1.05, zoom)
+    half = 0.5 / z
+    a, b = half, 1 - half
+    dur = max(STEP, out_s - in_s)
+    out = []
+    n = max(2, int(dur / STEP) + 1)
+    for i in range(n + 1):
+        k = i / n
+        e = k * k * (3 - 2 * k)
+        pos = {"scroll_down": a + (b - a) * e, "scroll_up": b - (b - a) * e,
+               "scroll_right": a + (b - a) * e, "scroll_left": b - (b - a) * e}.get(direction, 0.5)
+        vertical = direction in ("scroll_down", "scroll_up")
+        out.append((round(in_s + dur * k, 3), z, 0.5 if vertical else pos, pos if vertical else 0.5))
+    return out
+
+
 def is_zoom(mode: str) -> bool:
     """Режимы, где кадр приближается внутри исходной картинки (формат кадра не меняется)."""
-    return mode in ("autozoom", "pushin")
+    return mode in ("autozoom", "pushin", "cursor_zoom", "region") or mode.startswith("scroll_")
+
+
+def needs_cursor(mode: str) -> bool:
+    """Режимы, которым нужны записанные движения курсора (у своих видео их нет)."""
+    return mode in ("autozoom", "cursor_zoom") or is_follow(mode)
 
 
 def track_for(mode: str, cursor: list, clicks: list, duration: float, strength: float,
-              in_s: float, out_s: float, src_w: int, src_h: int) -> list:
+              in_s: float, out_s: float, src_w: int, src_h: int, region: list | None = None) -> list:
     if mode == "autozoom":
         return autozoom_track(cursor, duration, strength, clicks)
     if mode == "pushin":
         return pushin_track(cursor, clicks, in_s, out_s)
+    if mode == "cursor_zoom":
+        return cursor_zoom_track(cursor, duration, strength)
+    if mode == "region":
+        return region_track(region or [], in_s, out_s)
+    if mode.startswith("scroll_"):
+        return scroll_track(mode, in_s, out_s)
     return follow_track(cursor, duration, src_w, src_h, mode)
 
 

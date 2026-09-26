@@ -291,7 +291,9 @@ class TimelineWidget(QWidget):
             badges += f"×{round(c.speed, 2):g} · "
         mode = c.motion_for(self.project.aspect) if self.project is not None else "none"
         if mode != "none":
-            badges += {"pushin": "наезд · "}.get(mode, "за курсором · " if mode.startswith("follow") else "зум · ")
+            badges += {"pushin": "наезд · ", "cursor_zoom": "к стрелке · ", "region": "область · "}.get(
+                mode, "прокрутка · " if mode.startswith("scroll") else
+                "за курсором · " if mode.startswith("follow") else "зум · ")
         top = badges + (c.label or "")
         for text, right in ((top, False), (f"{c.duration:.1f} с", True)):
             w = min(r.width() - 8, fm.horizontalAdvance(text) + 12)

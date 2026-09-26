@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from glimpsy.editor.motion import is_follow
+from glimpsy.editor.motion import is_follow, needs_cursor
 from glimpsy.editor.project import MAX_SPEED, MAX_ZOOM, MIN_SPEED, MIN_ZOOM, Clip
 
 SPEED_PRESETS = (0.5, 1, 2, 4, 10)
@@ -68,13 +68,20 @@ class Inspector(QWidget):
         grid.setVerticalSpacing(4)
         self.motion_group = QButtonGroup(self)
         self.motion_btns: dict[str, QPushButton] = {}
-        layout = (("none", "Без движения", 0, 0, 3, "Кадр стоит на месте"),
-                  ("autozoom", "Автозум к курсору", 1, 0, 2, "Приближение к кликам и туда, где работает курсор (Z)"),
-                  ("pushin", "Наезд", 1, 2, 1, "Камера медленно приближается за время фрагмента — "
-                                              "для важных моментов"),
-                  ("follow_hard", "Жёстко", 3, 0, 1, "Курсор всегда в центре кадра — кадр едет сразу за ним"),
-                  ("follow", "Плавно", 3, 1, 1, "Кадр мягко догоняет курсор и стоит, пока курсор в середине"),
-                  ("follow_zoom", "Зона + зум", 3, 2, 1, "Крупнее (×1.5), едет и вверх-вниз, большая «мёртвая зона»"))
+        layout = (("none", "Без движения", 0, 0, 2, "Кадр стоит на месте"),
+                  ("autozoom", "Автозум", 0, 2, 2, "Приближение к кликам и туда, где работает курсор (Z)"),
+                  ("cursor_zoom", "К стрелке", 1, 0, 2, "Кадр всё время приближен и плавно едет за стрелкой"),
+                  ("pushin", "Наезд", 1, 2, 2, "Камера медленно приближается за время фрагмента — "
+                                               "для важных моментов"),
+                  ("region", "Зум на область", 2, 0, 2, "Камера наезжает на выбранную область, держит её "
+                                                        "и в конце отъезжает"),
+                  ("scroll_down", "↓", 4, 0, 1, "Прокрутка вниз: камера плавно едет сверху вниз"),
+                  ("scroll_up", "↑", 4, 1, 1, "Прокрутка вверх: камера плавно едет снизу вверх"),
+                  ("scroll_left", "←", 4, 2, 1, "Прокрутка влево: камера плавно едет справа налево"),
+                  ("scroll_right", "→", 4, 3, 1, "Прокрутка вправо: камера плавно едет слева направо"),
+                  ("follow_hard", "Жёстко", 6, 0, 1, "Курсор всегда в центре кадра — кадр едет сразу за ним"),
+                  ("follow", "Плавно", 6, 1, 1, "Кадр мягко догоняет курсор и стоит, пока курсор в середине"),
+                  ("follow_zoom", "Зона + зум", 6, 2, 2, "Крупнее (×1.5), едет и вверх-вниз, большая «мёртвая зона»"))
         for key, text, row, col, span, tip in layout:
             b = QPushButton(text)
             b.setCheckable(True)
@@ -85,9 +92,18 @@ class Inspector(QWidget):
             self.motion_group.addButton(b)
             self.motion_btns[key] = b
             grid.addWidget(b, row, col, 1, span)
+        self.region_pick = QPushButton("Выбрать область…")
+        self.region_pick.setToolTip("Обведите мышью в окне просмотра, куда приблизить камеру")
+        self.region_pick.setMinimumWidth(0)
+        self.region_pick.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.region_pick.clicked.connect(lambda: self._emit("region_pick", None))
+        grid.addWidget(self.region_pick, 2, 2, 1, 2)
+        scroll_label = QLabel("Прокрутка камеры:")
+        scroll_label.setProperty("role", "hint")
+        grid.addWidget(scroll_label, 3, 0, 1, 4)
         self.follow_label = QLabel("За курсором — для Reels (9:16):")
         self.follow_label.setProperty("role", "hint")
-        grid.addWidget(self.follow_label, 2, 0, 1, 3)
+        grid.addWidget(self.follow_label, 5, 0, 1, 4)
         self.motion_group.buttonClicked.connect(lambda b: self._emit("motion", b.property("motion")))
         self.strength = QDoubleSpinBox(minimum=1.2, maximum=4.0, singleStep=0.1, decimals=1, suffix=" ×")
         self.strength.valueChanged.connect(lambda v: self._emit("zoom_strength", v))
@@ -243,18 +259,24 @@ class Inspector(QWidget):
         has_cursor = is_video and bool(clip.cursor)
         mode = clip.motion_raw(aspect)
         (self.motion_btns.get(mode) or self.motion_btns["none"]).setChecked(True)
-        self.motion.setEnabled(has_cursor)
+        self.motion.setEnabled(is_video)
         for key, b in self.motion_btns.items():
-            if is_follow(key):
-                b.setEnabled(has_cursor and aspect == "9:16")
+            b.setEnabled(is_video and (has_cursor or not needs_cursor(key)) and (aspect == "9:16" or not is_follow(key)))
         self.strength.setValue(clip.zoom_strength)
         self.click_fx.setChecked(clip.click_fx and bool(clip.clicks))
         self.click_fx.setEnabled(bool(clip.clicks) or count > 1)
         self.click_fx.setText(f"Подсвечивать клики ({len(clip.clicks)})" if clip.clicks or count > 1
                               else "Подсвечивать клики (в этом фрагменте кликов нет)")
-        self.strength.setEnabled(has_cursor and mode == "autozoom")
-        if not has_cursor:
-            self.motion_hint.setText("Только для записей экрана Glimpsy — в них сохранено, где был курсор.")
+        self.strength.setEnabled(has_cursor and mode in ("autozoom", "cursor_zoom"))
+        if mode == "region":
+            self.motion_hint.setText("Камера наезжает на область и в конце отъезжает. «Выбрать область…» — "
+                                     "обвести мышью в просмотре другую.")
+        elif mode.startswith("scroll_"):
+            self.motion_hint.setText("Камера приближена и плавно проезжает по кадру за время фрагмента — "
+                                     "хорошо для длинных страниц и макетов.")
+        elif not has_cursor:
+            self.motion_hint.setText("Зум на область, наезд и прокрутка работают с любым видео. Автозум, «к стрелке» "
+                                     "и «за курсором» — только для записей Glimpsy (там сохранён курсор).")
         elif aspect != "9:16":
             self.motion_hint.setText("Кадр плавно приближается к кликам и туда, где работает курсор. "
                                      "«За курсором» — в формате 9:16 (переключатель вверху).")

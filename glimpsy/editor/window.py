@@ -135,6 +135,7 @@ class EditorWindow(QMainWindow):
         self.preview.overlay_pressed.connect(self._on_overlay_pressed)
         self.preview.overlay_changed.connect(self._on_overlay_changed)
         self.preview.overlay_wheel.connect(self._on_overlay_wheel)
+        self.preview.region_picked.connect(self._on_region_picked)
         self.timeline.music_selected.connect(self._on_music_select)
         self.music_panel.edited.connect(self._on_music_edit)
         self.thumbs.ready.connect(self._sync_preview)     # кадры видео-наложений подгружаются в фоне
@@ -421,6 +422,35 @@ class EditorWindow(QMainWindow):
         from glimpsy.editor.clicks import active
         return active(c.clicks, c.in_s + local * c.speed, c.speed)
 
+    def _pick_region(self, clip_id: str) -> None:
+        """«Зум на область»: обвести область мышью в просмотре."""
+        idx = self.project.index_of(clip_id)
+        if idx < 0:
+            return
+        self.player.pause()
+        start = self.project.start_of(idx)
+        if not start <= self.player.t < start + self.project.clips[idx].duration:
+            self.player.seek(start + min(0.2, self.project.clips[idx].duration / 2))
+        self._region_target = clip_id
+        self.preview.start_region_pick()
+        self.statusBar().showMessage("Обведите мышью в просмотре область, к которой приблизить камеру (Esc — отмена)")
+
+    def _on_region_picked(self, region) -> None:
+        cid = getattr(self, "_region_target", None)
+        self._region_target = None
+        self.statusBar().clearMessage()
+        targets = [c for c in (self._selected_clips() or []) if c.kind == "video"]
+        if cid and all(c.id != cid for c in targets):
+            targets = [c for c in self.project.clips if c.id == cid]
+        if region is None or not targets:
+            self._sync_preview()
+            return
+        self.history.push(self.project.to_dict())
+        for c in targets:
+            c.region = list(region)
+            c.set_motion(self.project.aspect, "region")
+        self._changed()
+
     def _cursor_at(self, c: Clip | None):
         """Свой курсор в просмотре: (x, y, стиль, размер) или None."""
         style, size, show = self.project.cursor_style()
@@ -451,11 +481,11 @@ class EditorWindow(QMainWindow):
             return full
         t_src = c.in_s + local * c.speed
         key = (c.id, mode, c.zoom_strength, c.src_duration, len(c.cursor), len(c.clicks), c.width, c.height,
-               c.in_s, c.out_s)
+               c.in_s, c.out_s, tuple(c.region))
         track = self._motion_cache.get(key)
         if track is None:
             track = motion.track_for(mode, c.cursor, c.clicks, c.src_duration, c.zoom_strength,
-                                     c.in_s, c.out_s, c.width, c.height)
+                                     c.in_s, c.out_s, c.width, c.height, c.region)
             self._motion_cache[key] = track
         if motion.is_zoom(mode):
             z, cx, cy = motion.value_at(track, t_src)
@@ -510,6 +540,9 @@ class EditorWindow(QMainWindow):
         if what == "delete":
             self.delete_selected()
             return
+        if what == "region_pick":
+            self._pick_region(clip_id)
+            return
         if what in ("cursor_style", "cursor_size", "cursor_show"):
             # вид курсора — один на весь ролик
             self.history.push(self.project.to_dict(), key=what)
@@ -553,6 +586,8 @@ class EditorWindow(QMainWindow):
                 c.set_frame(aspect, z, x, value)
             elif what == "motion" and c.kind == "video":
                 c.set_motion(aspect, value)
+                if value == "region" and not c.region and c.id == clip_id:
+                    QTimer.singleShot(0, lambda cid=c.id: self._pick_region(cid))   # сначала — выбрать область
             elif what == "zoom_strength" and c.kind == "video":
                 c.zoom_strength = float(value)
             elif what == "click_fx" and c.kind == "video":
@@ -1217,6 +1252,9 @@ class EditorWindow(QMainWindow):
         assert isinstance(ev, QKeyEvent)
         focus = QApplication.focusWidget()
         typing = isinstance(focus, (QLineEdit, QAbstractSpinBox, QPlainTextEdit, QTextEdit))
+        if self.preview._pick and ev.key() == Qt.Key.Key_Escape:
+            self.preview._end_pick(None)           # отмена выбора области
+            return True
         letter = keys.latin_letter(ev)
         if keys.has_ctrl(ev):
             if letter == "z":

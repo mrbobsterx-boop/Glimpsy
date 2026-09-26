@@ -278,14 +278,15 @@ def test_piecewise_expression():
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 @pytest.mark.parametrize("mode,aspect", [("autozoom", "16:9"), ("follow", "9:16"), ("follow_hard", "9:16"),
-                                         ("follow_zoom", "9:16")])
+                                         ("follow_zoom", "9:16"), ("region", "16:9"), ("cursor_zoom", "16:9")])
 def test_export_with_motion(tmp_path, mode, aspect):
     # слева чёрное, справа белое; курсор всё время справа → кадр должен «уехать» вправо
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     "color=c=black:size=640x360:rate=30,drawbox=x=320:y=0:w=320:h=360:color=white:t=fill",
                     "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp_path / "s.mp4")], check=True)
     cursor = [[t / 10, 0.85, 0.5] for t in range(31)]
-    c = Clip("a", "video", "s.mp4", 3, 0, 3, width=640, height=360, cursor=cursor, motion=mode, zoom_strength=2.5)
+    c = Clip("a", "video", "s.mp4", 3, 0, 3, width=640, height=360, cursor=cursor, motion=mode, zoom_strength=2.5,
+             region=[0.6, 0.4, 0.25, 0.25])
     p = Project(tmp_path, "t", [c], aspect=aspect)
     out = export_project(FFMPEG, p, tmp_path / "o.mp4", software_encoder())
     raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", "2.5", "-i", str(out), "-frames:v", "1",
@@ -413,3 +414,22 @@ def test_follow_variants_differ():
     assert motion.value_at(soft, 3.9)[1] == 0.5
     x, y, w, h = motion.follow_crop(zoom, 3.9, 1920, 1080)
     assert 0 <= x and x + w <= 1.0001 and 0 <= y and y + h <= 1.0001 and abs(h - 1 / 1.5) < 1e-6
+
+
+def test_scroll_and_cursor_zoom_tracks():
+    from glimpsy.editor import motion
+
+    down = motion.scroll_track("scroll_down", 1.0, 5.0)
+    z, cx, cy = motion.value_at(down, 1.0)
+    z2, cx2, cy2 = motion.value_at(down, 5.0)
+    assert z == z2 == motion.SCROLL_ZOOM and cx == cx2 == 0.5 and cy < 0.4 and cy2 > 0.6
+    left = motion.scroll_track("scroll_left", 0.0, 2.0)
+    assert motion.value_at(left, 0.0)[1] > motion.value_at(left, 2.0)[1]
+    track = motion.cursor_zoom_track([[t / 10, 0.9, 0.1] for t in range(30)], 3.0, 2.0)
+    z, cx, cy = motion.value_at(track, 2.9)
+    assert z == 2.0 and abs(cx - 0.75) < 0.01 and abs(cy - 0.25) < 0.01       # у края — упёрлись в границу
+    # зум на область работает и без записи курсора (своё видео)
+    c = Clip("a", "video", "x.mp4", 3, 0, 3, width=640, height=360, motion="region", region=[0.1, 0.1, 0.3, 0.3])
+    assert c.motion_for("16:9") == "region"
+    c.motion = "autozoom"
+    assert c.motion_for("16:9") == "none"

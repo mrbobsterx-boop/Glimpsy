@@ -56,7 +56,7 @@ def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> 
     if mode == "none" or not src_w or not src_h:
         return "", None
     track = motion.track_for(mode, clip.cursor, clip.clicks, clip.src_duration, clip.zoom_strength,
-                             clip.in_s, clip.out_s, src_w, src_h)
+                             clip.in_s, clip.out_s, src_w, src_h, clip.region)
     if motion.is_zoom(mode):
         return motion.autozoom_filter(track, clip.in_s, clip.out_s, src_w, src_h, fps) + ",", None
     z = track[0][3]

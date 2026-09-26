@@ -34,6 +34,7 @@ class PreviewWidget(QWidget):
     overlay_pressed = Signal(str)
     overlay_changed = Signal(str, float, float, float)   # id, центр X, центр Y, ширина (доли кадра)
     overlay_wheel = Signal(str, float)
+    region_picked = Signal(object)               # выбранная область [x, y, w, h] (доли кадра) или None — отмена
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,6 +60,9 @@ class PreviewWidget(QWidget):
         self.selected_overlay: str | None = None
         self._ov_cache: dict[str, QImage] = {}
         self._ov_drag: tuple | None = None   # (id, режим, cx, cy, ширина)
+        self._pick = False                   # сейчас обводим область для «зума на область»
+        self._pick_from: QPointF | None = None
+        self._pick_to: QPointF | None = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 220)
         self.setMouseTracking(True)
@@ -77,7 +81,69 @@ class PreviewWidget(QWidget):
         self.aspect = aspect
         self.update()
 
+    # ---------- выбор области ----------
+
+    def start_region_pick(self) -> None:
+        """Обвести мышью область кадра (для «зума на область»). Esc — отмена."""
+        self._pick = True
+        self._pick_from = self._pick_to = None
+        self.src_crop = (0.0, 0.0, 1.0, 1.0)          # пока выбираем — показываем кадр целиком
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+        self.update()
+
+    def _end_pick(self, region) -> None:
+        self._pick = False
+        self._pick_from = self._pick_to = None
+        self.unsetCursor()
+        self.update()
+        self.region_picked.emit(region)
+
+    def _pick_fraction(self, pos: QPointF) -> QPointF:
+        fr = self._frame_rect()
+        return QPointF(min(1.0, max(0.0, (pos.x() - fr.x()) / max(1.0, fr.width()))),
+                       min(1.0, max(0.0, (pos.y() - fr.y()) / max(1.0, fr.height()))))
+
+    def _paint_pick(self, p: QPainter) -> None:
+        fr = self._frame_rect()
+        p.save()
+        if self._pick_from is not None and self._pick_to is not None:
+            a, b = self._pick_from, self._pick_to
+            r = QRectF(fr.x() + min(a.x(), b.x()) * fr.width(), fr.y() + min(a.y(), b.y()) * fr.height(),
+                       abs(a.x() - b.x()) * fr.width(), abs(a.y() - b.y()) * fr.height())
+            outside = QRectF(fr)
+            p.setClipRect(outside)
+            for part in (QRectF(fr.left(), fr.top(), fr.width(), r.top() - fr.top()),
+                         QRectF(fr.left(), r.bottom(), fr.width(), fr.bottom() - r.bottom()),
+                         QRectF(fr.left(), r.top(), r.left() - fr.left(), r.height()),
+                         QRectF(r.right(), r.top(), fr.right() - r.right(), r.height())):
+                p.fillRect(part, QColor(0, 0, 0, 120))
+            p.setPen(QPen(QColor("#22AEBB"), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r)
+        else:
+            p.fillRect(fr, QColor(0, 0, 0, 60))
+        text = "Обведите мышью область, к которой приблизить камеру · Esc — отмена"
+        fm = p.fontMetrics()
+        w = fm.horizontalAdvance(text) + 24
+        box = QRectF(fr.center().x() - w / 2, fr.top() + 12, w, fm.height() + 12)
+        p.setClipping(False)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(13, 15, 19, 220))
+        p.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
+    def keyPressEvent(self, e) -> None:
+        if self._pick and e.key() == Qt.Key.Key_Escape:
+            self._end_pick(None)
+            return
+        super().keyPressEvent(e)
+
     def set_src_crop(self, crop: tuple[float, float, float, float]) -> None:
+        if self._pick:
+            return
         if crop != self.src_crop:
             self.src_crop = crop
             self.update()
@@ -307,6 +373,8 @@ class PreviewWidget(QWidget):
             p.drawLine(QPointF(canvas.center().x(), canvas.top()), QPointF(canvas.center().x(), canvas.bottom()))
         if gy:
             p.drawLine(QPointF(canvas.left(), canvas.center().y()), QPointF(canvas.right(), canvas.center().y()))
+        if self._pick:
+            self._paint_pick(p)
 
     # ---------- мышь ----------
 
@@ -315,6 +383,13 @@ class PreviewWidget(QWidget):
                    for c in self._corners(self._frame_rect()))
 
     def mousePressEvent(self, e) -> None:
+        if self._pick:
+            if e.button() == Qt.MouseButton.RightButton:
+                self._end_pick(None)
+            elif e.button() == Qt.MouseButton.LeftButton:
+                self._pick_from = self._pick_to = self._pick_fraction(e.position())
+                self.update()
+            return
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
@@ -342,6 +417,11 @@ class PreviewWidget(QWidget):
 
     def mouseMoveEvent(self, e) -> None:
         pos = e.position()
+        if self._pick:
+            if self._pick_from is not None:
+                self._pick_to = self._pick_fraction(pos)
+                self.update()
+            return
         if self._text_drag is not None:
             tid, x0, y0 = self._text_drag
             c = self.canvas_rect()
@@ -396,6 +476,15 @@ class PreviewWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _e) -> None:
+        if self._pick:
+            a, b = self._pick_from, self._pick_to
+            if a is not None and b is not None and abs(a.x() - b.x()) > 0.03 and abs(a.y() - b.y()) > 0.03:
+                self._end_pick([round(min(a.x(), b.x()), 4), round(min(a.y(), b.y()), 4),
+                                round(abs(a.x() - b.x()), 4), round(abs(a.y() - b.y()), 4)])
+            else:
+                self._pick_from = self._pick_to = None      # слишком маленькая — обводим заново
+                self.update()
+            return
         if self._ov_drag is not None:
             self._ov_drag = None
             self._guides = (False, False)

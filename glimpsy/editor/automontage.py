@@ -39,6 +39,7 @@ class Options:
     pushin: bool = True        # д
     follow: bool = True        # е
     beats: bool = True         # ж
+    variety: bool = True       # на спокойных фрагментах — «к стрелке» и прокрутка
 
 
 @dataclass
@@ -51,13 +52,15 @@ class Report:
     dropped: int = 0
     followed: int = 0
     beat_cuts: int = 0
+    varied: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
         for n, text in ((self.zoomed, "автозум"), (self.pushed, "наезд"), (self.clicks, "клики"),
                         (self.faster, "быстрее"), (self.slower, "медленнее"), (self.dropped, "убрано пустых"),
-                        (self.followed, "9:16 за курсором"), (self.beat_cuts, "склеек в долю")):
+                        (self.followed, "9:16 за курсором"), (self.beat_cuts, "склеек в долю"),
+                        (self.varied, "прокрутка / к стрелке")):
             if n:
                 parts.append(f"{text}: {n}")
         return ", ".join(parts) if parts else "менять нечего"
@@ -204,6 +207,14 @@ def apply(project: Project, opts: Options, beats: list[float] | None = None, per
             c.set_motion("16:9", "autozoom")
             rep.zoomed += 1
             last_zoom = i
+        elif opts.variety and i - last_zoom == 2:
+            # спокойный фрагмент между зумами — лёгкое движение, чтобы кадр не стоял
+            pts = _in_clip(c.cursor, c)
+            path = sum(math.hypot(b[1] - a[1], b[2] - a[2]) for a, b in zip(pts, pts[1:]))
+            variants = ["cursor_zoom"] if path > 0.4 else []
+            variants += ["scroll_down", "scroll_right"]
+            c.set_motion("16:9", variants[rep.varied % len(variants)])
+            rep.varied += 1
         else:
             c.set_motion("16:9", "none")
 
