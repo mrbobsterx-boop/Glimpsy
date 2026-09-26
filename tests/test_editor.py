@@ -433,3 +433,66 @@ def test_scroll_and_cursor_zoom_tracks():
     assert c.motion_for("16:9") == "region"
     c.motion = "autozoom"
     assert c.motion_for("16:9") == "none"
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_library_panel_and_back_to_sessions(tmp_path, qt_app, monkeypatch):
+    """Файлы с компьютера: папки, фильтр, «на ленту»; «Все записи» закрывает редактор и открывает список."""
+    import json
+    import time
+
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.library_panel import list_folder
+    from glimpsy.editor.window import EditorWindow
+
+    QSettings("Glimpsy", "editor").remove("library_dir")
+    lib = tmp_path / "lib"
+    (lib / "Проект").mkdir(parents=True)
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30",
+                    "-t", "2", "-pix_fmt", "yuv420p", str(lib / "screen.mp4")], check=True)
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=440", "-t", "2",
+                    str(lib / "song.mp3")], check=True)
+    (lib / "notes.txt").write_text("не медиа")
+    (lib / ".hidden.mp4").write_bytes(b"")
+    dirs, files = list_folder(lib)
+    assert [d.name for d in dirs] == ["Проект"] and sorted(f.name for f in files) == ["screen.mp4", "song.mp3"]
+    assert [f.name for f in list_folder(lib, "audio")[1]] == ["song.mp3"]
+    assert [f.name for f in list_folder(lib, query="SCR")[1]] == ["screen.mp4"]
+
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "3", "-pix_fmt", "yuv420p", str(proj / "piece_0000.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "piece_0000.mp4", "duration": 3.0}]}))
+    opened = []
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path, on_sessions=lambda: opened.append(1))
+    try:
+        w.library.set_open(True)
+        w.library.open_folder(lib)
+        names = [w.library.list.item(i).text().split("\n")[0] for i in range(w.library.list.count())]
+        assert names[0] == "Проект" and set(names[1:]) == {"screen.mp4", "song.mp3"}
+        mime = w.library.list.mimeData([w.library.list.item(i) for i in range(w.library.list.count())])
+        assert sorted(u.fileName() for u in mime.urls()) == ["screen.mp4", "song.mp3"]   # папка не тащится
+        video = next(w.library.list.item(i) for i in range(3) if w.library.list.item(i).text().startswith("screen"))
+        w.library._on_double(video)                                  # двойной щелчок — на ленту
+        assert len(w.project.clips) == 2
+        w.library._on_double(w.library.list.item(0))                 # папка — заходим внутрь
+        assert w.library.folder == lib / "Проект"
+        w.resize(1280, 800)
+        w.show()
+        w.library.open_folder(lib)
+        end = time.time() + 3
+        while time.time() < end and w.library._pending:
+            QApplication.processEvents()
+            time.sleep(0.05)
+        import os
+        if os.environ.get("GLIMPSY_SHOT"):
+            w.grab().save(os.environ["GLIMPSY_SHOT"])
+        w.back_to_sessions()
+        assert opened == [1] and not w.isVisible()
+    finally:
+        w.library.set_open(False)
+        w.close()

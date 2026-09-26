@@ -75,8 +75,9 @@ QScrollArea {{ background: transparent; }}
 
 class EditorWindow(QMainWindow):
     def __init__(self, project_dir: Path, ffmpeg: str, encoder_getter: Callable[[], Encoder],
-                 fallback_output: Path) -> None:
+                 fallback_output: Path, on_sessions: Callable[[], None] | None = None) -> None:
         super().__init__()
+        self.on_sessions = on_sessions      # «Все записи»: вернуться к списку сессий
         self.ffmpeg = ffmpeg
         self.encoder_getter = encoder_getter
         self.fallback_output = fallback_output
@@ -155,6 +156,7 @@ class EditorWindow(QMainWindow):
     def _build_ui(self) -> None:
         """Сверху — логотип, формат и «Экспорт»; слева — инструменты; в центре — просмотр;
         справа — свойства; внизу — лента с её кнопками."""
+        from glimpsy.editor.library_panel import LibraryPanel
         from glimpsy.editor.shortcuts_panel import ShortcutsPanel
 
         # --- действия (одни и те же для кнопок и горячих клавиш) ---
@@ -207,6 +209,14 @@ class EditorWindow(QMainWindow):
         tl = QHBoxLayout(topbar)
         tl.setContentsMargins(14, 8, 12, 8)
         tl.setSpacing(10)
+        if self.on_sessions is not None:
+            back = theme.mark(QPushButton(theme.icon("layout-grid", theme.MUTED, 16), "  Все записи"), "ghost")
+            back.setToolTip("Вернуться к списку всех записей (проект сохраняется сам)")
+            back.clicked.connect(self.back_to_sessions)
+            tl.addWidget(back)
+            div = theme.mark(QFrame(), "vdivider")
+            div.setFixedSize(1, 18)
+            tl.addWidget(div)
         tl.addWidget(logo)
         tl.addWidget(brand)
         tl.addWidget(theme.mark(QLabel("·"), "muted"))
@@ -240,6 +250,13 @@ class EditorWindow(QMainWindow):
             rl.addWidget(b)
             return b
 
+        # отдельный «миниатюрщик» — сотни файлов в папке не задерживают кадры на ленте
+        self.library = LibraryPanel(Thumbnailer(self.ffmpeg), self.fallback_output)
+        files_btn = tool("folder-open", "Файлы", "Файлы с компьютера: видео, фото и музыка под рукой", checkable=True)
+        files_btn.setChecked(self.library.is_open())
+        files_btn.toggled.connect(self.library.set_open)
+        self.library.close_requested.connect(lambda: files_btn.setChecked(False))
+        self.library.add_requested.connect(lambda files: self.insert_files(files, self._insert_index()))
         tool("image-plus", "Медиа", "Добавить видео или фото (M, Ctrl+V)", self.add_media_dialog)
         tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
         tool("captions", "Субтитры", "Автосубтитры: распознать речь (на этом компьютере)", self.auto_subtitles)
@@ -355,6 +372,7 @@ class EditorWindow(QMainWindow):
         body.setContentsMargins(0, 0, 8, 8)
         body.setSpacing(6)
         body.addWidget(rail)
+        body.addWidget(self.library)
         body.addWidget(self.shortcuts)
         body.addWidget(root, 1)
         central = QWidget()
@@ -1383,6 +1401,12 @@ class EditorWindow(QMainWindow):
 
         threading.Thread(target=work, daemon=True, name="export").start()
         dlg.show()
+
+    def back_to_sessions(self) -> None:
+        """«Все записи»: сохранить, закрыть редактор и показать список сессий."""
+        self._save()
+        if self.close() and self.on_sessions is not None:
+            self.on_sessions()
 
     def closeEvent(self, e) -> None:
         self._save()

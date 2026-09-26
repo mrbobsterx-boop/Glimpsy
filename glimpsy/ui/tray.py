@@ -371,7 +371,8 @@ class TrayController(QObject):
                 return
         self._editors = [w for w in self._editors if w.isVisible()]
         try:
-            w = EditorWindow(project_dir, self.engine.ffmpeg, self._encoder_for_export, Path(self.s.output_dir))
+            w = EditorWindow(project_dir, self.engine.ffmpeg, self._encoder_for_export, Path(self.s.output_dir),
+                             on_sessions=self.open_editor)
         except Exception as e:
             log.exception("Редактор не открылся")
             QMessageBox.warning(None, "Glimpsy", f"Не удалось открыть проект:\n{e}")
