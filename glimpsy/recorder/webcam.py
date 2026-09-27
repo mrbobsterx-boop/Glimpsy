@@ -18,6 +18,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -86,17 +87,51 @@ def parse_avfoundation(text: str) -> list[Camera]:
     return out
 
 
-def linux_cameras(sys_root: Path = Path("/sys/class/video4linux")) -> list[Camera]:
-    """Камеры Linux. У одной камеры бывает несколько /dev/video* — берём основной (index 0)."""
+V4L2_CAP_VIDEO_CAPTURE = 0x1
+V4L2_CAP_VIDEO_CAPTURE_MPLANE = 0x1000
+V4L2_CAP_DEVICE_CAPS = 0x80000000
+VIDIOC_QUERYCAP = 0x80685600          # _IOR('V', 0, struct v4l2_capability) — 104 байта
+
+
+def v4l2_can_capture(dev: str) -> bool | None:
+    """Умеет ли /dev/videoN отдавать картинку. None — спросить не удалось (нет прав и т. п.)."""
+    try:
+        import fcntl
+        import os
+        import struct
+
+        fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            buf = bytearray(104)
+            fcntl.ioctl(fd, VIDIOC_QUERYCAP, buf)
+        finally:
+            os.close(fd)
+        caps, device_caps = struct.unpack_from("<II", buf, 84)
+        use = device_caps if caps & V4L2_CAP_DEVICE_CAPS else caps
+        return bool(use & (V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE))
+    except (OSError, ImportError):
+        return None
+
+
+def linux_cameras(sys_root: Path = Path("/sys/class/video4linux"), probe=v4l2_can_capture) -> list[Camera]:
+    """Камеры Linux. У одной камеры бывает несколько /dev/video* (картинка, служебные данные) —
+    спрашиваем у системы, какой из них правда отдаёт картинку. Не ответила — берём основной (index 0)."""
     out = []
     for d in sorted(sys_root.glob("video*"), key=lambda p: int(re.sub(r"\D", "", p.name) or 0)):
+        dev = f"/dev/{d.name}"
         try:
-            if (d / "index").exists() and (d / "index").read_text().strip() != "0":
-                continue
             name = (d / "name").read_text().strip() if (d / "name").exists() else d.name
+            index = (d / "index").read_text().strip() if (d / "index").exists() else "0"
         except OSError:
             continue
-        out.append(Camera(name, f"/dev/{d.name}"))
+        ok = probe(dev)
+        log.info("Камера %s «%s»: index %s, %s", dev, name, index,
+                 {True: "картинка есть", False: "служебное устройство", None: "не спросить"}[ok])
+        if ok is False or (ok is None and index != "0"):
+            continue
+        if any(c.name == name for c in out) and ok is None:
+            continue
+        out.append(Camera(name if not any(c.name == name for c in out) else f"{name} ({d.name})", dev))
     return out
 
 
@@ -301,8 +336,18 @@ def load_clips(session_dir: Path) -> list[CamClip]:
     return out
 
 
+PREVIEW_W, PREVIEW_H = 320, 180          # маленькая картинка с камеры для окна записи
+
+
 class CameraRecorder:
-    """Съёмка с камеры, пока не нажмут «Стоп» (кнопка «Запись» в редакторе)."""
+    """Съёмка с камеры, пока не нажмут «Стоп» (кнопка «Запись» в редакторе).
+
+    Заодно отдаёт маленькую картинку для просмотра (latest_frame) — и до записи (out=None:
+    только просмотр), и во время неё. Камеру открывает один FFmpeg: два процесса к одной
+    камере обычно не подключиться.
+    """
+
+    _good: dict[str, int] = {}               # какой способ открыть камеру уже сработал
 
     def __init__(self, ffmpeg: str, device: str = "", input_override: list[str] | None = None) -> None:
         self.ffmpeg = ffmpeg
@@ -311,42 +356,81 @@ class CameraRecorder:
         self.out: Path | None = None
         self._proc: subprocess.Popen | None = None
         self.started_at = 0.0
+        self._frame: bytes | None = None
+        self._lock = threading.Lock()
 
-    def start(self, out: Path) -> str:
-        """Начать. Возвращает текст ошибки или пустую строку."""
-        out.parent.mkdir(parents=True, exist_ok=True)
-        variants = [self.input_override] if self.input_override else [input_args(self.device, i) for i in range(3)]
+    def _variants(self) -> list[tuple[int, list[str]]]:
+        if self.input_override:
+            return [(0, self.input_override)]
+        order = list(range(3))
+        good = self._good.get(self.device)
+        if good is not None:
+            order.remove(good)
+            order.insert(0, good)
+        return [(i, input_args(self.device, i)) for i in order]
+
+    def _command(self, in_args: list[str], out: Path | None) -> list[str]:
+        pv = (f"scale={PREVIEW_W}:{PREVIEW_H}:force_original_aspect_ratio=decrease,"
+              f"pad={PREVIEW_W}:{PREVIEW_H}:(ow-iw)/2:(oh-ih)/2,fps=12,format=rgb24")
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *in_args, "-an"]
+        if out is None:
+            return cmd + ["-vf", pv, "-f", "rawvideo", "pipe:1"]
+        # «superfast»: камера кодируется на лету и не должна отставать даже на слабом процессоре
+        return cmd + ["-filter_complex",
+                      f"[0:v]split=2[r][p];[r]scale=-2:'min({MAX_HEIGHT},ih)',fps=30,format=yuv420p[rv];[p]{pv}[pv]",
+                      "-map", "[rv]", "-c:v", "libx264", "-preset", "superfast", "-crf", "21",
+                      "-movflags", "+faststart", str(out),
+                      "-map", "[pv]", "-f", "rawvideo", "pipe:1"]
+
+    def start(self, out: Path | None = None) -> str:
+        """Начать (out=None — только просмотр). Возвращает текст ошибки или пустую строку."""
+        if out is not None:
+            out.parent.mkdir(parents=True, exist_ok=True)
         err = ""
-        for in_args in variants:
-            # «superfast»: камера кодируется на лету и не должна отставать даже на слабом процессоре
-            cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *in_args, "-an",
-                   "-vf", f"scale=-2:'min({MAX_HEIGHT},ih)',fps=30,format=yuv420p",
-                   "-c:v", "libx264", "-preset", "superfast", "-crf", "21", "-movflags", "+faststart", str(out)]
+        for i, in_args in self._variants():
             try:
-                self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                              stderr=subprocess.PIPE, **subprocess_flags())
+                self._proc = subprocess.Popen(self._command(in_args, out), stdin=subprocess.PIPE,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, **subprocess_flags())
             except OSError as e:
                 return f"камера не включилась: {e}"
             self.out, self.started_at = out, time.time()
             time.sleep(0.8)
             if self._proc.poll() is None:
-                log.info("Камера пишет: %s", " ".join(in_args))
+                self._good[self.device] = i
+                log.info("Камера %s: %s", "пишет" if out else "просмотр", " ".join(in_args))
+                threading.Thread(target=self._read, args=(self._proc,), daemon=True, name="camera-preview").start()
                 return ""
             text = (self._proc.stderr.read() if self._proc.stderr else b"").decode("utf-8", "replace").strip()
-            err = text.splitlines()[-1] if text else ""
-            log.info("Камера не приняла %s: %s", " ".join(in_args), err)
+            lines = [x for x in text.splitlines() if x.strip()]
+            err = lines[-1] if lines else ""
+            log.info("Камера не приняла %s:\n%s", " ".join(in_args), "\n".join(lines[-4:]))
             self._proc = None
         return "камера не включилась" + (f": {err}" if err else "")
+
+    def _read(self, proc: subprocess.Popen) -> None:
+        size = PREVIEW_W * PREVIEW_H * 3
+        stream = proc.stdout
+        while stream is not None:
+            data = stream.read(size)
+            if not data or len(data) < size:
+                return
+            with self._lock:
+                self._frame = data
+
+    def latest_frame(self) -> bytes | None:
+        """Последний кадр для просмотра: PREVIEW_W×PREVIEW_H, RGB, или None."""
+        with self._lock:
+            return self._frame
 
     @property
     def alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
     def stop(self) -> CamClip | None:
-        """Остановить и дописать файл. Возвращает снятое или None."""
+        """Остановить (и дописать файл, если писали). Возвращает снятое или None."""
         proc = self._proc
         self._proc = None
-        if proc is None or self.out is None:
+        if proc is None:
             return None
         try:
             if proc.poll() is None and proc.stdin:
@@ -356,7 +440,7 @@ class CameraRecorder:
         except (OSError, subprocess.TimeoutExpired):
             proc.kill()
             proc.wait()
-        if not self.out.exists() or self.out.stat().st_size < 1000:
+        if self.out is None or not self.out.exists() or self.out.stat().st_size < 1000:
             return None
         w, h, dur = _probe(self.ffmpeg, self.out)
         return CamClip(self.out.name, self.started_at, dur, w, h) if dur > 0.2 else None

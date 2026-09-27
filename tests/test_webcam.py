@@ -43,8 +43,12 @@ def test_parse_device_lists(tmp_path):
         d.mkdir()
         (d / "name").write_text(name + "\n")
         (d / "index").write_text(idx + "\n")
-    cams = webcam.linux_cameras(tmp_path)
+    cams = webcam.linux_cameras(tmp_path, probe=lambda dev: None)          # система не ответила
     assert [(c.name, c.device) for c in cams] == [("HD Webcam", "/dev/video0"), ("USB Cam", "/dev/video2")]
+    # система ответила: картинку отдаёт video1, а video0 — служебный (как бывает у некоторых камер)
+    caps = {"/dev/video0": False, "/dev/video1": True, "/dev/video2": True}
+    cams = webcam.linux_cameras(tmp_path, probe=caps.get)
+    assert [(c.name, c.device) for c in cams] == [("HD Webcam", "/dev/video1"), ("USB Cam", "/dev/video2")]
 
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")

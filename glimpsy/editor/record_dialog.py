@@ -18,12 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout,
 )
 
 from glimpsy.recorder.audio import RATE, MicMeter, list_microphones, write_wav
-from glimpsy.recorder.webcam import CamClip, CameraRecorder, list_cameras
+from glimpsy.recorder.webcam import PREVIEW_H, PREVIEW_W, CamClip, CameraRecorder, list_cameras
 from glimpsy.ui import theme
 
 log = logging.getLogger(__name__)
@@ -95,6 +96,16 @@ class RecordDialog(QDialog):
             box.toggled.connect(self._update_start)
         self.mic.currentIndexChanged.connect(lambda _i: self._preview_mic())
         self.voice.toggled.connect(lambda _on: self._preview_mic())
+        # просмотр выбранной камеры — до записи и во время неё
+        self.view = QLabel()
+        self.view.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.view.setStyleSheet("background: #0B0E13; border-radius: 8px; color: #7C8494;")
+        self.view.setWordWrap(True)
+        self.view.setVisible(False)
+        self._feed: CameraRecorder | None = None
+        self.camera.toggled.connect(lambda _on: self._preview_camera())
+        self.cam.currentIndexChanged.connect(lambda _i: self._preview_camera())
 
         store = QSettings("Glimpsy", "editor")
         self.play_along = QCheckBox("Запустить видео в редакторе вместе с записью")
@@ -111,6 +122,7 @@ class RecordDialog(QDialog):
         form.addRow("Громкость", self.level)
         form.addRow(self.camera)
         form.addRow("Камера", self.cam)
+        form.addRow("", self.view)
         form.addRow(self.play_along)
         form.addRow(self.mute)
 
@@ -140,6 +152,7 @@ class RecordDialog(QDialog):
         self._timer.start()
         self._update_start()
         self._preview_mic()
+        self._preview_camera()
 
     # ---------- микрофон до записи: полоска громкости ----------
 
@@ -164,6 +177,40 @@ class RecordDialog(QDialog):
             self._meter.stop()
             self._meter = None
 
+    # ---------- камера до записи: просмотр ----------
+
+    def _preview_camera(self) -> None:
+        if self._state != "idle":
+            return
+        self._stop_feed()
+        on = self.camera.isChecked() and self._has_camera
+        self.view.setVisible(on)
+        if not on:
+            return
+        self.view.setText("Включаю камеру…")
+        QTimer.singleShot(50, self._start_feed)          # сначала показать надпись, потом ждать камеру
+
+    def _start_feed(self) -> None:
+        if self._state != "idle" or not self.camera.isChecked():
+            return
+        feed = CameraRecorder(self.ffmpeg, self.cam.currentData() or "", self._camera_input)
+        err = feed.start(None)
+        if err:
+            self.view.setText(f"⚠ {err[:1].upper() + err[1:]}.\nВыберите другую камеру в списке.")
+            return
+        self._feed = feed
+
+    def _stop_feed(self) -> None:
+        if self._feed is not None:
+            self._feed.stop()
+            self._feed = None
+
+    def _show_frame(self, src: CameraRecorder | None) -> None:
+        data = src.latest_frame() if src is not None else None
+        if data:
+            img = QImage(data, PREVIEW_W, PREVIEW_H, PREVIEW_W * 3, QImage.Format.Format_RGB888)
+            self.view.setPixmap(QPixmap.fromImage(img.copy()))
+
     # ---------- запись ----------
 
     def _update_start(self) -> None:
@@ -187,6 +234,7 @@ class RecordDialog(QDialog):
 
     def _begin(self) -> None:
         self._stop_meter()
+        self._stop_feed()                        # камеру дальше держит запись (просмотр идёт из неё же)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         if self.voice.isChecked():
             self._meter = self._new_meter(True)
@@ -255,6 +303,7 @@ class RecordDialog(QDialog):
         self.mic.setEnabled(self.voice.isChecked())
         self.cam.setEnabled(self.camera.isChecked())
         self._preview_mic()
+        self._preview_camera()
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -275,10 +324,12 @@ class RecordDialog(QDialog):
             self.status.setText("")
         if self._meter is not None:
             self.level.setValue(int(self._meter.level * 100))
+        self._show_frame(self._cam if self._cam is not None else self._feed)
 
     def reject(self) -> None:
         # закрыли или «Отмена» (в том числе во время записи) — ничего не сохраняем
         self._stop_meter()
+        self._stop_feed()
         if self._cam is not None:
             clip_path = self._cam.out
             self._cam.stop()
@@ -293,5 +344,6 @@ class RecordDialog(QDialog):
 
     def done(self, result: int) -> None:
         self._stop_meter()
+        self._stop_feed()
         self._timer.stop()
         super().done(result)

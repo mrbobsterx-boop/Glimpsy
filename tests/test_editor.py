@@ -815,3 +815,44 @@ def test_recording_keeps_editor_usable_and_plays_along(tmp_path, qt_app):
         assert w._rec_dialog is None
     finally:
         w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_record_dialog_camera_preview(tmp_path, qt_app):
+    """Выбранная камера видна в окне записи — до записи и во время неё; снятое сохраняется."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.record_dialog import RecordDialog
+    from tests.test_audio import _FakeRecorder
+
+    dlg = RecordDialog(FFMPEG, tmp_path / "media", None, mic_opener=lambda: _FakeRecorder(0.2),
+                       camera_input=["-re", "-f", "lavfi", "-i", "testsrc=size=640x480:rate=30"])
+    try:
+        dlg.voice.setChecked(False)
+        dlg.camera.setChecked(True)
+
+        def spin(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                dlg._tick()
+                QApplication.processEvents()
+                time.sleep(0.03)
+
+        spin(2.0)
+        assert dlg.view.isVisible() or not dlg.isVisible()
+        assert dlg._feed is not None and dlg.view.pixmap() is not None and not dlg.view.pixmap().isNull()
+        dlg._toggle()
+        dlg._t0 = time.monotonic()
+        spin(2.0)
+        assert dlg._state == "recording" and dlg._feed is None and dlg._cam is not None
+        assert dlg._cam.latest_frame() is not None                   # во время записи картинка идёт из неё же
+        got = []
+        dlg.recorded.connect(got.append)
+        dlg._toggle()
+        rec, = got
+        assert rec.voice is None and rec.camera is not None and rec.camera.duration > 0.8
+    finally:
+        if dlg._state != "idle":
+            dlg.reject()
