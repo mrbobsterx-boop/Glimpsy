@@ -165,7 +165,7 @@ def input_args(device: str, attempt: int = 0) -> list[str]:
         return ["-f", "avfoundation", "-framerate", str(fps), "-i", f"{device}:none"]
     # Linux: большинство веб-камер без сжатия отдают 720p лишь 10 кадров в секунду — видео дёргается.
     # Плавные 30 кадров — только в сжатом виде (MJPEG), его и просим; не умеет — попроще.
-    q = ["-f", "v4l2", "-thread_queue_size", "512"]
+    q = ["-f", "v4l2"]
     return (q + ["-input_format", "mjpeg", "-framerate", "30", "-video_size", "1280x720", "-i", device],
             q + ["-framerate", "30", "-i", device],
             q + ["-i", device])[attempt % 3]

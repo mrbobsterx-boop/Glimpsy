@@ -149,3 +149,15 @@ def test_assemble_with_camera(tmp_path):
     assert len(project.overlays) == 1 and project.overlays[0].kind == "video"
     assert project.overlays[0].start == pytest.approx(cam["start"])
     assert (tmp_path / "project_1" / project.overlays[0].src).exists()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_linux_camera_args_are_accepted_by_ffmpeg(monkeypatch):
+    """Каждый способ открыть камеру FFmpeg принимает (ошибка может быть только «нет камеры»)."""
+    import subprocess
+
+    monkeypatch.setattr(webcam.sys, "platform", "linux")
+    for attempt in range(3):
+        args = webcam.input_args("/dev/video-glimpsy-missing", attempt)
+        r = subprocess.run([FFMPEG, "-hide_banner", *args, "-f", "null", "-"], capture_output=True, text=True)
+        assert "Error parsing options" not in r.stderr and "cannot be applied" not in r.stderr, r.stderr
