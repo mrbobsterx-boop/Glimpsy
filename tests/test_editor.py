@@ -856,3 +856,43 @@ def test_record_dialog_camera_preview(tmp_path, qt_app):
     finally:
         if dlg._state != "idle":
             dlg.reject()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_overlay_video_plays_smoothly_in_preview(tmp_path, qt_app):
+    """Видео поверх ролика (камера) в просмотре идёт живым видео, а не кадром раз в секунду."""
+    import hashlib
+    import json
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.window import EditorWindow
+
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=320x180:rate=30",
+                    "-t", "6", "-pix_fmt", "yuv420p", str(proj / "p.mp4")], check=True)
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30",
+                    "-t", "5", "-pix_fmt", "yuv420p", str(tmp_path / "cam.mp4")], check=True)
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
+                                                   "clips": [{"file": "p.mp4", "duration": 6.0}]}))
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        w.add_overlays([str(tmp_path / "cam.mp4")], 0.0, "camera")
+        w.timeline.select_overlay(None)
+        w.player.seek(0.2)
+        w.player.play()
+        seen = set()
+        end = time.time() + 2.5
+        while time.time() < end:
+            QApplication.processEvents()
+            for item, img in w.preview.overlays:
+                if img is not None and not img.isNull():
+                    seen.add(hashlib.md5(bytes(img.constBits())[:200000]).hexdigest())
+            time.sleep(0.02)
+        w.player.pause()
+        assert len(seen) >= 10, len(seen)           # живое видео: много разных кадров за 2 секунды
+    finally:
+        w.close()

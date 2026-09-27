@@ -40,6 +40,7 @@ from glimpsy.editor.project import (
 from glimpsy.editor.text import TextItem, effective_style, load_custom_fonts
 from glimpsy.editor.text_panel import TextPanel
 from glimpsy.editor.overlay import OverlayItem
+from glimpsy.editor.overlay_video import OverlayVideos
 from glimpsy.editor.overlay_panel import OverlayPanel
 from glimpsy.editor.music import AUDIO_EXT, MusicTrack, probe_audio
 from glimpsy.editor.music_panel import MusicPanel
@@ -106,6 +107,11 @@ class EditorWindow(QMainWindow):
         self.side.addWidget(self.overlay_panel)
         self.side.addWidget(self.music_panel)
         self._ov_images: dict[str, QImage] = {}
+        # видео поверх ролика (камера, медиа) в просмотре играет само — плавно, а не кадром в секунду
+        self.ov_video = OverlayVideos(self)
+        self._ov_redraw = QTimer(self, singleShot=True, interval=0)
+        self._ov_redraw.timeout.connect(self._sync_preview)
+        self.ov_video.frame_ready.connect(lambda: self.player.playing or self._ov_redraw.start())
         self._motion_cache: dict = {}
 
         self._build_ui()
@@ -115,6 +121,7 @@ class EditorWindow(QMainWindow):
         self.player.position.connect(self._on_position)
         self.player.playing_changed.connect(
             lambda on: self.play_btn.setIcon(self._icon_pause if on else self._icon_play))
+        self.player.playing_changed.connect(lambda _on: self._sync_preview())
         self.player.set_volume(0.8)
         self.timeline.seek_requested.connect(self.player.seek)
         self.timeline.selection_changed.connect(self._on_select)
@@ -489,6 +496,7 @@ class EditorWindow(QMainWindow):
                                self.timeline.selected_text)
         sel_ov = self.timeline.selected_overlay
         shown = [o for o in self.project.overlays_by_depth() if o.start <= t < o.end or o.id == sel_ov]
+        self.ov_video.sync(shown, t, self.player.playing, self.project.dir)
         self.preview.set_overlays([(o, self._overlay_frame(o, t)) for o in shown], sel_ov)
 
     def _overlay_frame(self, o, t: float):
@@ -499,7 +507,10 @@ class EditorWindow(QMainWindow):
             if img is None:
                 img = self._ov_images[str(path)] = QImage(str(path))
             return img
-        local = max(0.0, min(o.duration, t - o.start))
+        live = self.ov_video.frame(o.id)
+        if live is not None:
+            return live
+        local = max(0.0, min(o.duration, t - o.start))          # плеер ещё открывает файл — пока миниатюра
         return self.thumbs.get(path, float(round(o.in_s + local)), 360)
 
     def _ripples(self, c: Clip | None) -> list:
@@ -1636,6 +1647,7 @@ class EditorWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._save()
+        self.ov_video.shutdown()
         QApplication.instance().removeEventFilter(self)
         self.player.shutdown()
         super().closeEvent(e)
