@@ -161,6 +161,9 @@ class Project:
     music: object = None                             # MusicTrack — фоновая музыка или None
     cursor: dict = field(default_factory=dict)       # свой курсор: {"style", "size", "show"}
     tracks: list = field(default_factory=list)       # Track — дорожки над видео, сверху вниз
+    # монтаж по тексту: исходные видео, что вырезано и настройки пауз (см. transcript.py);
+    # пусто — обычный проект
+    cuts: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.normalize_tracks()
@@ -360,6 +363,7 @@ class Project:
             "music": asdict(self.music) if self.music is not None else None,
             "cursor": dict(self.cursor),
             "tracks": [asdict(t) for t in self.tracks],
+            "cuts": copy.deepcopy(self.cuts),
         }
 
     def restore(self, data: dict) -> None:
@@ -385,12 +389,41 @@ class Project:
         self.cursor = dict(data.get("cursor") or {})
         self.tracks = [Track(str(t["id"]), str(t["kind"]), str(t.get("name", ""))) for t in data.get("tracks", [])
                        if t.get("kind") in TRACK_KINDS]
+        self.cuts = copy.deepcopy(data.get("cuts") or {})
         self.normalize_tracks()
 
     def save(self) -> None:
         tmp = self.dir / "edit.json.tmp"
         tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.dir / "edit.json")
+
+    @property
+    def text_edit(self) -> bool:
+        """Проект «монтаж по тексту» (фрагменты строятся из расшифровки)."""
+        return bool(self.cuts.get("sources"))
+
+    @classmethod
+    def for_videos(cls, root: Path, files: list[Path], infos: list) -> "Project":
+        """Новый проект из своих видео — «монтаж по тексту». Файлы НЕ копируются: проект
+        ссылается на них, исходники не меняются."""
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        d = Path(root) / f"project_{stamp}_video"
+        n = 2
+        while d.exists():
+            d = Path(root) / f"project_{stamp}_video{n}"
+            n += 1
+        d.mkdir(parents=True)
+        sources = [{"src": str(Path(f).resolve()), "duration": float(i.duration), "has_audio": bool(i.has_audio),
+                    "width": int(i.width), "height": int(i.height), "label": Path(f).name}
+                   for f, i in zip(files, infos)]
+        p = cls(d, Path(files[0]).stem, created=time.time())
+        w, h = sources[0]["width"], sources[0]["height"]
+        p.aspect = "9:16" if h > w else "16:9"
+        p.cuts = {"sources": sources}
+        p.clips = [Clip(new_id(), "video", s["src"], s["duration"], 0.0, s["duration"], has_audio=s["has_audio"],
+                        width=s["width"], height=s["height"], label=s["label"]) for s in sources]
+        p.save()
+        return p
 
     @property
     def edited(self) -> bool:
