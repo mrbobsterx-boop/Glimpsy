@@ -256,3 +256,43 @@ def test_sessions_new_project_from_videos(tmp_path, qt_app, monkeypatch):
     assert not any(f.suffix == ".mp4" for f in opened[0].rglob("*"))
     dlg.close()
 
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_preview_plays_through_cuts_of_one_file(tmp_path, qt_app):
+    """Просмотр идёт по вырезам одного видео подряд: запасной плеер заранее стоит на следующем куске."""
+    import subprocess
+    import time
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.player import TimelinePlayer
+    from glimpsy.editor.project import Clip, Project
+
+    v = tmp_path / "src.mp4"
+    subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=size=320x240:rate=30:d=12", "-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p",
+                    str(v)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [v],
+                           [SimpleNamespace(duration=12.0, has_audio=False, width=320, height=240, fps=30)])
+    p.clips = [Clip(f"c{k}", "video", p.clips[0].src, 12.0, k * 2.0, k * 2.0 + 0.8) for k in range(6)]
+    pl = TimelinePlayer(p)
+    frames = []
+    pl.frame.connect(lambda img: frames.append(pl.t))
+    try:
+        pl.seek(0.0)
+        end = time.time() + 1.0
+        while time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        pl.play()
+        end = time.time() + 4.0
+        while time.time() < end and pl.playing:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        assert pl.t > 2.4 and (pl.idx or 0) >= 3            # прошли несколько склеек
+        assert pl.spare.src == pl.deck.src                   # следующий кусок того же файла — уже в запасном
+        assert len(frames) > 30
+    finally:
+        pl.shutdown()

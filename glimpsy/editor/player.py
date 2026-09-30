@@ -283,8 +283,8 @@ class TimelinePlayer(QObject):
         if c.kind != "video":
             return
         path = str(self.project.path_of(c))
-        if path == self.deck.src:
-            return   # тот же файл, что играет сейчас — перемотаем его же
+        # и для того же файла (монтаж по тексту: сотни вырезов из одного видео) — запасной плеер
+        # заранее встаёт на начало следующего куска, и склейка проходит без заминки на перемотку
         self.spare.load(path, c.in_s, False)
 
     def _on_status(self, d: _Deck, status) -> None:
