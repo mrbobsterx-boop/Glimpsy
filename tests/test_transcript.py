@@ -1,6 +1,7 @@
 """Монтаж по тексту: слова, вырезы, субтитры."""
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -190,3 +191,68 @@ def test_text_editing_in_editor(tmp_path, qt_app):
         assert "стало" in panel.stats.text()
     finally:
         w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_fast_cut_export_keeps_sync(tmp_path):
+    """Нарезка из десятков кусков: длина точная, звук не уезжает от видео, пачки склеены без пропусков."""
+    import re
+    import subprocess
+    from types import SimpleNamespace
+
+    from glimpsy.editor import export as ex
+    from glimpsy.editor.project import Clip, Project
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "src.mp4"
+    # 60 с: картинка и звук, у звука каждую секунду — «щелчок» в начале секунды
+    subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi",
+                    "-i", "testsrc=size=320x240:rate=30:d=60", "-f", "lavfi",
+                    "-i", "aevalsrc='if(lt(mod(t,1),0.05),0.8*sin(2*PI*1000*t),0)':s=48000:d=60",
+                    "-c:v", "libx264", "-g", "60", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=60.0, has_audio=True, width=320, height=240, fps=30)])
+    # 60 кусков: из каждой секунды берём [k+0.0, k+0.5)
+    p.clips = [Clip(f"c{k}", "video", p.clips[0].src, 60.0, float(k), k + 0.5, has_audio=True, width=320,
+                    height=240) for k in range(60)]
+    assert ex.simple_cuts(p, p.clips)
+    out = ex.export_project(FFMPEG, p, tmp_path / "out.mp4", software_encoder())
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", info)
+    dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    assert dur == pytest.approx(30.0, abs=0.15)
+    # щелчки: каждый кусок начинается со щелчка → в итоге щелчок каждые 0,5 с, без сдвига к концу
+    pcm = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(out), "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
+                         capture_output=True).stdout
+    a = np.abs(np.frombuffer(pcm, np.float32))
+    onsets = [i / 8000 for i in range(1, len(a)) if a[i] > 0.3 and a[max(0, i - 400):i].max() < 0.3]
+    assert len(onsets) >= 55
+    drift = [t - round(t * 2) / 2 for t in onsets]
+    assert max(abs(d) for d in drift) < 0.05, drift[-5:]
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_sessions_new_project_from_videos(tmp_path, qt_app, monkeypatch):
+    """«Смонтировать видео…»: выбрали файлы — появился проект, открылся редактор; видео не скопировано."""
+    import subprocess
+
+    from PySide6.QtWidgets import QFileDialog
+
+    from glimpsy.editor import sessions
+
+    v = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=gray:size=320x180:rate=25:d=3", "-f", "lavfi", "-i", "sine=d=3",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(v)], check=True)
+    monkeypatch.setattr(sessions, "projects_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([str(v)], "")))
+    opened = []
+    dlg = sessions.SessionsDialog(FFMPEG, opened.append)
+    dlg._new_from_videos()
+    assert len(opened) == 1
+    from glimpsy.editor.project import Project
+    p = Project.load(opened[0])
+    assert p.text_edit and p.fps == 25 and Path(p.clips[0].src) == v.resolve()
+    assert not any(f.suffix == ".mp4" for f in opened[0].rglob("*"))
+    dlg.close()
+

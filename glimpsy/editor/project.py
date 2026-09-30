@@ -416,7 +416,10 @@ class Project:
         sources = [{"src": str(Path(f).resolve()), "duration": float(i.duration), "has_audio": bool(i.has_audio),
                     "width": int(i.width), "height": int(i.height), "label": Path(f).name}
                    for f, i in zip(files, infos)]
-        p = cls(d, Path(files[0]).stem, created=time.time())
+        fps = next((float(getattr(i, "fps", 0) or 0) for i in infos if getattr(i, "fps", 0)), 30.0)
+        # готовый ролик — рядом с первым исходником (…_edit.mp4), с частотой кадров исходника
+        p = cls(d, Path(files[0]).stem, created=time.time(), fps=max(10, min(120, int(round(fps)))),
+                source_video=sources[0]["src"])
         w, h = sources[0]["width"], sources[0]["height"]
         p.aspect = "9:16" if h > w else "16:9"
         p.cuts = {"sources": sources}

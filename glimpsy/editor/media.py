@@ -30,6 +30,7 @@ class MediaInfo:
     height: int
     has_audio: bool
     is_image: bool
+    fps: float = 0.0           # кадров в секунду (0 — неизвестно)
 
 
 class MediaError(RuntimeError):
@@ -64,7 +65,8 @@ def parse_probe(text: str, image_hint: bool = False) -> MediaInfo:
             w, h = h, w
     has_audio = bool(re.search(r"Stream #\S+.*?Audio:", text))
     is_image = image_hint or duration == 0.0
-    return MediaInfo(duration, w, h, has_audio, is_image)
+    f = re.search(r"Stream #\S+.*?Video:.*?(\d+(?:\.\d+)?) fps", text)
+    return MediaInfo(duration, w, h, has_audio, is_image, float(f.group(1)) if f else 0.0)
 
 
 class Thumbnailer(QObject):

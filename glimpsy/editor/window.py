@@ -1810,6 +1810,13 @@ class EditorWindow(QMainWindow):
                     path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
                                           overlay_layers=overlay_layers, progress=prog, cancel=cancel)
                     done.append(str(path))
+                    if snapshot.text_edit:
+                        # субтитры с таймкодами уже готового ролика — рядом с ним
+                        words = tr.output_words(snapshot, tr.TranscriptStore(snapshot.dir))
+                        if words:
+                            srt = Path(path).with_suffix(".srt")
+                            srt.write_text(tr.make_srt(words), encoding="utf-8")
+                            done.append(str(srt))
                 bridge.done.emit("\n".join(done))
             except ExportCancelled:
                 bridge.failed.emit("")

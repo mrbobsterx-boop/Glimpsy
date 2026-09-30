@@ -228,6 +228,87 @@ def default_output(project: Project, fallback_dir: Path) -> Path:
     return unique_path(fallback_dir / f"{project.name}{suffix}.mp4")
 
 
+# ---------------- быстрый экспорт нарезки (монтаж по тексту) ----------------
+
+CHUNK_CLIPS = 24          # столько кусков склеивает один запуск FFmpeg
+EDGE_FADE_S = 0.006       # микро-затухание звука на стыках — без щелчков
+
+
+def simple_cuts(project: Project, clips: list[Clip]) -> bool:
+    """Нарезка без эффектов (только «откуда — докуда»): её можно собрать быстро, пачками."""
+    for c in clips:
+        if c.kind != "video" or abs(c.speed - 1.0) > 1e-6 or c.motion_for(project.aspect) != "none":
+            return False
+        if tuple(c.frame_for(project.aspect)) != tuple(DEFAULT_FRAME) or c.clicks_shown():
+            return False
+        if c.own_cursor and c.cursor:
+            return False
+    return True
+
+
+def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, enc: Encoder) -> list[str]:
+    """Один FFmpeg: несколько кусков (каждый — точный переход к началу в исходнике) → один файл.
+
+    Видео — сразу в итоговом качестве, звук — без сжатия (сожмём один раз в конце, чтобы на
+    стыках пачек не было пропусков, которые даёт AAC).
+    """
+    W, H = ASPECTS[project.aspect]
+    fps = project.fps
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *enc.global_args]
+    parts, pads = [], []
+    n = 0
+    for c in clips:
+        dur = c.out_s - c.in_s
+        cmd += ["-ss", f"{c.in_s:.3f}", "-t", f"{dur:.3f}", "-i", str(project.path_of(c))]
+        vi = n
+        n += 1
+        if c.has_audio and not c.muted:
+            ai = vi
+        else:
+            cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+            ai = n
+            n += 1
+        k = len(pads)
+        parts.append(f"[{vi}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps},format=yuv420p[v{k}]")
+        fade_out = max(0.0, dur - EDGE_FADE_S)
+        parts.append(f"[{ai}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                     f"afade=t=in:d={EDGE_FADE_S},afade=t=out:st={fade_out:.3f}:d={EDGE_FADE_S}[a{k}]")
+        pads.append(f"[v{k}][a{k}]")
+    parts.append(f"{''.join(pads)}concat=n={len(pads)}:v=1:a=1[cv][ca]")
+    parts.append(f"[cv]{enc.filter_suffix}[vout]")
+    return cmd + ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[ca]",
+                  *enc.args("final", fps), "-c:a", "pcm_s16le", str(out)]
+
+
+def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, work: Path, enc: Encoder,
+                progress: Callable[[float, str], None], cancel: threading.Event) -> Encoder:
+    """Нарезка → готовое видео: пачками по CHUNK_CLIPS кусков, затем склейка без перекодирования."""
+    chunks = [clips[i:i + CHUNK_CLIPS] for i in range(0, len(clips), CHUNK_CLIPS)]
+    files = []
+    for i, chunk in enumerate(chunks):
+        if cancel.is_set():
+            raise ExportCancelled()
+        done = sum(len(c) for c in chunks[:i])
+        progress(i / (len(chunks) + 0.3), f"Куски {done + 1}–{done + len(chunk)} из {len(clips)}")
+        part = work / f"chunk_{i:04d}.mkv"
+        try:
+            _run(chunk_command(ffmpeg, project, chunk, part, enc), cancel)
+        except ExportError:
+            if not enc.hw:
+                raise
+            log.warning("Аппаратный кодек не справился при экспорте, пробуем программный")
+            enc = software_encoder()
+            _run(chunk_command(ffmpeg, project, chunk, part, enc), cancel)
+        files.append(part)
+    progress(len(chunks) / (len(chunks) + 0.3), "Склейка")
+    lst = work / "chunks.txt"
+    lst.write_text("".join(f"file '{p.name}'\n" for p in files), encoding="utf-8")
+    _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(joined)], cancel)
+    return enc
+
+
 def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
                    progress: Callable[[float, str], None] | None = None,
                    cancel: threading.Event | None = None,
@@ -242,6 +323,21 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     try:
+        layered = bool(text_layers or overlay_layers or getattr(project, "music", None)
+                       or (project.voices() if hasattr(project, "voices") else []))
+        if len(clips) > 1 and simple_cuts(project, clips):
+            # нарезка без эффектов (монтаж по тексту) — быстро, пачками
+            tmp = work / "final.mp4"
+            joined = work / "joined.mp4" if layered else tmp
+            enc = export_cuts(ffmpeg, project, clips, joined, work, encoder,
+                              lambda f, t: progress(f * (0.8 if layered else 1.0), t), cancel)
+            if layered:
+                progress(0.8, "Тексты, наложения и музыка")
+                _compose_layers(ffmpeg, project, joined, tmp, text_layers or [], overlay_layers or [], enc, cancel)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(tmp), out)
+            progress(1.0, "Готово")
+            return out
         parts = []
         enc = encoder
         for i, clip in enumerate(clips):
