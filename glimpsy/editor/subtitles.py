@@ -42,6 +42,8 @@ MODELS = {
              "Быстрая (148 МБ) — хватает для чёткой речи"),
     "small": ("ggml-small.bin", HF + "ggerganov/whisper.cpp/resolve/main/ggml-small.bin", 488,
               "Точная (488 МБ) — лучше для русского, но медленнее"),
+    "turbo": ("ggml-large-v3-turbo-q5_0.bin", HF + "ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+              574, "Самая точная (574 МБ) — лучшая для русского, но в 3–4 раза медленнее"),
 }
 VAD_MODEL = ("ggml-silero-v5.1.2.bin", HF + "ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin", 1)
 LANGUAGES = [("auto", "Определить самому"), ("ru", "Русский"), ("en", "English"), ("uk", "Українська"),

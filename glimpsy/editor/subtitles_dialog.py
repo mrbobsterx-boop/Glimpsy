@@ -83,19 +83,23 @@ class Downloader(QObject):
 
 
 class SubtitlesDialog(QDialog):
-    def __init__(self, aspect: str, has_auto: bool, parent=None) -> None:
+    def __init__(self, aspect: str, has_auto: bool, parent=None, words: bool = False) -> None:
+        """words=True — расшифровка по словам для монтажа по тексту (без настроек строк субтитров)."""
         super().__init__(parent)
-        self.setWindowTitle("Автосубтитры")
+        self.words = words
+        self._key = "words" if words else "subs"
+        self.setWindowTitle("Расшифровка речи" if words else "Автосубтитры")
         self.setMinimumWidth(460)
         st = QSettings("Glimpsy", "editor")
         self.lang = QComboBox()
         for code, label in subs.LANGUAGES:
             self.lang.addItem(label, code)
-        self.lang.setCurrentIndex(max(0, self.lang.findData(st.value("subs/lang", "auto"))))
+        self.lang.setCurrentIndex(max(0, self.lang.findData(st.value(f"{self._key}/lang", "ru" if words else "auto"))))
         self.model = QComboBox()
         for key, (_f, _u, _mb, label) in subs.MODELS.items():
             self.model.addItem(label + ("  ✓ скачана" if subs.model_ready(key) else ""), key)
-        self.model.setCurrentIndex(max(0, self.model.findData(st.value("subs/model", "base"))))
+        self.model.setCurrentIndex(max(0, self.model.findData(st.value(f"{self._key}/model",
+                                                                       "small" if words else "base"))))
         self.length = QComboBox()
         for key, (_n, label) in subs.LENGTHS.items():
             self.length.addItem(label, key)
@@ -114,8 +118,9 @@ class SubtitlesDialog(QDialog):
         form = QFormLayout()
         form.addRow("Язык речи:", self.lang)
         form.addRow("Модель:", self.model)
-        form.addRow("Строки:", self.length)
-        form.addRow(self.replace)
+        if not words:
+            form.addRow("Строки:", self.length)
+            form.addRow(self.replace)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
@@ -151,7 +156,7 @@ class SubtitlesDialog(QDialog):
         if not subs.model_ready(key):
             _f, url, mb, _l = subs.MODELS[key]
             out.append((url, subs.model_path(key), mb))
-        if not subs.vad_ready():
+        if not subs.vad_ready() and not self.words:          # по словам детектор речи не нужен
             out.append((subs.VAD_MODEL[1], subs.vad_path(), subs.VAD_MODEL[2]))
         return out
 
@@ -159,10 +164,16 @@ class SubtitlesDialog(QDialog):
         missing = self._missing()
         if any(m[1] == subs.model_path(self.model_key) for m in missing):
             mb = sum(m[2] for m in missing)
-            self.ok.setText(f"Скачать модель ({mb} МБ) и создать")
+            self.ok.setText(f"Скачать модель ({mb} МБ) и " + ("расшифровать" if self.words else "создать"))
             self.info.setText(f"Модель распознавания скачается один раз (≈ {mb} МБ, с huggingface.co) "
                               f"и останется на компьютере. Сама речь распознаётся прямо здесь — звук "
                               f"ролика никуда не отправляется.")
+        elif self.words:
+            self.ok.setText("Расшифровать")
+            self.info.setText("Речь распознаётся прямо на компьютере, без интернета — один раз: результат "
+                              "хранится в проекте. На длинном видео это долго (может занять сравнимо с "
+                              "длиной самого видео); «Самая точная» — в 3–4 раза дольше «Точной». "
+                              "Ход виден в панели «Текст», редактором можно пользоваться.")
         else:
             self.ok.setText("Создать субтитры")
             self.info.setText("Речь распознаётся прямо на компьютере, без интернета. Субтитры появятся "
@@ -173,8 +184,8 @@ class SubtitlesDialog(QDialog):
 
     def _go(self) -> None:
         st = QSettings("Glimpsy", "editor")
-        st.setValue("subs/lang", self.language)
-        st.setValue("subs/model", self.model_key)
+        st.setValue(f"{self._key}/lang", self.language)
+        st.setValue(f"{self._key}/model", self.model_key)
         missing = self._missing()
         if not missing:
             self.accept()

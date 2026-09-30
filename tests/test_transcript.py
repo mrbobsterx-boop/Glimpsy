@@ -121,3 +121,72 @@ def test_project_for_videos_references_files(tmp_path):
     assert not (p.dir / "media").exists()                                  # исходник не копировался
     again = Project.load(p.dir)
     assert again.text_edit and again.name == "my video" and again.path_of(again.clips[0]) == video.resolve()
+
+
+FFMPEG = __import__("glimpsy.paths", fromlist=["x"]).find_executable("ffmpeg")
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_text_editing_in_editor(tmp_path, qt_app):
+    """Панель «Текст»: щелчок — к слову, Delete — вырезать, щелчок по зачёркнутому — вернуть, паузы, отмена."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=7",
+                    "-f", "lavfi", "-i", "sine=f=300:d=7", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=7.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    sw = sw_simple()
+    sw.src = src
+    tr.TranscriptStore(p.dir).put(sw, None)
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        QApplication.processEvents()
+        panel = w.text_panel_t
+        assert panel.isVisible() and not panel.transcribe_btn.isVisible()
+        text = panel.view.toPlainText()
+        assert "раз два" in text and "[пауза 1,6 с]" in text
+        tr.rebuild_clips(w.project, w.tstore)                 # как после расшифровки
+        w._changed()
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.85, 2.05), (3.35, 5.15)]
+        # щелчок по «три» — видео перематывается к нему (на ленте это 1,2 + 0,15 с)
+        w._on_text_token(("w", 0, 2))
+        assert w.player.t == pytest.approx(1.35, abs=0.01)
+        # выделили «э» и нажали Delete
+        a, b = panel.view._spans[("w", 0, 3)]
+        c = panel.view.textCursor()
+        c.setPosition(a)
+        c.setPosition(b, QTextCursor.MoveMode.KeepAnchor)
+        panel.view.setTextCursor(c)
+        panel.view.delete_keys.emit(panel.view.keys_in_selection())
+        assert w.project.cuts["deleted"][src] == [3]
+        assert len(w.project.clips) == 3 and panel.view._state[("w", 0, 3)] == "cut"
+        # щелчок по зачёркнутому — вернуть
+        w._on_text_token(("w", 0, 3))
+        assert w.project.cuts["deleted"][src] == [] and len(w.project.clips) == 2
+        # пауза в середине: щелчок — оставить её
+        w._on_text_token(("p", 0, 1))
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.85, 5.15)]
+        assert panel.view._state[("p", 0, 1)] == "keep"
+        # порог пауз больше самой длинной паузы — ничего не режется, кроме удалённого
+        panel.pause_min.setValue(3.0)
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.0, 7.0)]
+        w.undo()
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.85, 5.15)]
+        w.undo()
+        w.undo()
+        assert w.project.cuts["deleted"][src] == [3] and panel.view._state[("w", 0, 3)] == "cut"
+        assert "стало" in panel.stats.text()
+    finally:
+        w.close()

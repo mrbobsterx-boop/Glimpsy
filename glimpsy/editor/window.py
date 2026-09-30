@@ -39,6 +39,7 @@ from glimpsy.editor.project import (
 )
 from glimpsy.editor.text import TextItem, effective_style, load_custom_fonts
 from glimpsy.editor.text_panel import TextPanel
+from glimpsy.editor import transcript as tr
 from glimpsy.editor.overlay import OverlayItem
 from glimpsy.editor.overlay_video import OverlayVideos
 from glimpsy.editor.overlay_panel import OverlayPanel
@@ -167,6 +168,7 @@ class EditorWindow(QMainWindow):
         справа — свойства; внизу — лента с её кнопками."""
         from glimpsy.editor.library_panel import LibraryPanel
         from glimpsy.editor.subtitles_panel import SubtitlesPanel
+        from glimpsy.editor.transcript_panel import TranscriptPanel
         from glimpsy.editor.shortcuts_panel import ShortcutsPanel
 
         # --- действия (одни и те же для кнопок и горячих клавиш) ---
@@ -286,6 +288,12 @@ class EditorWindow(QMainWindow):
             panel.close_requested.connect(lambda: b.setChecked(False))
             self._left[name] = (b, panel)
 
+        # монтаж по тексту — у проектов из своих видео
+        self.text_panel_t = TranscriptPanel()
+        if self.project.text_edit:
+            left("text", "captions", "Текст", "Монтаж по тексту: расшифровка речи, вырезать словами и паузы",
+                 self.text_panel_t)
+            self._setup_text_edit()
         left("files", "folder-open", "Файлы", "Файлы с компьютера: видео, фото и музыка под рукой", self.library)
         left("media", "image-plus", "Медиа", "Видео и фото на дорожку «Медиа» — на весь кадр, с места курсора (M). "
              "Вставить между фрагментами видео — перетащите файл на дорожку видео или Ctrl+V", self.media_lib)
@@ -441,6 +449,8 @@ class EditorWindow(QMainWindow):
         name = store.value("left_panel", "", type=str)
         if not name and store.value("library_open", False, type=bool):
             name = "files"                    # раньше была только панель «Файлы»
+        if self.project.text_edit:
+            name = "text"                     # проект из своих видео — сразу текст
         if name in self._left:
             self._left[name][0].setChecked(True)
 
@@ -476,6 +486,177 @@ class EditorWindow(QMainWindow):
         self.timeline.set_playhead(t, follow=self.player.playing)
         self.time_lbl.setText(f"{fmt_time(t, True)} / {fmt_time(self.project.total, True)}")
         self._sync_preview()
+        if self.project.text_edit and self.text_panel_t.isVisible():
+            at = tr.source_time(self.project, t)
+            if at is not None:
+                self.text_panel_t.view.set_current(self._src_index(at[0]), at[1], self.player.playing)
+
+    # ---------- монтаж по тексту ----------
+
+    def _setup_text_edit(self) -> None:
+        self.tstore = tr.TranscriptStore(self.project.dir)
+        self._tr_cancel: threading.Event | None = None
+        p = self.text_panel_t
+        p.view.clicked.connect(self._on_text_token)
+        p.view.delete_keys.connect(self._cut_tokens)
+        p.view.play_toggle.connect(self.player.toggle)
+        p.settings_changed.connect(self._on_cut_settings)
+        p.transcribe_requested.connect(self.transcribe)
+        p.cancel_requested.connect(lambda: self._tr_cancel is not None and self._tr_cancel.set())
+        self._tr_build()
+
+    def _sources(self) -> list[dict]:
+        return self.project.cuts.get("sources", [])
+
+    def _src_index(self, src: str) -> int:
+        return next((i for i, s in enumerate(self._sources()) if s["src"] == src), -1)
+
+    def _tr_build(self) -> None:
+        """Заново показать текст всех видео (после расшифровки или смены порога пауз)."""
+        cuts = tr.cuts_of(self.project)
+        items = [(s["src"], s.get("label", Path(s["src"]).name), self.tstore.get(s["src"])) for s in self._sources()]
+        self.text_panel_t.set_settings(cuts)
+        self.text_panel_t.view.build(items, float(cuts["pause_min"]))
+        self.text_panel_t.set_needs_transcript(sum(1 for _s, _l, sw in items if sw is None))
+        self._tr_states()
+
+    def _tr_states(self) -> None:
+        """Что вырезано — зачёркнуто; и сколько времени осталось."""
+        if not self.project.text_edit:
+            return
+        cuts = tr.cuts_of(self.project)
+        states: dict[tuple, str] = {}
+        for si, s in enumerate(self._sources()):
+            sw = self.tstore.get(s["src"])
+            if sw is None:
+                continue
+            gone = set(cuts.get("deleted", {}).get(s["src"], []))
+            kept_p = set(cuts.get("kept_pauses", {}).get(s["src"], []))
+            for i in gone:
+                states[("w", si, i)] = "cut"
+            for i, _gap in tr.pauses(sw.words, float(cuts["pause_min"]), sw.duration):
+                if cuts["pause_cut"] and i not in kept_p:
+                    states[("p", si, i)] = "cut"
+        self.text_panel_t.view.apply_states(states)
+        self.text_panel_t.set_stats(sum(float(s["duration"]) for s in self._sources()), self.project.total)
+
+    def _recut(self) -> None:
+        """Пометки изменились — пересобрать фрагменты из расшифровки."""
+        tr.rebuild_clips(self.project, self.tstore)
+        self._changed()
+
+    def _mark(self, field: str, src: str, idx: int, on: bool) -> None:
+        marks = self.project.cuts.setdefault(field, {})
+        cur = set(marks.get(src, []))
+        cur.add(idx) if on else cur.discard(idx)
+        marks[src] = sorted(cur)
+
+    def _on_text_token(self, key: tuple) -> None:
+        kind, si, i = key
+        src = self._sources()[si]["src"]
+        sw = self.tstore.get(src)
+        if sw is None:
+            return
+        cuts = tr.cuts_of(self.project)
+        if kind == "p":                                    # пауза: вырезать ⇄ оставить
+            self.history.push(self.project.to_dict())
+            kept = i in set(cuts.get("kept_pauses", {}).get(src, []))
+            self._mark("kept_pauses", src, i, not kept)
+            self._recut()
+            return
+        if i in set(cuts.get("deleted", {}).get(src, [])):  # зачёркнутое слово — вернуть
+            self.history.push(self.project.to_dict())
+            self._mark("deleted", src, i, False)
+            self._recut()
+            return
+        self.player.pause()
+        self.player.seek(self._timeline_time(src, sw.words[i].start))
+
+    def _timeline_time(self, src: str, t: float) -> float:
+        """Время внутри исходника → время на ленте (если кусок вырезан — ближайшее оставленное дальше)."""
+        acc, best = 0.0, None
+        for c in self.project.clips:
+            if c.src == src:
+                if c.in_s <= t < c.out_s:
+                    return acc + (t - c.in_s) / c.speed
+                if c.in_s >= t and best is None:
+                    best = acc
+            acc += c.duration
+        return best if best is not None else self.player.t
+
+    def _cut_tokens(self, keys: list) -> None:
+        if not keys:
+            return
+        self.history.push(self.project.to_dict())
+        for kind, si, i in keys:
+            src = self._sources()[si]["src"]
+            if kind == "w":
+                self._mark("deleted", src, i, True)
+            else:
+                self._mark("kept_pauses", src, i, False)     # выделенную паузу — вырезать
+        self._recut()
+
+    def _on_cut_settings(self, values: dict) -> None:
+        self.history.push(self.project.to_dict(), key="cut-settings")
+        rebuild_text = float(values["pause_min"]) != float(tr.cuts_of(self.project)["pause_min"])
+        self.project.cuts.update(values)
+        self._recut()
+        if rebuild_text:
+            self._tr_build()                               # другие паузы видны в тексте
+
+    def transcribe(self) -> None:
+        """Расшифровать все ещё не расшифрованные видео проекта (в фоне)."""
+        from glimpsy.editor.subtitles_dialog import SubtitlesDialog
+
+        if self._tr_cancel is not None:
+            return
+        if not subs.whisper_exe():
+            QMessageBox.warning(self, "Расшифровка", "В этой сборке нет программы распознавания речи.")
+            return
+        todo = [s for s in self._sources() if self.tstore.get(s["src"]) is None]
+        if not todo:
+            return
+        dlg = SubtitlesDialog(self.project.aspect, False, self, words=True)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        model, lang = dlg.model_key, dlg.language
+        bridge = _ExportBridge(self)
+        cancel = self._tr_cancel = threading.Event()
+        panel = self.text_panel_t
+        panel.set_progress(0.0, "Подготовка…")
+        bridge.progress.connect(lambda f, t: panel.set_progress(f, t))
+
+        def finished(msg: str) -> None:
+            self._tr_cancel = None
+            panel.set_progress(None)
+            self.tstore = tr.TranscriptStore(self.project.dir)
+            self._recut()
+            self._tr_build()
+            if msg:
+                QMessageBox.warning(self, "Расшифровка", msg)
+
+        bridge.done.connect(finished)
+        bridge.failed.connect(finished)
+
+        def run() -> None:
+            try:
+                for n, s in enumerate(todo):
+                    label = s.get("label", Path(s["src"]).name)
+                    prefix = f"{label} ({n + 1} из {len(todo)}): " if len(todo) > 1 else ""
+
+                    def prog(f: float, text: str, n=n, prefix=prefix) -> None:
+                        bridge.progress.emit((n + f) / len(todo), prefix + text + f" {int(f * 100)}%")
+
+                    tr.transcribe_source(self.ffmpeg, Path(s["src"]), s["src"], float(s["duration"]), model, lang,
+                                         tr.TranscriptStore(self.project.dir), prog, cancel)
+                bridge.done.emit("")
+            except subs.Cancelled:
+                bridge.done.emit("")
+            except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так
+                log.exception("Расшифровка не удалась")
+                bridge.failed.emit(str(e))
+
+        threading.Thread(target=run, daemon=True, name="transcribe").start()
 
     def _sync_preview(self) -> None:
         """Окну просмотра — кадрирование показанного фрагмента и можно ли его править."""
@@ -630,6 +811,8 @@ class EditorWindow(QMainWindow):
         self._sync_preview()
         self._update_actions()
         self.subs_panel.refresh(self.project, self.timeline.selected_text)
+        if self.project.text_edit:
+            self._tr_states()
         self._save_timer.start()
 
     def _save(self) -> None:

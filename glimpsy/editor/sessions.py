@@ -113,8 +113,8 @@ class SessionsDialog(QDialog):
                                 "{ background: transparent; border: none; }")
         self.list.itemDoubleClicked.connect(lambda _: self._open())
         self.list.currentRowChanged.connect(lambda _: self._update_buttons())
-        self.empty = theme.mark(QLabel("Пока нет ни одной сессии.\nЗапишите и соберите ролик — он появится здесь."),
-                                "muted")
+        self.empty = theme.mark(QLabel("Пока нет ни одной сессии.\nЗапишите и соберите ролик — он появится здесь.\n"
+                                       "Или смонтируйте своё видео — кнопка «Смонтировать видео…» внизу."), "muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.b_open = theme.mark(QPushButton(theme.icon("film", "#FFFFFF", 16), "  Открыть в редакторе"), "primary")
@@ -122,6 +122,11 @@ class SessionsDialog(QDialog):
         self.b_open.clicked.connect(self._open)
         self.b_folder = QPushButton(theme.icon("folder-open", size=16), "  Файлы")
         self.b_folder.clicked.connect(self._show_folder)
+        self.b_video = QPushButton(theme.icon("film", size=16), "  Смонтировать видео…")
+        self.b_video.setToolTip("Своё видео (можно несколько, любой длины): расшифровка речи, монтаж по тексту, "
+                                "вырезание пауз. Исходные файлы не меняются и не копируются.")
+        self.b_video.clicked.connect(self._new_from_videos)
+        self.ffmpeg = ffmpeg
         self.b_delete = theme.mark(QPushButton(theme.icon("trash-2", theme.DANGER, 16), "  Удалить…"), "danger")
         self.b_delete.clicked.connect(self._delete)
         close = theme.mark(QPushButton("Закрыть"), "ghost")
@@ -129,6 +134,7 @@ class SessionsDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addWidget(self.b_delete)
         buttons.addWidget(self.b_folder)
+        buttons.addWidget(self.b_video)
         buttons.addStretch(1)
         buttons.addWidget(close)
         buttons.addWidget(self.b_open)
@@ -172,6 +178,9 @@ class SessionsDialog(QDialog):
             info = f"{len(p.clips)} фрагм. · {fmt_time(p.total)}"
             if p.edited:
                 info += " · изменён"
+            if p.text_edit:
+                n = len(p.cuts.get("sources", []))
+                when += " · видео" + (f" ({n})" if n > 1 else "")
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, str(d))
             item.setData(Qt.ItemDataRole.UserRole + 1, when)
@@ -216,11 +225,50 @@ class SessionsDialog(QDialog):
         if d:
             paths.open_in_file_manager(d)
 
+    def _new_from_videos(self) -> None:
+        """Новый проект «монтаж по тексту» из своих видео."""
+        from PySide6.QtWidgets import QApplication, QFileDialog
+
+        from glimpsy.editor.media import VIDEO_EXT, MediaError, probe
+
+        exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXT))
+        files, _ = QFileDialog.getOpenFileNames(self, "Видео для монтажа", str(Path.home()),
+                                                f"Видео ({exts});;Все файлы (*)")
+        if not files:
+            return
+        infos, bad = [], []
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for f in files:
+                try:
+                    info = probe(self.ffmpeg, Path(f))
+                    if info.is_image or info.duration <= 0:
+                        raise MediaError("это не видео")
+                    infos.append((Path(f), info))
+                except (MediaError, OSError) as e:
+                    bad.append(f"{Path(f).name}: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if bad:
+            QMessageBox.warning(self, "Glimpsy", "Не удалось открыть:\n\n" + "\n".join(bad))
+        if not infos:
+            return
+        p = Project.for_videos(projects_root(), [f for f, _ in infos], [i for _, i in infos])
+        self.reload()
+        self.open_project(p.dir)
+
     def _delete(self) -> None:
         d = self._current_dir()
         if not d:
             return
+        video = False
+        try:
+            video = Project.load(d).text_edit
+        except Exception:
+            log.debug("Проект %s не читается", d, exc_info=True)
         ans = QMessageBox.question(self, "Удалить сессию?",
+                                   "Удалить правки и расшифровку этого проекта?\n\nСами видео не удаляются."
+                                   if video else
                                    "Удалить фрагменты и правки этой сессии?\n\n"
                                    "Уже сохранённые ролики в папке «Видео» останутся.")
         if ans == QMessageBox.StandardButton.Yes:
