@@ -34,6 +34,7 @@ class OverlayItem:
     label: str = ""
     layout: dict = field(default_factory=dict)   # {"9:16": [cx, cy, ширина]}
     track: str = ""                 # дорожка (id); пусто — «Наложение»
+    auto: str = ""                  # создано программой (переозвучка фразы: её номер) — пересоздаётся само
 
     @property
     def end(self) -> float:

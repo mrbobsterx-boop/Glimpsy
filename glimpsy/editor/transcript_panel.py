@@ -33,6 +33,7 @@ COL_SHORT = QColor("#5FC9D3")
 COL_FILLER = QColor("#F2A65A")
 COL_MUTE = QColor("#8FB3FF")          # без звука (картинка идёт)
 COL_HIDE_BG = QColor(150, 90, 200, 70)  # без картинки (звук идёт)
+COL_VOICE = QColor("#7EE0A1")         # переозвучено вашим голосом
 COL_NOW = QColor(34, 174, 187, 90)
 SENTENCE_END = ".?!…"
 
@@ -147,10 +148,10 @@ class TranscriptView(QTextEdit):
             pause = key[0] == "p"
             flags = set(st.split())
             fmt.setForeground(COL_GONE if "cut" in flags else COL_SHORT if "short" in flags else
-                              COL_MUTE if "mute" in flags else COL_FILLER if "filler" in flags else
-                              COL_PAUSE if pause else COL_TEXT)
+                              COL_VOICE if "voice" in flags else COL_MUTE if "mute" in flags else
+                              COL_FILLER if "filler" in flags else COL_PAUSE if pause else COL_TEXT)
             fmt.setFontStrikeOut("cut" in flags)
-            fmt.setFontItalic("mute" in flags)
+            fmt.setFontItalic("mute" in flags and "voice" not in flags)
             if "hide" in flags:
                 fmt.setBackground(COL_HIDE_BG)
             if "filler" in flags:
@@ -390,6 +391,10 @@ class TranscriptPanel(QFrame):
                                   "(переводчик скачивается один раз). Файл .srt сохраняется на обоих языках.")
         self.subs_lang.currentIndexChanged.connect(
             lambda _i: None if self._loading else self.subs_lang_changed.emit(self.subs_lang.currentData() or ""))
+        self.voice_status = QLabel()
+        self.voice_status.setProperty("role", "hint")
+        self.voice_status.setWordWrap(True)
+        self.voice_status.setVisible(False)
         self.subs_status = QLabel()
         self.subs_status.setProperty("role", "hint")
         self.subs_status.setVisible(False)
@@ -407,7 +412,8 @@ class TranscriptPanel(QFrame):
                 ("mute", "Без звука", "Картинка идёт, звук выключен. Ещё раз — вернуть звук"),
                 ("hide", "Без картинки", "Звук идёт, вместо картинки — чёрный кадр (сверху можно положить "
                                          "своё фото или видео). Ещё раз — вернуть картинку"),
-                ("restore", "Вернуть", "Вернуть выделенному и звук, и картинку")):
+                ("restore", "Вернуть", "Вернуть выделенному и звук, и картинку"),
+                ("respeak", "Переозвучить…", "Исправить фразу и озвучить её вашим голосом (без интернета)")):
             b = theme.mark(QPushButton(text), "ghost")
             b.setToolTip(tip)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # выделение в тексте не пропадает
@@ -430,6 +436,7 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.filler_box)
         lay.addLayout(subs_row)
         lay.addWidget(self.subs_status)
+        lay.addWidget(self.voice_status)
         lay.addWidget(self.stats)
         lay.addLayout(act)
         lay.addWidget(self.view, 1)
@@ -452,7 +459,8 @@ class TranscriptPanel(QFrame):
         self.filler_box.setVisible(key == "fillers")
         self.pause_lbl.setText("Вырезать паузы длиннее" if key == "auto" else "Показывать паузы длиннее")
         common = "Щелчок по слову — перейти, двойной — исправить. Выделите текст и Delete — вырезать, или " \
-                 "кнопки над текстом: синий курсив — без звука, фиолетовый фон — без картинки. " \
+                 "кнопки над текстом: синий курсив — без звука, фиолетовый фон — без картинки, зелёный — " \
+                 "переозвучено вашим голосом. " \
                  "Щелчок по зачёркнутому — вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить."
         extra = {
             "auto": "Длинные паузы вырезаются сами. Щелчок по паузе — оставить её; правая кнопка — своя длина.",
@@ -539,6 +547,10 @@ class TranscriptPanel(QFrame):
             self.fillers_changed.emit([f for f in self._fillers if f != word])
 
     # ---------- прочее ----------
+
+    def set_voice_status(self, text: str) -> None:
+        self.voice_status.setText(text)
+        self.voice_status.setVisible(bool(text))
 
     def set_subs_status(self, text: str) -> None:
         self.subs_status.setText(text)
