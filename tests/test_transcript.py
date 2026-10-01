@@ -74,6 +74,34 @@ def test_deleted_word_is_cut_even_without_pause_cutting():
     assert r == [(0.0, 4.0), (4.3, 7.0)]                                   # вырезано ровно слово
 
 
+def test_pause_marks_cut_keep_and_shorten():
+    sw = sw_simple()
+    cuts = dict(tr.DEFAULT_CUTS)
+    # паузу 1,6 с укоротили до 0,6 с — по 0,3 с тишины с каждой стороны
+    assert tr.kept_ranges(sw, set(), set(), cuts, marks={1: 0.6}) == [(0.85, 2.2), (3.2, 5.15)]
+    assert tr.pause_state(1, 1.6, cuts, {1: 0.6}) == "short"
+    assert tr.pause_state(1, 1.6, cuts, {1: -1}) == "keep"
+    assert tr.pause_state(1, 1.6, cuts, {}) == "cut"
+    # «паузы вручную»: сами не режутся, вырезана только отмеченная
+    cuts["pause_cut"] = False
+    assert tr.kept_ranges(sw, set(), set(), cuts, marks={1: 0.0}) == [(0.0, 2.05), (3.35, 7.0)]
+    assert tr.pause_state(1, 1.6, cuts, {}) == "keep"
+    # короткая пауза (0,3 с) в тексте не видна, пока её не пометили
+    assert 3 not in dict(tr.shown_pauses(sw, cuts, {}))
+    assert dict(tr.shown_pauses(sw, cuts, {3: 0.0}))[3] == pytest.approx(0.3)
+    # старые проекты: «оставленные паузы» понимаются как пометка «целиком»
+    assert tr.pause_marks({"kept_pauses": {"/v.mp4": [1]}, "pause_marks": {"/v.mp4": {"4": 0.5}}}, "/v.mp4") == \
+        {1: -1.0, 4: 0.5}
+
+
+def test_find_fillers():
+    words = [Word(t, n, n + 0.5) for n, t in enumerate(
+        ["Ну,", "э-э-э", "короче", "как", "бы", "Ээ.", "сообщение", "типа", "ну-ну"])]
+    hits = tr.find_fillers(words, ["э", "ну", "как бы", "короче", "типа", "вот"])
+    assert hits == {"э": [1, 5], "ну": [0], "как бы": [3, 4], "короче": [2], "типа": [7], "вот": []}
+    assert tr.norm_word("Ё-моё!") == tr.norm_word("емое")
+
+
 def test_cut_snaps_to_quiet_point():
     sw = sw_simple()
     env = env_with_speech(7.0, [(1.0, 1.9), (3.5, 5.0)])
@@ -189,6 +217,78 @@ def test_text_editing_in_editor(tmp_path, qt_app):
         w.undo()
         assert w.project.cuts["deleted"][src] == [3] and panel.view._state[("w", 0, 3)] == "cut"
         assert "стало" in panel.stats.text()
+    finally:
+        w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_text_modes_pauses_and_fillers(tmp_path, qt_app, monkeypatch):
+    """Каждое предложение — с новой строки; паузы вручную и своя длина; слова-паразиты."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    monkeypatch.setattr(EditorWindow, "_fillers", lambda self: getattr(self, "_test_fillers", ["э", "ну"]))
+    monkeypatch.setattr(EditorWindow, "_set_fillers",
+                        lambda self, f: (setattr(self, "_test_fillers", f), self._tr_states()))
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=7",
+                    "-f", "lavfi", "-i", "sine=f=300:d=7", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=7.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    sw = sw_simple()
+    sw.words[1].text = "два."                                 # конец предложения
+    sw.src = src
+    tr.TranscriptStore(p.dir).put(sw, None)
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        QApplication.processEvents()
+        panel = w.text_panel_t
+        lines = [x for x in panel.view.toPlainText().split("\n") if x.strip()]
+        assert lines[0].startswith("[пауза") and lines[0].rstrip().endswith("два. [пауза 1,6 с]")
+        assert lines[1].startswith("три э четыре")
+        tr.rebuild_clips(w.project, w.tstore)
+        w._changed()
+        # режим «Паузы вручную»: ничего само не режется
+        panel.mode.setCurrentIndex(panel.mode.findData("manual"))
+        assert w.project.cuts["mode"] == "manual" and not w.project.cuts["pause_cut"]
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.0, 7.0)]
+        # щелчок по паузе — вырезать только её; ещё раз — вернуть
+        w._on_text_token(("p", 0, 1))
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.0, 2.05), (3.35, 7.0)]
+        assert panel.view._state[("p", 0, 1)] == "cut" and panel.sel_box.isVisibleTo(panel)
+        w._on_text_token(("p", 0, 1))
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.0, 7.0)]
+        # своя длина паузы: оставить 0,6 с из 1,6
+        panel.sel_len.setValue(0.6)
+        w._on_pause_length(0.6)
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.0, 2.2), (3.2, 7.0)]
+        assert "[пауза 1,6 → 0,6 с]" in panel.view.toPlainText()
+        assert panel.view._state[("p", 0, 1)] == "short"
+        w.undo()
+        assert "[пауза 1,6 с]" in panel.view.toPlainText()
+        # слова-паразиты: найдены, вырезаны разом, одно вернули щелчком
+        panel.mode.setCurrentIndex(panel.mode.findData("fillers"))
+        assert not panel.pause_box.isVisibleTo(panel) and panel.filler_box.isVisibleTo(panel)
+        assert panel.view._state[("w", 0, 3)] == "filler"
+        assert panel.filler_list.item(0).text().startswith("э   — 1")
+        w._set_fillers(["э", "ну", "четыре"])
+        assert panel.filler_list.count() == 3
+        panel.fillers_cut.emit(["э", "четыре"])
+        assert w.project.cuts["deleted"][src] == [3, 4]
+        assert panel.view._state[("w", 0, 3)] == "cut"
+        w._on_text_token(("w", 0, 4))
+        assert w.project.cuts["deleted"][src] == [3]
+        panel.fillers_restore.emit(["э"])
+        assert w.project.cuts["deleted"][src] == []
     finally:
         w.close()
 

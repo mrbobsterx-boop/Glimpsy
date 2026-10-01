@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import threading
@@ -500,7 +501,13 @@ class EditorWindow(QMainWindow):
         p.view.clicked.connect(self._on_text_token)
         p.view.delete_keys.connect(self._cut_tokens)
         p.view.play_toggle.connect(self.player.toggle)
+        p.view.context.connect(self._text_menu)
         p.settings_changed.connect(self._on_cut_settings)
+        p.pause_length.connect(self._on_pause_length)
+        p.fillers_changed.connect(self._set_fillers)
+        p.fillers_cut.connect(lambda ws: self._cut_fillers(ws, True))
+        p.fillers_restore.connect(lambda ws: self._cut_fillers(ws, False))
+        self._sel_pause: tuple[int, int] | None = None
         p.transcribe_requested.connect(self.transcribe)
         p.cancel_requested.connect(lambda: self._tr_cancel is not None and self._tr_cancel.set())
         self._tr_build()
@@ -511,33 +518,52 @@ class EditorWindow(QMainWindow):
     def _src_index(self, src: str) -> int:
         return next((i for i, s in enumerate(self._sources()) if s["src"] == src), -1)
 
-    def _tr_build(self) -> None:
-        """Заново показать текст всех видео (после расшифровки или смены порога пауз)."""
+    def _tr_build(self, keep_scroll: bool = False) -> None:
+        """Заново показать текст всех видео (после расшифровки, смены порога пауз или длины паузы)."""
         cuts = tr.cuts_of(self.project)
-        items = [(s["src"], s.get("label", Path(s["src"]).name), self.tstore.get(s["src"])) for s in self._sources()]
+        items = []
+        for s in self._sources():
+            sw = self.tstore.get(s["src"])
+            plist = []
+            if sw is not None:
+                marks = tr.pause_marks(cuts, s["src"])
+                plist = [(i, g, marks[i] if marks.get(i, 0) > 0 else None) for i, g in tr.shown_pauses(sw, cuts, marks)]
+            items.append((s["src"], s.get("label", Path(s["src"]).name), sw, plist))
+        view = self.text_panel_t.view
         self.text_panel_t.set_settings(cuts)
-        self.text_panel_t.view.build(items, float(cuts["pause_min"]))
-        self.text_panel_t.set_needs_transcript(sum(1 for _s, _l, sw in items if sw is None))
+        view.build(items, view.verticalScrollBar().value() if keep_scroll else None)
+        self.text_panel_t.set_needs_transcript(sum(1 for it in items if it[2] is None))
         self._tr_states()
 
     def _tr_states(self) -> None:
-        """Что вырезано — зачёркнуто; и сколько времени осталось."""
+        """Что вырезано — зачёркнуто, укороченные паузы и найденные слова-паразиты — своим цветом."""
         if not self.project.text_edit:
             return
         cuts = tr.cuts_of(self.project)
+        fillers = cuts.get("mode") == "fillers"
+        counts: dict[str, tuple[int, int]] = {}
         states: dict[tuple, str] = {}
         for si, s in enumerate(self._sources()):
             sw = self.tstore.get(s["src"])
             if sw is None:
                 continue
             gone = set(cuts.get("deleted", {}).get(s["src"], []))
-            kept_p = set(cuts.get("kept_pauses", {}).get(s["src"], []))
+            if fillers:
+                for f, hits in tr.find_fillers(sw.words, self._fillers()).items():
+                    n, g = counts.get(f, (0, 0))
+                    counts[f] = (n + len(hits), g + sum(1 for i in hits if i in gone))
+                    for i in hits:
+                        states[("w", si, i)] = "filler"
             for i in gone:
                 states[("w", si, i)] = "cut"
-            for i, _gap in tr.pauses(sw.words, float(cuts["pause_min"]), sw.duration):
-                if cuts["pause_cut"] and i not in kept_p:
-                    states[("p", si, i)] = "cut"
+            marks = tr.pause_marks(cuts, s["src"])
+            for i, gap in tr.shown_pauses(sw, cuts, marks):
+                st = tr.pause_state(i, gap, cuts, marks)
+                if st != "keep":
+                    states[("p", si, i)] = st
         self.text_panel_t.view.apply_states(states)
+        if fillers:
+            self.text_panel_t.set_fillers(self._fillers(), counts)
         self.text_panel_t.set_stats(sum(float(s["duration"]) for s in self._sources()), self.project.total)
 
     def _recut(self) -> None:
@@ -551,6 +577,135 @@ class EditorWindow(QMainWindow):
         cur.add(idx) if on else cur.discard(idx)
         marks[src] = sorted(cur)
 
+    # ---------- паузы ----------
+
+    def _pause_gap(self, si: int, i: int) -> float | None:
+        src = self._sources()[si]["src"]
+        sw = self.tstore.get(src)
+        if sw is None:
+            return None
+        cuts = tr.cuts_of(self.project)
+        return dict(tr.shown_pauses(sw, cuts, tr.pause_marks(cuts, src))).get(i)
+
+    def _set_pause(self, si: int, i: int, value: float | None) -> None:
+        """Пометка паузы: None — как велит общее правило, −1 — целиком, 0 — вырезать, >0 — укоротить."""
+        src = self._sources()[si]["src"]
+        kept = self.project.cuts.get("kept_pauses", {})
+        if i in kept.get(src, []):                               # старая пометка «оставить» — в новую
+            kept[src] = [x for x in kept[src] if x != i]
+        marks = self.project.cuts.setdefault("pause_marks", {}).setdefault(src, {})
+        if value is None:
+            marks.pop(str(i), None)
+        else:
+            marks[str(i)] = round(float(value), 2)
+
+    def _apply_pause(self, si: int, i: int, value: float | None, want: str) -> None:
+        """Поставить паузе состояние want ("keep" | "cut" | "short") и пересобрать."""
+        gap = self._pause_gap(si, i)
+        if gap is None:
+            return
+        cuts = tr.cuts_of(self.project)
+        src = self._sources()[si]["src"]
+        before = tr.pause_state(i, gap, cuts, tr.pause_marks(cuts, src))
+        auto_cut = bool(cuts["pause_cut"]) and gap > float(cuts["pause_min"])
+        if want == "keep":
+            value = -1.0 if auto_cut else None
+        elif want == "cut":
+            value = None if auto_cut else 0.0
+        self.history.push(self.project.to_dict())
+        self._set_pause(si, i, value)
+        self._recut()
+        after = tr.pause_state(i, gap, cuts, tr.pause_marks(tr.cuts_of(self.project), src))
+        if "short" in (before, after):
+            self._tr_build(keep_scroll=True)                    # подпись паузы поменялась («2,0 → 0,5 с»)
+        self._select_pause(si, i)
+
+    def _select_pause(self, si: int, i: int) -> None:
+        gap = self._pause_gap(si, i)
+        self._sel_pause = (si, i) if gap is not None else None
+        if gap is not None:
+            cuts = tr.cuts_of(self.project)
+            self.text_panel_t.show_pause(gap, tr.pause_marks(cuts, self._sources()[si]["src"]).get(i))
+        else:
+            self.text_panel_t.show_pause(None)
+
+    def _on_pause_length(self, value: float) -> None:
+        if self._sel_pause is None:
+            return
+        si, i = self._sel_pause
+        if value < 0:
+            self._apply_pause(si, i, None, "keep")
+        else:
+            self._apply_pause(si, i, value, "short")
+
+    def _text_menu(self, key: tuple, pos) -> None:
+        kind, si, i = key
+        src = self._sources()[si]["src"]
+        sw = self.tstore.get(src)
+        if sw is None:
+            return
+        m = QMenu(self)
+        if kind == "p":
+            gap = self._pause_gap(si, i)
+            if gap is None:
+                return
+            m.addAction("Вырезать паузу", lambda: self._apply_pause(si, i, None, "cut"))
+            m.addAction(f"Оставить целиком ({gap:.1f} с)".replace(".", ","),
+                        lambda: self._apply_pause(si, i, None, "keep"))
+            m.addSeparator()
+            for v in (0.3, 0.5, 1.0, 1.5):
+                if v < gap:
+                    m.addAction(f"Укоротить до {v:.1f} с".replace(".", ","),
+                                lambda v=v: self._apply_pause(si, i, v, "short"))
+            m.addAction("Своя длина…", lambda: self._custom_pause(si, i, gap))
+        else:
+            word = sw.words[i].text
+            gone = i in set(tr.cuts_of(self.project).get("deleted", {}).get(src, []))
+            m.addAction("Вернуть слово" if gone else "Вырезать слово",
+                        lambda: self._cut_tokens([key]) if not gone else self._on_text_token(key))
+            clean = tr.norm_word(word)
+            if clean and not any(tr.norm_word(f) == clean for f in self._fillers()):
+                m.addAction(f"Добавить «{word.strip('.,!?…:;')}» в слова-паразиты",
+                            lambda: self._set_fillers(self._fillers() + [word.strip(".,!?…:;").lower()]))
+        m.exec(pos)
+
+    def _custom_pause(self, si: int, i: int, gap: float) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        v, ok = QInputDialog.getDouble(self, "Длина паузы", f"Пауза {gap:.1f} с. Сколько оставить, секунд:"
+                                       .replace(".", ","), min(0.5, gap), 0.0, round(gap, 1), 1)
+        if ok:
+            self._apply_pause(si, i, v if v > 0 else None, "short" if v > 0 else "cut")
+
+    # ---------- слова-паразиты ----------
+
+    def _fillers(self) -> list[str]:
+        raw = QSettings("Glimpsy", "editor").value("text/fillers", "")
+        try:
+            got = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            got = None
+        return [str(x) for x in got] if isinstance(got, list) else list(tr.DEFAULT_FILLERS)
+
+    def _set_fillers(self, fillers: list[str]) -> None:
+        QSettings("Glimpsy", "editor").setValue("text/fillers", json.dumps(fillers, ensure_ascii=False))
+        self._tr_states()
+
+    def _cut_fillers(self, words: list[str], cut: bool) -> None:
+        if not words:
+            return
+        self.history.push(self.project.to_dict())
+        for s in self._sources():
+            sw = self.tstore.get(s["src"])
+            if sw is None:
+                continue
+            for hits in tr.find_fillers(sw.words, words).values():
+                for i in hits:
+                    self._mark("deleted", s["src"], i, cut)
+        self._recut()
+
+    # ---------- щелчки по тексту ----------
+
     def _on_text_token(self, key: tuple) -> None:
         kind, si, i = key
         src = self._sources()[si]["src"]
@@ -558,12 +713,15 @@ class EditorWindow(QMainWindow):
         if sw is None:
             return
         cuts = tr.cuts_of(self.project)
-        if kind == "p":                                    # пауза: вырезать ⇄ оставить
-            self.history.push(self.project.to_dict())
-            kept = i in set(cuts.get("kept_pauses", {}).get(src, []))
-            self._mark("kept_pauses", src, i, not kept)
-            self._recut()
+        if kind == "p":                                    # пауза: вырезать ⇄ оставить (только её)
+            gap = self._pause_gap(si, i)
+            if gap is None:
+                return
+            st = tr.pause_state(i, gap, cuts, tr.pause_marks(cuts, src))
+            self._apply_pause(si, i, None, "cut" if st == "keep" else "keep")
             return
+        self.text_panel_t.show_pause(None)
+        self._sel_pause = None
         if i in set(cuts.get("deleted", {}).get(src, [])):  # зачёркнутое слово — вернуть
             self.history.push(self.project.to_dict())
             self._mark("deleted", src, i, False)
@@ -588,12 +746,15 @@ class EditorWindow(QMainWindow):
         if not keys:
             return
         self.history.push(self.project.to_dict())
+        cuts = tr.cuts_of(self.project)
         for kind, si, i in keys:
             src = self._sources()[si]["src"]
             if kind == "w":
                 self._mark("deleted", src, i, True)
-            else:
-                self._mark("kept_pauses", src, i, False)     # выделенную паузу — вырезать
+            else:                                            # выделенную паузу — вырезать
+                gap = self._pause_gap(si, i) or 0.0
+                auto_cut = bool(cuts["pause_cut"]) and gap > float(cuts["pause_min"])
+                self._set_pause(si, i, None if auto_cut else 0.0)
         self._recut()
 
     def _on_cut_settings(self, values: dict) -> None:
@@ -602,7 +763,7 @@ class EditorWindow(QMainWindow):
         self.project.cuts.update(values)
         self._recut()
         if rebuild_text:
-            self._tr_build()                               # другие паузы видны в тексте
+            self._tr_build(keep_scroll=True)                 # другие паузы видны в тексте
 
     def transcribe(self) -> None:
         """Расшифровать все ещё не расшифрованные видео проекта (в фоне)."""
@@ -947,6 +1108,8 @@ class EditorWindow(QMainWindow):
         self.preview.set_aspect(self.project.aspect)
         for b in self.aspect_group.buttons():
             b.setChecked(b.property("aspect") == self.project.aspect)
+        if self.project.text_edit:
+            self._tr_build(keep_scroll=True)          # режим, порог и подписи пауз — как в восстановленном
         self._changed()
 
     def split(self) -> None:

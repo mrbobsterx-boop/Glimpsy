@@ -2,19 +2,23 @@
 
 Всё, что сказано в видео, — текстом. Щелчок по слову — видео перематывается к нему.
 Выделили кусок текста и нажали Delete — этот кусок вырезан из видео (текст остаётся,
-но зачёркнут). Щелчок по зачёркнутому — вернуть. Паузы показаны как «[пауза 1,2 с]»:
-длинные вырезаются сами, щелчок по паузе — оставить её (или снова вырезать).
+но зачёркнут). Щелчок по зачёркнутому — вернуть. Паузы показаны как «[пауза 1,2 с]»; щелчок по паузе —
+вырезать или вернуть именно её, а ещё её можно укоротить до своей длины.
+
+Меню режимов сверху: «Вырезать паузы» (длинные паузы уходят сами), «Паузы вручную»
+(ничего само не режется — решаете по каждой паузе), «Слова-паразиты» («ну», «э», «короче»
+и свои слова — найти, отметить, вырезать разом; вернуть можно так же, как любое слово).
 """
 
 from __future__ import annotations
 
 from bisect import bisect_right
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit, QToolButton,
-    QVBoxLayout, QWidget,
+    QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar,
+    QPushButton, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 from glimpsy.editor import transcript as tr
@@ -25,11 +29,22 @@ KEY = QTextFormat.Property.UserProperty + 1          # у каждого сло�
 COL_TEXT = QColor("#E6E8EE")
 COL_GONE = QColor("#6B7280")
 COL_PAUSE = QColor("#7C8494")
+COL_SHORT = QColor("#5FC9D3")
+COL_FILLER = QColor("#F2A65A")
 COL_NOW = QColor(34, 174, 187, 90)
+SENTENCE_END = ".?!…"
+
+MODES = [("auto", "Вырезать паузы"), ("manual", "Паузы вручную"), ("fillers", "Слова-паразиты")]
 
 
-def _pause_text(gap: float) -> str:
-    return f"[пауза {gap:.1f} с] ".replace(".", ",")
+def _sec(v: float) -> str:
+    return f"{v:.1f}".replace(".", ",")
+
+
+def _pause_text(gap: float, short: float | None = None) -> str:
+    if short is not None and short < gap:
+        return f"[пауза {_sec(gap)} → {_sec(short)} с] "
+    return f"[пауза {_sec(gap)} с] "
 
 
 class TranscriptView(QTextEdit):
@@ -38,6 +53,7 @@ class TranscriptView(QTextEdit):
     clicked = Signal(tuple)          # ("w" | "p", номер видео, номер слова)
     delete_keys = Signal(list)       # выделенные слова и паузы — вырезать
     play_toggle = Signal()
+    context = Signal(tuple, QPoint)  # правая кнопка по слову или паузе (ключ, где показать меню)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,8 +72,11 @@ class TranscriptView(QTextEdit):
 
     # ---------- построение ----------
 
-    def build(self, sources: list[tuple[str, str, tr.SourceWords | None]], pause_min: float) -> None:
-        """sources: [(путь видео, подпись, слова или None)]."""
+    def build(self, sources: list[tuple], scroll: int | None = None) -> None:
+        """sources: [(путь видео, подпись, слова или None, [(номер, длина паузы, укорочена до | None)])].
+
+        Каждое предложение — с новой строки; паузы — там, где они в речи.
+        """
         self.clear()
         self._spans.clear()
         self._state.clear()
@@ -67,7 +86,7 @@ class TranscriptView(QTextEdit):
         head = QTextCharFormat()
         head.setFontWeight(QFont.Weight.Bold)
         head.setForeground(COL_PAUSE)
-        for si, (_src, label, sw) in enumerate(sources):
+        for si, (_src, label, sw, plist) in enumerate(sources):
             if len(sources) > 1:
                 if si:
                     cur.insertBlock()
@@ -78,20 +97,23 @@ class TranscriptView(QTextEdit):
             if sw is None:
                 cur.insertText("(ещё не расшифровано)", head)
                 continue
-            gaps = {i: g for i, g in tr.pauses(words, pause_min, sw.duration)}
+            gaps = {i: (g, short) for i, g, short in plist}
             if -1 in gaps:
-                self._put(cur, ("p", si, -1), _pause_text(gaps[-1]))
+                self._put(cur, ("p", si, -1), _pause_text(*gaps[-1]))
             for i, w in enumerate(words):
                 self._put(cur, ("w", si, i), w.text)
                 cur.insertText(" ", QTextCharFormat())
                 if i in gaps:
-                    self._put(cur, ("p", si, i), _pause_text(gaps[i]))
+                    self._put(cur, ("p", si, i), _pause_text(*gaps[i]))
                 nxt = words[i + 1].start if i + 1 < len(words) else None
-                # абзац — после конца предложения и заметной паузы (так текст легче читать)
-                if nxt is not None and (nxt - w.end > 1.5 or (w.text[-1:] in ".?!…" and nxt - w.end > 0.6)):
+                # каждое предложение — с новой строки (и после очень долгой паузы — тоже)
+                if nxt is not None and (w.text[-1:] in SENTENCE_END or nxt - w.end > 1.5):
                     cur.insertBlock()
         cur.endEditBlock()
-        self.moveCursor(QTextCursor.MoveOperation.Start)
+        if scroll is None:
+            self.moveCursor(QTextCursor.MoveOperation.Start)
+        else:
+            self.verticalScrollBar().setValue(scroll)
 
     def _put(self, cur: QTextCursor, key: tuple, text: str) -> None:
         a = cur.position()
@@ -103,7 +125,7 @@ class TranscriptView(QTextEdit):
     # ---------- состояние слов ----------
 
     def apply_states(self, states: dict[tuple, str]) -> None:
-        """states: ключ → "keep" | "cut" | "filler" — перекрашиваем только то, что изменилось."""
+        """states: ключ → "keep" | "cut" | "short" | "filler" — перекрашиваем только то, что изменилось."""
         cur = QTextCursor(self.document())
         cur.beginEditBlock()
         for key, (a, b) in self._spans.items():
@@ -116,8 +138,11 @@ class TranscriptView(QTextEdit):
             fmt = QTextCharFormat()
             fmt.setProperty(KEY, "|".join(map(str, key)))
             pause = key[0] == "p"
-            fmt.setForeground(COL_GONE if st == "cut" else COL_PAUSE if pause else COL_TEXT)
+            fmt.setForeground(COL_GONE if st == "cut" else COL_SHORT if st == "short" else
+                              COL_FILLER if st == "filler" else COL_PAUSE if pause else COL_TEXT)
             fmt.setFontStrikeOut(st == "cut")
+            if st == "filler":
+                fmt.setFontUnderline(True)
             cur.setCharFormat(fmt)
         cur.endEditBlock()
 
@@ -175,6 +200,11 @@ class TranscriptView(QTextEdit):
         if key is not None:
             self.clicked.emit(key)
 
+    def contextMenuEvent(self, e) -> None:
+        key = self._key_at(self.cursorForPosition(e.pos()).position())
+        if key is not None:
+            self.context.emit(key, e.globalPos())
+
     def keyPressEvent(self, e) -> None:
         if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             keys = self.keys_in_selection()
@@ -196,7 +226,11 @@ class TranscriptPanel(QFrame):
     close_requested = Signal()
     transcribe_requested = Signal()
     cancel_requested = Signal()
-    settings_changed = Signal(dict)       # {"pause_cut", "pause_min", "pad"}
+    settings_changed = Signal(dict)       # {"mode", "pause_cut", "pause_min", "pad"}
+    pause_length = Signal(float)          # выбранную паузу: −1 — целиком, 0 — вырезать, иначе — до стольких секунд
+    fillers_changed = Signal(list)        # список слов-паразитов поправили
+    fillers_cut = Signal(list)            # вырезать все найденные: [слово из списка]
+    fillers_restore = Signal(list)        # вернуть все найденные
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -204,6 +238,7 @@ class TranscriptPanel(QFrame):
         self.setStyleSheet("QFrame#transcriptPanel { background: #14171D; border: 1px solid #262B36;"
                            " border-radius: 12px; }")
         self._loading = False
+        self._fillers: list[str] = []
         title = QLabel("Монтаж по тексту")
         title.setProperty("role", "title")
         close = QToolButton()
@@ -230,12 +265,22 @@ class TranscriptPanel(QFrame):
         prog.addWidget(self.bar, 1)
         prog.addWidget(self.cancel_btn)
 
-        self.pause_cut = QCheckBox("Вырезать паузы длиннее")
+        # режим
+        self.mode = QComboBox()
+        for key, text in MODES:
+            self.mode.addItem(text, key)
+        self.mode.setToolTip("Вырезать паузы — длинные паузы уходят сами.\n"
+                             "Паузы вручную — ничего само не режется: щёлкайте по паузам.\n"
+                             "Слова-паразиты — найти «ну», «э», «короче» и вырезать разом.")
+        self.mode.currentIndexChanged.connect(self._on_mode)
+
+        # паузы
+        self.pause_lbl = QLabel()
         self.pause_min = QDoubleSpinBox(minimum=0.3, maximum=5.0, singleStep=0.1, decimals=1, suffix=" с")
         self.pad = QDoubleSpinBox(minimum=0.0, maximum=0.5, singleStep=0.05, decimals=2, suffix=" с")
         self.pad.setToolTip("Сколько оставлять тишины у речи на стыках — чтобы не звучало рублено")
         prow = QHBoxLayout()
-        prow.addWidget(self.pause_cut)
+        prow.addWidget(self.pause_lbl)
         prow.addWidget(self.pause_min)
         prow.addStretch(1)
         prow2 = QHBoxLayout()
@@ -244,18 +289,74 @@ class TranscriptPanel(QFrame):
         prow2.addWidget(pad_lbl)
         prow2.addWidget(self.pad)
         prow2.addStretch(1)
-        for w in (self.pause_cut,):
-            w.toggled.connect(self._emit_settings)
         for w in (self.pause_min, self.pad):
             w.valueChanged.connect(self._emit_settings)
+
+        # выбранная пауза: своя длина
+        self.sel_lbl = QLabel()
+        self.sel_len = QDoubleSpinBox(minimum=0.1, maximum=30.0, singleStep=0.1, decimals=1, suffix=" с")
+        self.sel_len.setToolTip("Сколько тишины оставить от этой паузы")
+        short_btn = theme.mark(QPushButton("Укоротить"), "ghost")
+        short_btn.clicked.connect(lambda: self.pause_length.emit(round(self.sel_len.value(), 2)))
+        whole_btn = theme.mark(QPushButton("Целиком"), "ghost")
+        whole_btn.setToolTip("Оставить паузу как есть")
+        whole_btn.clicked.connect(lambda: self.pause_length.emit(-1.0))
+        self.sel_box = QWidget()
+        srow = QHBoxLayout(self.sel_box)
+        srow.setContentsMargins(0, 0, 0, 0)
+        srow.addWidget(self.sel_lbl)
+        srow.addWidget(self.sel_len)
+        srow.addWidget(short_btn)
+        srow.addWidget(whole_btn)
+        srow.addStretch(1)
+        self.sel_box.setVisible(False)
+
+        self.pause_box = QWidget()
+        pl = QVBoxLayout(self.pause_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(6)
+        pl.addLayout(prow)
+        pl.addLayout(prow2)
+        pl.addWidget(self.sel_box)
+
+        # слова-паразиты
+        self.filler_list = QListWidget()
+        self.filler_list.setMaximumHeight(150)
+        self.filler_list.setToolTip("Отметьте слова, которые убрать. Найденные подчёркнуты в тексте.")
+        self.filler_add = QLineEdit()
+        self.filler_add.setPlaceholderText("Своё слово, например «типа»")
+        self.filler_add.returnPressed.connect(self._add_filler)
+        add_btn = theme.mark(QPushButton("Добавить"), "ghost")
+        add_btn.clicked.connect(self._add_filler)
+        del_btn = theme.mark(QPushButton("Убрать из списка"), "ghost")
+        del_btn.clicked.connect(self._remove_filler)
+        cut_btn = theme.mark(QPushButton("Вырезать отмеченные"), "primary")
+        cut_btn.clicked.connect(lambda: self.fillers_cut.emit(self.checked_fillers()))
+        back_btn = theme.mark(QPushButton("Вернуть"), "ghost")
+        back_btn.setToolTip("Вернуть все вырезанные отмеченные слова")
+        back_btn.clicked.connect(lambda: self.fillers_restore.emit(self.checked_fillers()))
+        arow = QHBoxLayout()
+        arow.addWidget(self.filler_add, 1)
+        arow.addWidget(add_btn)
+        brow = QHBoxLayout()
+        brow.addWidget(cut_btn)
+        brow.addWidget(back_btn)
+        brow.addStretch(1)
+        brow.addWidget(del_btn)
+        self.filler_box = QWidget()
+        fl = QVBoxLayout(self.filler_box)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(6)
+        fl.addWidget(self.filler_list)
+        fl.addLayout(arow)
+        fl.addLayout(brow)
 
         self.stats = QLabel()
         self.stats.setProperty("role", "hint")
         self.view = TranscriptView()
-        hint = QLabel("Щелчок по слову — перейти. Выделите текст и нажмите Delete — вырезать. "
-                      "Щелчок по зачёркнутому — вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить.")
-        hint.setProperty("role", "hint")
-        hint.setWordWrap(True)
+        self.hint = QLabel()
+        self.hint.setProperty("role", "hint")
+        self.hint.setWordWrap(True)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 10, 10, 10)
@@ -264,33 +365,114 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.transcribe_btn)
         lay.addLayout(prog)
         lay.addWidget(self.bar_text)
-        lay.addLayout(prow)
-        lay.addLayout(prow2)
+        lay.addWidget(self.mode)
+        lay.addWidget(self.pause_box)
+        lay.addWidget(self.filler_box)
         lay.addWidget(self.stats)
         lay.addWidget(self.view, 1)
-        lay.addWidget(hint)
+        lay.addWidget(self.hint)
         self.setMinimumWidth(380)
         self.setMaximumWidth(560)
         self.set_progress(None)
+        self._show_mode("auto")
         self.setVisible(False)
 
     def set_open(self, on: bool) -> None:
         self.setVisible(on)
 
+    @property
+    def mode_key(self) -> str:
+        return self.mode.currentData() or "auto"
+
+    def _show_mode(self, key: str) -> None:
+        self.pause_box.setVisible(key in ("auto", "manual"))
+        self.filler_box.setVisible(key == "fillers")
+        self.pause_lbl.setText("Вырезать паузы длиннее" if key == "auto" else "Показывать паузы длиннее")
+        common = "Щелчок по слову — перейти. Выделите текст и Delete — вырезать. Щелчок по зачёркнутому — " \
+                 "вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить."
+        extra = {
+            "auto": "Длинные паузы вырезаются сами. Щелчок по паузе — оставить её; правая кнопка — своя длина.",
+            "manual": "Паузы сами не режутся. Щелчок по паузе — вырезать её (ещё раз — вернуть); "
+                      "правая кнопка или поле сверху — укоротить до своей длины.",
+            "fillers": "Найденные слова подчёркнуты оранжевым. Отметьте нужные в списке и нажмите "
+                       "«Вырезать отмеченные». Вернуть одно — щёлкните по нему в тексте.",
+        }[key]
+        self.hint.setText(extra + " " + common)
+
+    def _on_mode(self) -> None:
+        self._show_mode(self.mode_key)
+        self.sel_box.setVisible(False)
+        self._emit_settings()
+
     def set_settings(self, cuts: dict) -> None:
         self._loading = True
-        self.pause_cut.setChecked(bool(cuts["pause_cut"]))
+        mode = cuts.get("mode") or ("auto" if cuts["pause_cut"] else "manual")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(mode)))
         self.pause_min.setValue(float(cuts["pause_min"]))
         self.pad.setValue(float(cuts["pad"]))
-        self.pause_min.setEnabled(bool(cuts["pause_cut"]))
+        self._show_mode(mode)
         self._loading = False
 
     def _emit_settings(self) -> None:
-        self.pause_min.setEnabled(self.pause_cut.isChecked())
-        if not self._loading:
-            self.settings_changed.emit({"pause_cut": self.pause_cut.isChecked(),
-                                        "pause_min": round(self.pause_min.value(), 2),
-                                        "pad": round(self.pad.value(), 3)})
+        if self._loading:
+            return
+        mode = self.mode_key
+        values = {"mode": mode, "pause_min": round(self.pause_min.value(), 2), "pad": round(self.pad.value(), 3)}
+        if mode in ("auto", "manual"):
+            values["pause_cut"] = mode == "auto"
+        self.settings_changed.emit(values)
+
+    # ---------- выбранная пауза ----------
+
+    def show_pause(self, gap: float | None, keep: float | None = None) -> None:
+        """Показать поле «своя длина» для паузы (gap=None — спрятать)."""
+        self.sel_box.setVisible(gap is not None and self.mode_key in ("auto", "manual"))
+        if gap is not None:
+            self.sel_lbl.setText(f"Пауза {_sec(gap)} с — оставить")
+            self.sel_len.setMaximum(max(0.1, round(gap, 1)))
+            self.sel_len.setValue(keep if keep is not None and keep > 0 else min(0.5, gap))
+
+    # ---------- слова-паразиты ----------
+
+    def set_fillers(self, fillers: list[str], counts: dict[str, tuple[int, int]]) -> None:
+        """counts: слово → (найдено, из них вырезано). Отметки сохраняем."""
+        checked = set(self.checked_fillers()) if self._fillers else set(fillers)
+        self._fillers = list(fillers)
+        self.filler_list.blockSignals(True)
+        self.filler_list.clear()
+        for f in fillers:
+            found, gone = counts.get(f, (0, 0))
+            text = f"{f}   — {found}" + (f" (вырезано {gone})" if gone else "")
+            it = QListWidgetItem(text)
+            it.setData(Qt.ItemDataRole.UserRole, f)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if f in checked else Qt.CheckState.Unchecked)
+            if not found:
+                it.setForeground(COL_GONE)
+            self.filler_list.addItem(it)
+        self.filler_list.blockSignals(False)
+
+    def checked_fillers(self) -> list[str]:
+        out = []
+        for n in range(self.filler_list.count()):
+            it = self.filler_list.item(n)
+            if it.checkState() == Qt.CheckState.Checked:
+                out.append(it.data(Qt.ItemDataRole.UserRole))
+        return out
+
+    def _add_filler(self) -> None:
+        word = " ".join(self.filler_add.text().strip().lower().split())
+        self.filler_add.clear()
+        if word and tr.norm_word(word) and word not in self._fillers:
+            self.fillers_changed.emit(self._fillers + [word])
+
+    def _remove_filler(self) -> None:
+        it = self.filler_list.currentItem()
+        if it is not None:
+            word = it.data(Qt.ItemDataRole.UserRole)
+            self.fillers_changed.emit([f for f in self._fillers if f != word])
+
+    # ---------- прочее ----------
 
     def set_needs_transcript(self, missing: int) -> None:
         self.transcribe_btn.setVisible(missing > 0)
@@ -309,4 +491,3 @@ class TranscriptPanel(QFrame):
         cut = max(0.0, before - after)
         self.stats.setText(f"Было {fmt_time(before)} → стало {fmt_time(after)}" +
                            (f"  (вырезано {fmt_time(cut)})" if cut > 0.5 else ""))
-

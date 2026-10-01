@@ -23,6 +23,8 @@ S = QMediaPlayer.MediaStatus
 # Музыка и голос играют сами; перематываем их, только если разошлись с видео заметно.
 # Время видео на слабом компьютере идёт неровно — частые мелкие перемотки звук и «рвали».
 RESYNC_S = 1.0
+# На стыках вырезанных кусков звук плавно затихает и нарастает — без резкого обрыва.
+EDGE_FADE_S = 0.08
 
 
 class _Deck:
@@ -319,6 +321,7 @@ class TimelinePlayer(QObject):
                 self._advance()
                 return
             self.t = start + max(0.0, src - c.in_s) / c.speed
+            self._edge_fade(c, src)
         if self.t >= start + c.duration - 1e-3:
             self._advance()
             return
@@ -326,6 +329,22 @@ class TimelinePlayer(QObject):
         if self._music_ticks % 15 == 0:                 # раз в ~0,5 с сверяем музыку и голос с лентой
             self._music_sync()
         self.position.emit(self.t)
+
+    def _edge_fade(self, c, src: float) -> None:
+        """Громкость у краёв куска: там, где кусок склеен с другим местом записи, — плавно."""
+        idx = self.idx or 0
+        clips = self.project.clips
+        g = 1.0
+        prev = clips[idx - 1] if idx > 0 else None
+        nxt = clips[idx + 1] if idx + 1 < len(clips) else None
+        if prev is not None and not (prev.src == c.src and abs(prev.out_s - c.in_s) < 1e-3):
+            g = min(g, (src - c.in_s) / EDGE_FADE_S)
+        if nxt is not None and not (nxt.src == c.src and abs(nxt.in_s - c.out_s) < 1e-3):
+            g = min(g, (c.out_s - src) / EDGE_FADE_S)
+        g = max(0.0, min(1.0, g))
+        vol = self.volume * g
+        if abs(self.deck.audio.volume() - vol) > 0.01:
+            self.deck.audio.setVolume(vol)
 
     def _advance(self) -> None:
         nxt = (self.idx or 0) + 1
@@ -343,6 +362,7 @@ class TimelinePlayer(QObject):
             self.active = 1 - self.active
             self.idx = nxt
             self._setup_deck(self.deck, c)
+            self.deck.audio.setVolume(self.volume * 0.25)       # начало куска — тихо, дальше нарастает
             self.deck.go(c.in_s, True)
             old.mp.pause()
             self._preload(nxt + 1)

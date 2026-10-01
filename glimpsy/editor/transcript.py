@@ -260,16 +260,68 @@ def _snap(env: np.ndarray | None, t: float, lo: float, hi: float) -> float:
     return float(times[int(np.argmin(np.abs(times - t)))])
 
 
+def pause_marks(cuts: dict, src: str) -> dict[int, float]:
+    """Ручные пометки пауз одного видео: номер → сколько тишины оставить.
+
+    −1 — оставить паузу целиком, 0 — вырезать (с обычным запасом), больше нуля — укоротить
+    до стольких секунд. Без пометки пауза следует общему правилу («вырезать длиннее …»).
+    """
+    out = {int(i): -1.0 for i in cuts.get("kept_pauses", {}).get(src, [])}       # старые проекты
+    out.update({int(i): float(v) for i, v in cuts.get("pause_marks", {}).get(src, {}).items()})
+    return out
+
+
+def pause_keep(i: int, gap: float, cuts: dict, marks: dict[int, float]) -> float | None:
+    """Сколько тишины останется от паузы: None — вся пауза, иначе — секунд (запас с двух сторон)."""
+    pad = float(cuts["pad"])
+    m = marks.get(i)
+    if m is None:
+        m = 0.0 if bool(cuts["pause_cut"]) and gap > float(cuts["pause_min"]) else -1.0
+    if m < 0:
+        return None
+    keep = 2 * pad if m == 0 else m
+    return None if keep >= gap else keep
+
+
+def pause_state(i: int, gap: float, cuts: dict, marks: dict[int, float]) -> str:
+    """Как показать паузу в тексте: "keep" — осталась, "cut" — вырезана, "short" — укорочена."""
+    if pause_keep(i, gap, cuts, marks) is None:
+        return "keep"
+    return "short" if marks.get(i, 0.0) > 0 else "cut"
+
+
+def shown_pauses(sw: SourceWords, cuts: dict, marks: dict[int, float]) -> list[tuple[int, float]]:
+    """Паузы, которые видны в тексте: длиннее порога — и те, что помечены вручную."""
+    words = sw.words
+    out = dict(pauses(words, float(cuts["pause_min"]), sw.duration))
+    for i in marks:
+        if i in out or not words or i >= len(words):
+            continue
+        if i == -1:
+            gap = words[0].start
+        elif i == len(words) - 1:
+            gap = sw.duration - words[-1].end
+        else:
+            gap = words[i + 1].start - words[i].end
+        if gap > 0.05:
+            out[i] = gap
+    return sorted(out.items())
+
+
 def kept_ranges(sw: SourceWords, deleted: set[int], kept_pauses: set[int], cuts: dict,
-                env: np.ndarray | None = None) -> list[tuple[float, float]]:
+                env: np.ndarray | None = None, marks: dict[int, float] | None = None) -> list[tuple[float, float]]:
     """Какие куски исходного видео остаются: [(начало, конец)], по порядку."""
     words, dur = sw.words, sw.duration
-    pad, pmin, cut_p = float(cuts["pad"]), float(cuts["pause_min"]), bool(cuts["pause_cut"])
+    pad, cut_p = float(cuts["pad"]), bool(cuts["pause_cut"])
     if not words:
         return [(0.0, dur)] if dur > 0 else []
+    pm = {i: -1.0 for i in kept_pauses}
+    pm.update(marks or {})
 
-    def pause_cut(i: int, gap: float) -> bool:
-        return cut_p and gap > pmin and i not in kept_pauses
+    def half(i: int, gap: float) -> float | None:
+        """Сколько тишины оставить с каждой стороны вырезанной паузы (None — пауза остаётся)."""
+        k = pause_keep(i, gap, cuts, pm)
+        return None if k is None else k / 2
 
     # 1. куски речи: подряд идущие оставленные слова, пока их не разделит удалённое слово
     #    или вырезанная пауза
@@ -280,7 +332,7 @@ def kept_ranges(sw: SourceWords, deleted: set[int], kept_pauses: set[int], cuts:
                 runs.append([])
             continue
         if runs and runs[-1] and runs[-1][-1] == i - 1 and \
-                pause_cut(i - 1, words[i].start - words[i - 1].end):
+                half(i - 1, words[i].start - words[i - 1].end) is not None:
             runs.append([])
         if not runs:
             runs.append([])
@@ -295,20 +347,22 @@ def kept_ranges(sw: SourceWords, deleted: set[int], kept_pauses: set[int], cuts:
         hi = words[last + 1].start if last + 1 < len(words) and (last + 1) in deleted else dur
         # начало куска
         if first == 0:
-            gap = words[0].start
-            start = words[0].start - pad if pause_cut(-1, gap) else 0.0
+            h = half(-1, words[0].start)
+            start = 0.0 if h is None else words[0].start - h
         elif (first - 1) in deleted:
             start = lo if not cut_p else max(lo, words[first].start - pad)
         else:
-            start = words[first].start - pad                       # после вырезанной паузы
+            h = half(first - 1, words[first].start - words[first - 1].end)       # после вырезанной паузы
+            start = words[first].start - (pad if h is None else h)
         # конец куска
         if last == len(words) - 1:
-            gap = dur - words[-1].end
-            end = words[-1].end + pad if pause_cut(last, gap) else dur
+            h = half(last, dur - words[-1].end)
+            end = dur if h is None else words[-1].end + h
         elif (last + 1) in deleted:
             end = hi if not cut_p else min(hi, words[last].end + pad)
         else:
-            end = words[last].end + pad                             # перед вырезанной паузой
+            h = half(last, words[last + 1].start - words[last].end)               # перед вырезанной паузой
+            end = words[last].end + (pad if h is None else h)
         start = max(lo, start)
         end = min(hi, end)
         # разрез — в самую тихую точку рядом, но не внутрь оставленных или удалённых слов
@@ -322,19 +376,53 @@ def kept_ranges(sw: SourceWords, deleted: set[int], kept_pauses: set[int], cuts:
     return out
 
 
+# ---------------- слова-паразиты ----------------
+
+DEFAULT_FILLERS = ["э", "эм", "ммм", "ну", "вот", "короче", "типа", "как бы", "значит", "это самое", "в общем",
+                   "так сказать"]
+
+
+def norm_word(text: str) -> str:
+    """Слово для сравнения: строчными, без знаков, «ё» как «е», растянутые звуки — одной буквой
+    (так «Э-э-э,», «Ээ» и «э» — одно и то же)."""
+    t = "".join(ch for ch in text.lower().replace("ё", "е") if ch.isalpha())
+    return re.sub(r"(.)\1+", r"\1", t)
+
+
+def find_fillers(words: list[Word], fillers: list[str]) -> dict[str, list[int]]:
+    """Где в речи слова из списка: {слово из списка: [номера слов]} (фраза — все её слова)."""
+    normed = [norm_word(w.text) for w in words]
+    out: dict[str, list[int]] = {}
+    for f in fillers:
+        parts = [norm_word(x) for x in f.split()]
+        parts = [x for x in parts if x]
+        if not parts:
+            continue
+        hits: list[int] = []
+        n = len(parts)
+        i = 0
+        while i + n <= len(normed):
+            if normed[i:i + n] == parts:
+                hits.extend(range(i, i + n))
+                i += n
+            else:
+                i += 1
+        out[f] = hits
+    return out
+
+
 def rebuild_clips(project, store: TranscriptStore) -> None:
     """Пересобрать фрагменты проекта по расшифровке и пометкам (для проектов «монтаж по тексту»)."""
     from glimpsy.editor.project import Clip, new_id
 
     cuts = cuts_of(project)
     deleted_all = cuts.get("deleted", {})
-    pauses_all = cuts.get("kept_pauses", {})
     clips = []
     for s in cuts.get("sources", []):
         src = s["src"]
         sw = store.get(src)
         rngs = [(0.0, float(s["duration"]))] if sw is None else kept_ranges(
-            sw, set(deleted_all.get(src, [])), set(pauses_all.get(src, [])), cuts, store.envelope(src))
+            sw, set(deleted_all.get(src, [])), set(), cuts, store.envelope(src), pause_marks(cuts, src))
         for a, b in rngs:
             clips.append(Clip(new_id(), "video", src, float(s["duration"]), a, b,
                               has_audio=bool(s.get("has_audio", True)), width=int(s.get("width", 0)),

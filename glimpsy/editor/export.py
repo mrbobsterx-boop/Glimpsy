@@ -231,7 +231,7 @@ def default_output(project: Project, fallback_dir: Path) -> Path:
 # ---------------- быстрый экспорт нарезки (монтаж по тексту) ----------------
 
 CHUNK_CLIPS = 24          # столько кусков склеивает один запуск FFmpeg
-EDGE_FADE_S = 0.006       # микро-затухание звука на стыках — без щелчков
+EDGE_FADE_S = 0.035       # звук на стыках плавно затихает и нарастает — склейка не режет слух
 
 
 def simple_cuts(project: Project, clips: list[Clip]) -> bool:
@@ -271,9 +271,11 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
         k = len(pads)
         parts.append(f"[{vi}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
                      f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps},format=yuv420p[v{k}]")
-        fade_out = max(0.0, dur - EDGE_FADE_S)
+        fade = min(EDGE_FADE_S, dur / 4)
+        fade_out = max(0.0, dur - fade)
         parts.append(f"[{ai}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"afade=t=in:d={EDGE_FADE_S},afade=t=out:st={fade_out:.3f}:d={EDGE_FADE_S}[a{k}]")
+                     f"afade=t=in:d={fade:.3f}:curve=qsin,"
+                     f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}:curve=qsin[a{k}]")
         pads.append(f"[v{k}][a{k}]")
     parts.append(f"{''.join(pads)}concat=n={len(pads)}:v=1:a=1[cv][ca]")
     parts.append(f"[cv]{enc.filter_suffix}[vout]")
