@@ -224,3 +224,102 @@ class SubtitlesDialog(QDialog):
             self.downloader.cancel()        # диалог остаётся открытым — можно выбрать другую модель
             return
         self.reject()
+
+
+class TranslatorDialog(QDialog):
+    """Выбор переводчика для субтитров на другом языке и его загрузка при первом запуске."""
+
+    def __init__(self, lang_name: str, parent=None) -> None:
+        from glimpsy.editor import translate as mt
+
+        super().__init__(parent)
+        self.mt = mt
+        self.setWindowTitle("Перевод субтитров")
+        self.setMinimumWidth(460)
+        st = QSettings("Glimpsy", "editor")
+        self.model = QComboBox()
+        for key, (_d, _r, _f, _mb, label) in mt.MODELS.items():
+            self.model.addItem(label + ("  ✓ скачан" if mt.model_ready(key) else ""), key)
+        self.model.setCurrentIndex(max(0, self.model.findData(st.value("translate/model", "m2m"))))
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setStyleSheet("color: #8b8d98; font-size: 11px;")
+        self.bar = QProgressBar()
+        self.bar.setVisible(False)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        form = QFormLayout()
+        form.addRow("Язык субтитров:", QLabel(lang_name))
+        form.addRow("Переводчик:", self.model)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
+        self.buttons.accepted.connect(self._go)
+        self.buttons.rejected.connect(self._cancel)
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(self.info)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.status)
+        lay.addWidget(self.buttons)
+        self.model.currentIndexChanged.connect(self._update)
+        self.downloader: Downloader | None = None
+        self._update()
+
+    @property
+    def model_key(self) -> str:
+        return self.model.currentData() or "m2m"
+
+    def _update(self) -> None:
+        missing = self.mt.downloads(self.model_key)
+        if missing:
+            mb = sum(m[2] for m in missing)
+            self.ok.setText(f"Скачать переводчик ({mb} МБ) и перевести")
+            self.info.setText(f"Переводчик скачается один раз (≈ {mb} МБ, с huggingface.co) и останется на "
+                              f"компьютере. Дальше перевод работает без интернета — текст никуда не отправляется.")
+        else:
+            self.ok.setText("Перевести")
+            self.info.setText("Перевод делается прямо на компьютере, без интернета. Переводятся целые "
+                              "предложения, потом перевод делится на строки там же, где звучит речь. "
+                              "Машинный перевод бывает неточным — неудачную строку можно поправить в "
+                              "панели «Субтитры».")
+
+    def _go(self) -> None:
+        QSettings("Glimpsy", "editor").setValue("translate/model", self.model_key)
+        missing = self.mt.downloads(self.model_key)
+        if not missing:
+            self.accept()
+            return
+        for w in (self.model, self.ok):
+            w.setEnabled(False)
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 0)
+        self.status.setText(f"Скачиваю переводчик… (≈ {sum(m[2] for m in missing)} МБ)")
+        self.downloader = Downloader(self)
+
+        def on_progress(got: int, total: int) -> None:
+            if total > 1_000_000:
+                self.bar.setRange(0, 1000)
+                self.bar.setValue(int(got * 1000 / total))
+                self.status.setText(f"Скачиваю переводчик… {got / 1e6:.0f} из {total / 1e6:.0f} МБ")
+
+        def on_done(err: str) -> None:
+            self.downloader = None
+            if not err:
+                self.accept()
+                return
+            for w in (self.model, self.ok):
+                w.setEnabled(True)
+            self.bar.setVisible(False)
+            self.status.setText("" if err == "cancelled" else err + "\nПроверьте интернет и попробуйте ещё раз.")
+            self._update()
+
+        self.downloader.progress.connect(on_progress)
+        self.downloader.finished.connect(on_done)
+        self.downloader.start([(url, dest) for url, dest, _mb in missing])
+
+    def _cancel(self) -> None:
+        if self.downloader is not None:
+            self.downloader.cancel()
+            return
+        self.reject()

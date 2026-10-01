@@ -628,8 +628,12 @@ def cues(words: list[tuple[float, float, str]], max_chars: int = 42,
     return out
 
 
+def srt_text(lines: list[tuple[float, float, str]]) -> str:
+    """Строки субтитров [(начало, конец, текст)] → файл .srt."""
+    return "\n".join(f"{n}\n{_srt_time(a)} --> {_srt_time(b)}\n{text}\n" for n, (a, b, text) in enumerate(lines, 1))
+
+
 def make_srt(words: list[tuple[float, float, str]], max_chars: int = 42, max_gap: float = 0.8) -> str:
     """Слова → файл субтитров .srt."""
-    return "\n".join(f"{n}\n{_srt_time(a)} --> {_srt_time(b)}\n{text}\n"
-                     for n, (a, b, text) in enumerate(cues(words, max_chars, max_gap), 1))
+    return srt_text(cues(words, max_chars, max_gap))
 

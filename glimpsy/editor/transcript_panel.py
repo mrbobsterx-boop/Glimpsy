@@ -256,6 +256,7 @@ class TranscriptPanel(QFrame):
     fillers_restore = Signal(list)        # вернуть все найденные
     subtitles_toggled = Signal(bool)      # субтитры на видео из текста: вкл / выкл
     selection_action = Signal(str)        # с выделенным текстом: "cut" | "mute" | "hide" | "restore"
+    subs_lang_changed = Signal(str)       # язык субтитров: "" — как в речи, иначе код (de, en…)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -380,6 +381,21 @@ class TranscriptPanel(QFrame):
         self.subs.setToolTip("Субтитры берутся из расшифровки и сами меняются, когда вы что-то вырезаете\n"
                              "или исправляете слово (двойной щелчок по слову). Вид — как у любых субтитров.")
         self.subs.toggled.connect(lambda on: None if self._loading else self.subtitles_toggled.emit(on))
+        from glimpsy.editor import translate as mt
+        self.subs_lang = QComboBox()
+        self.subs_lang.addItem("на языке речи", "")
+        for code, (name, _a, _b) in mt.LANGS.items():
+            self.subs_lang.addItem("перевод: " + name, code)
+        self.subs_lang.setToolTip("Субтитры на другом языке: перевод делается прямо на компьютере, без интернета\n"
+                                  "(переводчик скачивается один раз). Файл .srt сохраняется на обоих языках.")
+        self.subs_lang.currentIndexChanged.connect(
+            lambda _i: None if self._loading else self.subs_lang_changed.emit(self.subs_lang.currentData() or ""))
+        self.subs_status = QLabel()
+        self.subs_status.setProperty("role", "hint")
+        self.subs_status.setVisible(False)
+        subs_row = QHBoxLayout()
+        subs_row.addWidget(self.subs)
+        subs_row.addWidget(self.subs_lang, 1)
         self.stats = QLabel()
         self.stats.setProperty("role", "hint")
         self.view = TranscriptView()
@@ -412,7 +428,8 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.mode)
         lay.addWidget(self.pause_box)
         lay.addWidget(self.filler_box)
-        lay.addWidget(self.subs)
+        lay.addLayout(subs_row)
+        lay.addWidget(self.subs_status)
         lay.addWidget(self.stats)
         lay.addLayout(act)
         lay.addWidget(self.view, 1)
@@ -458,6 +475,7 @@ class TranscriptPanel(QFrame):
         self.pause_min.setValue(float(cuts["pause_min"]))
         self.pad.setValue(float(cuts["pad"]))
         self.subs.setChecked(bool(cuts.get("subtitles")))
+        self.subs_lang.setCurrentIndex(max(0, self.subs_lang.findData(cuts.get("subs_lang") or "")))
         self._show_mode(mode)
         self._loading = False
 
@@ -521,6 +539,10 @@ class TranscriptPanel(QFrame):
             self.fillers_changed.emit([f for f in self._fillers if f != word])
 
     # ---------- прочее ----------
+
+    def set_subs_status(self, text: str) -> None:
+        self.subs_status.setText(text)
+        self.subs_status.setVisible(bool(text))
 
     def set_needs_transcript(self, missing: int) -> None:
         self.transcribe_btn.setVisible(missing > 0)

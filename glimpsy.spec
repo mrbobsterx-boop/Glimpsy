@@ -34,10 +34,13 @@ if sys.platform.startswith("linux"):
     hidden += ["Xlib", "jeepney", "jeepney.io.blocking"]
 
 # soundcard читает при запуске свои описания .h (pulseaudio.py.h и др.) — без них звука нет
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 datas = [(str(ROOT / "assets"), "assets")]          # иконки, шрифт Inter, значок программы
 datas += collect_data_files("soundcard")
+# переводчик субтитров (CTranslate2): его библиотеки лежат рядом с модулем
+hidden += ["ctranslate2", "sentencepiece"]
+binaries += collect_dynamic_libs("ctranslate2")
 
 a = Analysis(
     [str(ROOT / "glimpsy" / "__main__.py")],

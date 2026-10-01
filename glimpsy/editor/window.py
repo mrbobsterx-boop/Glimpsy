@@ -41,6 +41,7 @@ from glimpsy.editor.project import (
 from glimpsy.editor.text import TextItem, effective_style, load_custom_fonts
 from glimpsy.editor.text_panel import TextPanel
 from glimpsy.editor import transcript as tr
+from glimpsy.editor import translate as mt
 from glimpsy.editor.overlay import OverlayItem
 from glimpsy.editor.overlay_video import OverlayVideos
 from glimpsy.editor.overlay_panel import OverlayPanel
@@ -506,6 +507,10 @@ class EditorWindow(QMainWindow):
         p.view.selection_menu.connect(self._selection_menu)
         p.selection_action.connect(lambda a: self._selection_do(a, p.view.keys_in_selection()))
         p.subtitles_toggled.connect(self._toggle_text_subs)
+        p.subs_lang_changed.connect(self._on_subs_lang)
+        self._mt_cache = mt.Cache(self.project.dir)
+        self._mt_busy = False
+        self._mt_todo: set[str] = set()
         p.settings_changed.connect(self._on_cut_settings)
         p.pause_length.connect(self._on_pause_length)
         p.fillers_changed.connect(self._set_fillers)
@@ -620,18 +625,104 @@ class EditorWindow(QMainWindow):
     # ---------- субтитры из текста ----------
 
     def _make_text_subs(self) -> int:
-        """Автосубтитры ← оставленные слова (во времени готового ролика). Сдвиги и стиль общие."""
+        """Автосубтитры ← оставленные слова (во времени готового ролика). Сдвиги и стиль общие.
+        Если выбран другой язык — переведённые строки (чего ещё нет в переводе — переводится в фоне)."""
         track = self.project.track_for("subtitles").id
         old = [t for t in self.project.texts if t.auto]
         pos = old[0].pos if old and all(t.pos == old[0].pos for t in old) else {}
         self.project.texts = [t for t in self.project.texts if not t.auto]
+        words = tr.output_words(self.project, self.tstore)
+        lang, src_lang = self._subs_langs()
+        if lang and lang != src_lang:
+            lines, missing = mt.translated_cues(words, self._mt_cache, self.project.cuts.get("subs_mt", "m2m"), lang)
+            if missing:
+                self._translate_later(missing)
+        else:
+            lines = tr.cues(words)
         items = []
-        for a, b, text in tr.cues(tr.output_words(self.project, self.tstore)):
+        for a, b, text in lines:
             items.append(TextItem(new_id(), text, round(a, 2), round(max(0.3, b - a), 2), pos=dict(pos),
                                   auto=True, track=track))
         self.project.texts.extend(items)
         self.subs_panel.refresh(self.project, self.timeline.selected_text)
         return len(items)
+
+    def _subs_langs(self) -> tuple[str, str]:
+        """(язык субтитров или "", язык речи)."""
+        src = next((sw.language for s in self._sources() if (sw := self.tstore.get(s["src"])) and sw.language), "ru")
+        return self.project.cuts.get("subs_lang") or "", src if src in mt.LANGS else "ru"
+
+    def _on_subs_lang(self, lang: str) -> None:
+        from glimpsy.editor.subtitles_dialog import TranslatorDialog
+
+        key = self.project.cuts.get("subs_mt") or QSettings("Glimpsy", "editor").value("translate/model", "m2m")
+        if lang:
+            if not mt.available():
+                QMessageBox.warning(self, "Перевод субтитров", "В этой сборке нет переводчика. "
+                                    "Скачайте свежую версию Glimpsy.")
+                self.text_panel_t.set_settings(tr.cuts_of(self.project))
+                return
+            if not mt.model_ready(key):
+                dlg = TranslatorDialog(mt.LANGS[lang][0], self)
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    self.text_panel_t.set_settings(tr.cuts_of(self.project))
+                    return
+                key = dlg.model_key
+        self.history.push(self.project.to_dict())
+        self.project.cuts["subs_lang"] = lang
+        self.project.cuts["subs_mt"] = key
+        self.project.cuts["subtitles"] = True              # выбрали язык — значит, субтитры нужны
+        self._make_text_subs()
+        self.text_panel_t.set_settings(tr.cuts_of(self.project))
+        self._changed()
+
+    def _translate_later(self, sentences: list[str]) -> None:
+        """Перевести предложения в фоне; когда готово — субтитры обновятся сами."""
+        self._mt_todo.update(sentences)
+        if self._mt_busy or not self._mt_todo:
+            return
+        lang, src = self._subs_langs()
+        key = self.project.cuts.get("subs_mt", "m2m")
+        if not mt.model_ready(key):
+            self.text_panel_t.set_subs_status("Переводчик не скачан — выберите язык субтитров заново.")
+            self._mt_todo.clear()
+            return
+        todo = sorted(self._mt_todo)
+        self._mt_todo.clear()
+        self._mt_busy = True
+        cache = self._mt_cache
+        bridge = _ExportBridge(self)
+        panel = self.text_panel_t
+        panel.set_subs_status(f"Перевожу субтитры… (0 из {len(todo)})")
+        bridge.progress.connect(lambda f, t: panel.set_subs_status(t))
+
+        def finished(msg: str) -> None:
+            self._mt_busy = False
+            panel.set_subs_status(msg)
+            if not msg and self.project.cuts.get("subtitles") and self.project.cuts.get("subs_lang") == lang:
+                self._make_text_subs()                     # строки с переводом вместо оригинала
+                self.timeline.update()
+                self._sync_preview()
+                self._save_timer.start()
+            if self._mt_todo:
+                self._translate_later([])
+
+        bridge.done.connect(finished)
+        bridge.failed.connect(finished)
+
+        def run() -> None:
+            try:
+                step = 16
+                for i in range(0, len(todo), step):
+                    part = todo[i:i + step]
+                    cache.put(key, lang, dict(zip(part, mt.translate(part, src, lang, key))))
+                    bridge.progress.emit(0.0, f"Перевожу субтитры… ({min(len(todo), i + step)} из {len(todo)})")
+                bridge.done.emit("")
+            except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так
+                log.exception("Перевод не удался")
+                bridge.failed.emit(f"Перевод не удался: {e}")
+
+        threading.Thread(target=run, daemon=True, name="translate").start()
 
     def _toggle_text_subs(self, on: bool) -> None:
         self.history.push(self.project.to_dict())
@@ -2077,6 +2168,13 @@ class EditorWindow(QMainWindow):
                             srt = Path(path).with_suffix(".srt")
                             srt.write_text(tr.make_srt(words), encoding="utf-8")
                             done.append(str(srt))
+                            lang = snapshot.cuts.get("subs_lang") or ""
+                            if lang:                    # и перевод — name.de.srt
+                                lines, _missing = mt.translated_cues(words, mt.Cache(snapshot.dir),
+                                                                     snapshot.cuts.get("subs_mt", "m2m"), lang)
+                                srt2 = Path(path).with_suffix(f".{lang}.srt")
+                                srt2.write_text(tr.srt_text(lines), encoding="utf-8")
+                                done.append(str(srt2))
                 bridge.done.emit("\n".join(done))
             except ExportCancelled:
                 bridge.failed.emit("")
