@@ -272,3 +272,23 @@ def test_ssl_context_finds_certificates_without_defaults(monkeypatch):
     ctx = voice.ssl_context()
     assert isinstance(ctx, ssl.SSLContext) and ctx.verify_mode == ssl.CERT_REQUIRED
     assert ctx.cert_store_stats()["x509_ca"] > 50                         # список сертификатов загружен
+
+
+@pytest.mark.skipif(__import__("sys").platform.startswith("win"), reason="сигналы — только Linux/macOS")
+def test_install_step_killed_by_system_says_memory(tmp_path, monkeypatch):
+    import sys
+    import threading
+
+    monkeypatch.setattr(voice, "home", lambda: _mkdir(tmp_path / "voice"))
+    with pytest.raises(voice.VoiceError) as e:
+        voice._run([sys.executable, "-c", "import os, signal; print('loading'); os.kill(os.getpid(), signal.SIGKILL)"],
+                   threading.Event())
+    assert "памяти" in str(e.value) and "install.log" in str(e.value)
+    assert "loading" in (tmp_path / "voice" / "install.log").read_text()
+    with pytest.raises(voice.VoiceError) as e:
+        voice._run([sys.executable, "-c", "import sys; print('нет такого пакета'); sys.exit(1)"], threading.Event())
+    assert "нет такого пакета" in str(e.value)
+
+
+def test_worker_loads_weights_without_a_second_copy():
+    assert "low_memory_loading(torch)" in voice.WORKER and '"mmap", True' in voice.WORKER

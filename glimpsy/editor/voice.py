@@ -150,22 +150,43 @@ def _download(url: str, dest: Path, progress: Callable[[float], None], cancel: t
     part.replace(dest)
 
 
+MEMORY_HINT = ("Похоже, компьютеру не хватило памяти — система остановила нейросеть. Закройте браузер, игры "
+               "и другие тяжёлые программы и попробуйте ещё раз (уже скачанное заново не качается).")
+
+
+def install_log() -> Path:
+    return home() / "install.log"
+
+
+def _killed(code: int) -> bool:
+    """Процесс остановила система (чаще всего — кончилась память)."""
+    return code in (-9, 137, -6) or (sys.platform.startswith("win") and code in (3221225477, -1073741819))
+
+
 def _run(cmd: list[str], cancel: threading.Event, on_line: Callable[[str], None] | None = None) -> None:
     log.info("Голосовой модуль: %s", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                             errors="replace", env=clean_env(), **subprocess_flags())
     tail: list[str] = []
     assert proc.stdout is not None
-    for line in proc.stdout:
-        tail = (tail + [line.rstrip()])[-30:]
-        if on_line is not None:
-            on_line(line)
-        if cancel.is_set():
-            proc.kill()
-            proc.wait()
-            raise Cancelled()
-    if proc.wait() != 0:
-        raise VoiceError("Установка голосового модуля не удалась:\n" + "\n".join(tail[-8:]))
+    with open(install_log(), "a", encoding="utf-8") as full:          # весь вывод — в журнал установки
+        full.write("\n$ " + " ".join(cmd) + "\n")
+        for line in proc.stdout:
+            full.write(line)
+            if line.strip() and not line.lstrip().startswith("Warning: You are sending unauthenticated"):
+                tail = (tail + [line.rstrip()])[-30:]
+            if on_line is not None:
+                on_line(line)
+            if cancel.is_set():
+                proc.kill()
+                proc.wait()
+                raise Cancelled()
+        code = proc.wait()
+        full.write(f"[код завершения: {code}]\n")
+    if code != 0:
+        log.error("Голосовой модуль: шаг завершился с кодом %s; вывод:\n%s", code, "\n".join(tail))
+        why = MEMORY_HINT if _killed(code) else "\n".join(tail[-8:]) or f"код {code}"
+        raise VoiceError(f"Установка голосового модуля не удалась.\n\n{why}\n\nПодробности — в файле {install_log()}")
 
 
 def install(progress: Callable[[float, str], None], cancel: threading.Event | None = None) -> None:
@@ -225,9 +246,28 @@ import json, os, sys, time, warnings
 warnings.filterwarnings("ignore")
 
 
+def low_memory_loading(torch):
+    # Без этого нейросеть при запуске держит в памяти две копии весов (~7 ГБ) — на Steam Deck
+    # памяти может не хватить. Веса читаются прямо из файла и не копируются (~2,5 ГБ).
+    _load = torch.load
+
+    def load(*a, **k):
+        k.setdefault("mmap", True)
+        return _load(*a, **k)
+
+    torch.load = load
+    _lsd = torch.nn.Module.load_state_dict
+
+    def lsd(self, state, strict=True, assign=False):
+        return _lsd(self, state, strict=strict, assign=True)
+
+    torch.nn.Module.load_state_dict = lsd
+
+
 def main():
     import torch
     torch.set_num_threads(max(2, min(8, __import__("os").cpu_count() or 4)))
+    low_memory_loading(torch)
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS, Conditionals
     import torchaudio
     model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
@@ -284,7 +324,7 @@ class Speaker:
             raise VoiceError("Голосовой модуль ещё не установлен.")
         worker = write_worker()                    # свежая версия — вдруг Glimpsy обновился
         self.proc = subprocess.Popen([str(python_exe()), str(worker)], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                     stdout=subprocess.PIPE, stderr=open(home() / "worker.log", "w"), text=True,
                                      encoding="utf-8", errors="replace", env=clean_env(), **subprocess_flags())
         self._read(lambda d: d.get("ready"))
 
@@ -297,7 +337,10 @@ class Speaker:
             data = json.loads(line)
             if done(data):
                 return data
-        raise VoiceError("Голосовой модуль неожиданно закрылся.")
+        code = self.proc.wait() if self.proc is not None else 0
+        self.proc = None
+        raise VoiceError(("Голосовой модуль неожиданно закрылся. " + (MEMORY_HINT if _killed(code) else
+                          f"Подробности — в файле {home() / 'worker.log'}")))
 
     def say(self, text: str, lang: str, ref: Path | None, out: Path, conds: Path | None = None) -> Path:
         """Озвучить фразу (долго — вызывать не из окна, а в фоне). ref — образец голоса; conds — где
