@@ -479,3 +479,71 @@ def test_preview_plays_through_cuts_of_one_file(tmp_path, qt_app):
         assert len(frames) > 30
     finally:
         pl.shutdown()
+
+
+def test_sound_annotations_are_not_speech():
+    W = Word
+    words = [W(t, k, k + 0.5) for k, t in enumerate(
+        "*поет* Лианты уходят. *звук отзыва* *звук отзыва* Blackstar. [музыка] Ну (смеется) да ♪ ок".split())]
+    kept, mapping = tr.drop_noise(words)
+    assert [w.text for w in kept] == ["Лианты", "уходят.", "Blackstar.", "Ну", "да", "ок"]
+    assert mapping[1] == 0 and mapping[0] == -1 and mapping[7] == 2
+    # незакрытая звёздочка не съедает текст дальше
+    words2 = [W(t, k, k + 0.5) for k, t in enumerate("*звук а б в г д е ж з".split())]
+    assert [w.text for w in tr.drop_noise(words2)[0]] == list("абвгдежз")
+    # новые расшифровки чистятся сразу
+    assert [w.text for w in tr.refine_words(words, None)] == ["Лианты", "уходят.", "Blackstar.", "Ну", "да", "ок"]
+
+
+def test_remap_cuts_after_cleaning():
+    #        0       1        2        3        4         5
+    words = ["*звук", "отзыва*", "раз", "два.", "*поет*", "три"]
+    _kept, mapping = tr.drop_noise([Word(t, k, k + 0.5) for k, t in enumerate(words)])
+    cuts = {"deleted": {"/v": [1, 3, 5]}, "muted": {"/v": [2]}, "pause_marks": {"/v": {"-1": 0.0, "4": 0.5}},
+            "word_text": {"/v": {"2": "Раз", "4": "x"}}, "respeak": {"/v": [{"id": "r", "i": 3, "j": 5}]},
+            "kept_pauses": {"/v": [4]}}
+    tr.remap_cuts(cuts, "/v", mapping)
+    assert cuts["deleted"]["/v"] == [1, 2] and cuts["muted"]["/v"] == [0]
+    assert cuts["pause_marks"]["/v"] == {"-1": 0.0, "1": 0.5}          # пауза после «*поет*» — после «два.»
+    assert cuts["word_text"]["/v"] == {"0": "Раз"}
+    assert cuts["respeak"]["/v"][0]["i"] == 1 and cuts["respeak"]["/v"][0]["j"] == 2
+    assert cuts["kept_pauses"]["/v"] == [1]
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_old_project_is_cleaned_of_sound_annotations(tmp_path, qt_app):
+    import subprocess
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=7",
+                    "-f", "lavfi", "-i", "sine=f=300:d=7", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=7.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    words = [Word("*звук", 0.2, 0.5), Word("отзыва*", 0.5, 0.8), Word("раз", 1.0, 1.4), Word("два.", 1.5, 1.9),
+             Word("три", 3.5, 3.9), Word("э", 4.0, 4.3), Word("четыре.", 4.6, 5.0)]
+    tr.TranscriptStore(p.dir).put(SourceWords(src, 7.0, words), None)      # как было в старой версии
+    p.cuts["deleted"] = {src: [5]}                                         # вырезано «э»
+    p.cuts["subtitles"] = True
+    p.save()
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        for _ in range(5):
+            QApplication.processEvents()
+        assert [x.text for x in w.tstore.get(src).words] == ["раз", "два.", "три", "э", "четыре."]
+        assert w.project.cuts["deleted"][src] == [3]                       # всё ещё «э»
+        assert "*" not in w.text_panel_t.view.toPlainText()
+        assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три четыре."]
+        assert not any("*" in x["text"] for x in __import__("json").loads(
+            (p.dir / "transcript" / f"{tr.source_key(src)}.json").read_text())["words"] for x in [{"text": x[0]}])
+    finally:
+        w.close()

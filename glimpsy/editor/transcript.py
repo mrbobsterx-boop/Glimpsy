@@ -99,6 +99,20 @@ class TranscriptStore:
                 return None
         return self._words[src]
 
+    def clean_noise(self, src: str) -> list[int] | None:
+        """Старая расшифровка с подписями звуков («*звук*») — убрать их и сохранить. Возвращает
+        новые номера слов (чтобы поправить пометки монтажа) или None, если убирать нечего."""
+        sw = self.get(src)
+        if sw is None:
+            return None
+        words, mapping = drop_noise(sw.words)
+        if mapping is None:
+            return None
+        sw.words = words
+        self.put(sw, None)
+        log.info("Из расшифровки %s убраны подписи звуков: %d", src, mapping.count(-1))
+        return mapping
+
     def envelope(self, src: str) -> np.ndarray | None:
         if src not in self._env:
             f = self.dir / f"{source_key(src)}.npy"
@@ -185,8 +199,95 @@ HALLUCINATIONS = ("продолжение следует", "субтитры с�
                   "спасибо за просмотр", "amara.org", "dimatorzok")
 
 
+# Распознавание иногда подписывает не слова, а звуки: «*звук отзыва*», «*поёт*», «[музыка]»,
+# «(смеётся)», «♪». Это не речь — в тексте и субтитрах этого быть не должно.
+_OPEN, _CLOSE = "*[(", "*])"
+
+
+def noise_words(words: list[Word], longest: int = 6) -> set[int]:
+    """Номера «слов», которые на самом деле подписи звуков (между * *, [ ], ( ) или с ♪).
+    Подпись не длиннее longest слов: незакрытая звёздочка не съест весь текст до конца."""
+    out: set[int] = set()
+    i = 0
+    while i < len(words):
+        t = words[i].text.strip()
+        if "♪" in t or "♫" in t:
+            out.add(i)
+            i += 1
+            continue
+        if t[:1] in _OPEN:
+            close = _CLOSE[_OPEN.index(t[0])]
+            body = t.rstrip(".,!?…:;")
+            if len(body) > 1 and body.endswith(close):          # «*поёт*», «[музыка]» — одно слово
+                out.add(i)
+                i += 1
+                continue
+            end = next((k for k in range(i + 1, min(len(words), i + longest))
+                        if words[k].text.strip().rstrip(".,!?…:;").endswith(close)), None)
+            if end is not None:
+                out.update(range(i, end + 1))
+                i = end + 1
+                continue
+            if t[0] == "*" and len(body) > 1:                   # «*звук» без пары — тоже подпись
+                out.add(i)
+        i += 1
+    return out
+
+
+def drop_noise(words: list[Word]) -> tuple[list[Word], list[int] | None]:
+    """Убрать подписи звуков. Возвращает (слова, новый номер для каждого старого: −1 — убрано) или
+    (те же слова, None), если убирать нечего."""
+    gone = noise_words(words)
+    if not gone:
+        return words, None
+    mapping, kept = [], []
+    for i, w in enumerate(words):
+        if i in gone:
+            mapping.append(-1)
+        else:
+            mapping.append(len(kept))
+            kept.append(w)
+    return kept, mapping
+
+
+def remap_cuts(cuts: dict, src: str, mapping: list[int]) -> None:
+    """Пометки монтажа одного видео — на новые номера слов (после того как убрали подписи звуков)."""
+    def new(i: int) -> int:
+        return mapping[i] if 0 <= i < len(mapping) else -1
+
+    def before(i: int) -> int:
+        """Пауза после слова i — теперь после ближайшего оставшегося слова до него."""
+        while i >= 0 and new(i) < 0:
+            i -= 1
+        return new(i) if i >= 0 else -1
+
+    for field in ("deleted", "muted", "hidden", "kept_pauses"):
+        lst = cuts.get(field, {}).get(src)
+        if lst is not None:
+            if field == "kept_pauses":
+                cuts[field][src] = sorted({before(i) for i in lst})
+            else:
+                cuts[field][src] = sorted({new(i) for i in lst if new(i) >= 0})
+    pm = cuts.get("pause_marks", {}).get(src)
+    if pm is not None:
+        cuts["pause_marks"][src] = {str(before(int(k)) if int(k) >= 0 else -1): v for k, v in pm.items()}
+    wt = cuts.get("word_text", {}).get(src)
+    if wt is not None:
+        cuts["word_text"][src] = {str(new(int(k))): v for k, v in wt.items() if new(int(k)) >= 0}
+    rs = cuts.get("respeak", {}).get(src)
+    if rs is not None:
+        out = []
+        for r in rs:
+            idx = [new(k) for k in range(int(r["i"]), int(r["j"]) + 1) if new(k) >= 0]
+            if idx:
+                out.append({**r, "i": idx[0], "j": idx[-1]})
+        cuts["respeak"][src] = out
+
+
 def refine_words(words: list[Word], env: np.ndarray | None) -> list[Word]:
-    """Уточнить время слов по громкости; убрать «слова», сказанные тишиной (выдумки Whisper)."""
+    """Уточнить время слов по громкости; убрать «слова», сказанные тишиной (выдумки Whisper),
+    и подписи звуков («*звук*», «[музыка]»)."""
+    words, _m = drop_noise(words)
     if env is None or len(env) == 0:
         return [w for w in words if w.end > w.start or w.text]
     thr = silence_level(env)
@@ -562,7 +663,7 @@ def word_command(exe: str, model: Path, wav: Path, out_base: Path, language: str
     from glimpsy.editor.subtitles import _short_path
 
     cmd = [exe, "-m", _short_path(model), "-f", _short_path(wav), "-l", language, "-ojf",
-           "-of", _short_path(out_base.parent) + "/" + out_base.name, "-pp", "-np", "-t", str(whisper_threads())]
+           "-of", _short_path(out_base.parent) + "/" + out_base.name, "-pp", "-np", "-sns", "-t", str(whisper_threads())]
     if language in ("ru", "auto"):
         cmd += ["--prompt", PROMPT_RU]
     # без детектора речи: с ним время отдельных слов у whisper.cpp сбивается

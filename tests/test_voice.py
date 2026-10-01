@@ -261,3 +261,14 @@ def test_respeak_with_saved_voice_and_save_from_text(tmp_path, qt_app, monkeypat
         assert w.project.cuts["respeak"][src][0]["voice"] == "Мой голос"
     finally:
         w.close()
+
+
+def test_ssl_context_finds_certificates_without_defaults(monkeypatch):
+    """Собранная программа на SteamOS не знает, где системные сертификаты (CERTIFICATE_VERIFY_FAILED)."""
+    import ssl
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent")
+    monkeypatch.setenv("SSL_CERT_DIR", "/nonexistent")
+    ctx = voice.ssl_context()
+    assert isinstance(ctx, ssl.SSLContext) and ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.cert_store_stats()["x509_ca"] > 50                         # список сертификатов загружен

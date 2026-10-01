@@ -519,6 +519,16 @@ class EditorWindow(QMainWindow):
 
     def _setup_text_edit(self) -> None:
         self.tstore = tr.TranscriptStore(self.project.dir)
+        # расшифровки, сделанные раньше, могли содержать подписи звуков («*звук*») — убираем,
+        # пометки монтажа переносим на новые номера слов
+        cleaned = False
+        for s in self.project.cuts.get("sources", []):
+            mapping = self.tstore.clean_noise(s["src"])
+            if mapping is not None:
+                tr.remap_cuts(self.project.cuts, s["src"], mapping)
+                cleaned = True
+        if cleaned:
+            QTimer.singleShot(0, self._recut)
         self._tr_cancel: threading.Event | None = None
         p = self.text_panel_t
         p.view.clicked.connect(self._on_text_token)

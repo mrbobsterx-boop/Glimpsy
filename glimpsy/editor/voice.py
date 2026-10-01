@@ -104,10 +104,37 @@ def clean_env() -> dict:
 
 # ---------------- установка ----------------
 
+# Где системы держат список сертификатов (по нему проверяется, что сайт настоящий). Собранная
+# программа ищет его там, где он был на сборочной машине, — на Steam Deck (SteamOS) и других
+# Linux его там нет, и скачивание падало с «CERTIFICATE_VERIFY_FAILED». Ищем сами.
+CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/etc/ssl/ca-bundle.pem",
+            "/usr/local/etc/openssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem")
+
+
+def ssl_context():
+    """Проверка сайтов: системный список сертификатов + свой (certifi), если он есть."""
+    import ssl
+
+    ctx = ssl.create_default_context()
+    for f in CA_FILES:
+        if os.path.isfile(f):
+            try:
+                ctx.load_verify_locations(cafile=f)
+            except (OSError, ssl.SSLError):
+                continue
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except (ImportError, OSError, ssl.SSLError):
+        pass
+    return ctx
+
+
 def _download(url: str, dest: Path, progress: Callable[[float], None], cancel: threading.Event) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "Glimpsy"})
     part = dest.with_name(dest.name + ".part")
-    with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+    with urllib.request.urlopen(req, timeout=60, context=ssl_context()) as r, open(part, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         got = 0
         while True:
