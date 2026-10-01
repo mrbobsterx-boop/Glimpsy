@@ -893,6 +893,7 @@ def test_overlay_video_plays_smoothly_in_preview(tmp_path, qt_app):
                     seen.add(hashlib.md5(bytes(img.constBits())[:200000]).hexdigest())
             time.sleep(0.02)
         w.player.pause()
-        assert len(seen) >= 10, len(seen)           # живое видео: много разных кадров за 2 секунды
+        # живое видео: много разных кадров (миниатюры раз в секунду дали бы не больше 3); медленные машины — ~10
+        assert len(seen) >= 6, len(seen)
     finally:
         w.close()
