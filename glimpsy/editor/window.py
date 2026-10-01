@@ -529,6 +529,8 @@ class EditorWindow(QMainWindow):
                 cleaned = True
         if cleaned:
             QTimer.singleShot(0, self._recut)
+        elif any(self.tstore.get(s["src"]) for s in self.project.cuts.get("sources", [])):
+            tr.rebuild_clips(self.project, self.tstore)   # куски — по текущим правилам; края можно тянуть
         self._tr_cancel: threading.Event | None = None
         p = self.text_panel_t
         p.view.clicked.connect(self._on_text_token)
@@ -542,6 +544,8 @@ class EditorWindow(QMainWindow):
         p.subs_lang_changed.connect(self._on_subs_lang)
         self._mt_cache = mt.Cache(self.project.dir)
         self._voice_job = False
+        self._trim_timer = QTimer(self, singleShot=True, interval=500)
+        self._trim_timer.timeout.connect(self._trims_done)
         if self.project.cuts.get("subtitles") and not any(t.auto for t in self.project.texts):
             QTimer.singleShot(0, self._recut)          # проект от автомонтажа — субтитры ещё не созданы
         self._mt_busy = False
@@ -1060,6 +1064,35 @@ class EditorWindow(QMainWindow):
         cur.add(idx) if on else cur.discard(idx)
         marks[src] = sorted(cur)
 
+    # ---------- края кусков, растянутые на ленте ----------
+
+    def _capture_trims(self) -> None:
+        """Кусок растянули или укоротили на ленте — запомнить это в пометках монтажа, иначе при
+        следующей правке текста куски пересоберутся и правка пропадёт."""
+        keys = getattr(self.project, "edge_keys", {})
+        moved = False
+        for c in self.project.clips:
+            k = keys.get(c.id)
+            if k is None:
+                continue
+            src, raw_a, raw_b, a0, b0 = k
+            if raw_a is not None and abs(c.in_s - a0) > 1e-3:
+                tr.set_edge(self.project.cuts, src, raw_a, c.in_s)
+                moved = True
+            if raw_b is not None and abs(c.out_s - b0) > 1e-3:
+                tr.set_edge(self.project.cuts, src, raw_b, c.out_s)
+                moved = True
+            if moved:
+                keys[c.id] = (src, raw_a, raw_b, c.in_s, c.out_s)
+        if moved:
+            self._trim_timer.start()                   # когда отпустят мышь — пересобрать (субтитры, слияния)
+
+    def _trims_done(self) -> None:
+        if getattr(self.timeline, "_mode", None):      # ещё тянут — подождём
+            self._trim_timer.start()
+            return
+        self._recut()
+
     # ---------- паузы ----------
 
     @staticmethod
@@ -1462,6 +1495,8 @@ class EditorWindow(QMainWindow):
 
     def _changed(self) -> None:
         """После любой правки: перерисовать, обновить просмотр, автосохранение."""
+        if self.project.text_edit:
+            self._capture_trims()
         if self.project.music is None and self.timeline.music_active:
             self.timeline.select_music(False)
         elif self.project.music is not None:

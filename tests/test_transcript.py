@@ -122,7 +122,7 @@ def test_cut_snaps_to_quiet_point():
     env[int(2.0 / tr.FRAME_S):int(2.1 / tr.FRAME_S)] = 0.05                # шорох сразу после речи
     r = tr.kept_ranges(sw, set(), set(), dict(tr.DEFAULT_CUTS), env)
     end = r[0][1]
-    assert 1.9 <= end <= 2.13 and not (2.0 <= end < 2.1)                     # разрез не посреди шороха
+    assert 1.9 <= end <= 2.16 and not (2.0 <= end < 2.1)                     # разрез не посреди шороха
 
 
 def test_rebuild_clips_and_srt(tmp_path):
@@ -137,7 +137,8 @@ def test_rebuild_clips_and_srt(tmp_path):
     tr.rebuild_clips(p, store)
     # (разрезы — в серединах 10-мс отрезков громкости: точность ±5 мс)
     got = [x for c in p.clips for x in (c.in_s, c.out_s)]
-    assert got == pytest.approx([0.85, 2.05, 3.35, 4.0, 4.45, 5.15], abs=0.006)
+    # после удалённого «э» звук идёт без перерыва — разрез у самого конца «э», а не посреди звука
+    assert got == pytest.approx([0.85, 2.05, 3.35, 4.0, 4.305, 5.15], abs=0.006)
     # время в готовом ролике: слова идут без удалённого «э»
     words = tr.output_words(p, tr.TranscriptStore(tmp_path))
     assert [w[2] for w in words] == ["раз", "два", "три", "четыре"]
@@ -481,6 +482,14 @@ def test_preview_plays_through_cuts_of_one_file(tmp_path, qt_app):
         pl.shutdown()
 
 
+def test_cut_does_not_clip_a_word_with_late_timing():
+    """Распознавание поставило начало слова позже, чем оно звучит: разрез уходит к тишине перед словом."""
+    sw = SourceWords("/v.mp4", 6.0, [Word("раз", 1.0, 1.4), Word("два", 3.6, 4.0)])     # «два» звучит с 3,2 с
+    env = env_with_speech(6.0, [(1.0, 1.4), (3.2, 4.0)])
+    r = tr.kept_ranges(sw, set(), set(), dict(tr.DEFAULT_CUTS), env)
+    assert r[1][0] == pytest.approx(3.15, abs=0.02)                         # а не 3,45 — посреди слова
+
+
 def test_sound_annotations_are_not_speech():
     W = Word
     words = [W(t, k, k + 0.5) for k, t in enumerate(
@@ -545,5 +554,57 @@ def test_old_project_is_cleaned_of_sound_annotations(tmp_path, qt_app):
         assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три четыре."]
         assert not any("*" in x["text"] for x in __import__("json").loads(
             (p.dir / "transcript" / f"{tr.source_key(src)}.json").read_text())["words"] for x in [{"text": x[0]}])
+    finally:
+        w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_stretched_piece_is_remembered(tmp_path, qt_app):
+    """Кусок растянули на ленте — после правки текста он остаётся растянутым; отмена возвращает."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=7",
+                    "-f", "lavfi", "-i", "sine=f=300:d=7", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=7.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    sw = sw_simple()
+    sw.src = src
+    tr.TranscriptStore(p.dir).put(sw, None)
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        QApplication.processEvents()
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.85, 2.05), (3.35, 5.15)]
+        # тянем начало второго куска на 0,3 с раньше (как мышью на ленте)
+        w.history.push(w.project.to_dict(), "trim")
+        w.project.trim(1, 3.05, 5.15)
+        w._changed()
+        w._trim_timer.stop()
+        w._trims_done()
+        assert [(c.in_s, c.out_s) for c in w.project.clips] == [(0.85, 2.05), (3.05, 5.15)]
+        # правка текста в другом месте — растяжка остаётся
+        w._cut_tokens([("w", 0, 0)])
+        assert w.project.clips[-1].in_s == pytest.approx(3.05)
+        assert w.project.cuts["edges"][src] == [[3.35, 3.05]]
+        # и её можно растянуть дальше
+        w.history.push(w.project.to_dict(), "trim2")
+        w.project.trim(len(w.project.clips) - 1, 2.9, 5.15)
+        w._changed()
+        w._trims_done()
+        assert w.project.clips[-1].in_s == pytest.approx(2.9) and w.project.cuts["edges"][src] == [[3.35, 2.9]]
+        w.undo()
+        w.undo()
+        w.undo()
+        assert not w.project.cuts.get("edges", {}).get(src)
     finally:
         w.close()

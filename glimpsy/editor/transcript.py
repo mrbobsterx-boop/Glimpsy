@@ -361,6 +361,33 @@ def _snap(env: np.ndarray | None, t: float, lo: float, hi: float) -> float:
     return float(times[int(np.argmin(np.abs(times - t)))])
 
 
+VOICED_REACH_S = 0.5            # дальше этого разрез «за голосом» не уходит
+EDGE_PAD_S = 0.05               # и чуть тишины после найденного края
+
+
+def _to_quiet(env: np.ndarray | None, t: float, limit: float, direction: int) -> float:
+    """Если в момент t звучит голос — сдвинуть t в сторону direction (−1 раньше, +1 позже) до тишины,
+    не дальше limit и не дальше VOICED_REACH_S."""
+    if env is None or len(env) == 0:
+        return t
+    thr = silence_level(env)
+    k = _frame_index(t) if direction > 0 else _frame_index(t) - 1
+    if not (0 <= k < len(env)) or env[k] < thr:
+        return t
+    steps = int(VOICED_REACH_S / FRAME_S)
+    for n in range(1, steps + 1):
+        j = k + direction * n
+        if not (0 <= j < len(env)):
+            break
+        edge = (j + (1 if direction < 0 else 0)) * FRAME_S
+        if (direction < 0 and edge < limit) or (direction > 0 and edge > limit):
+            return limit
+        if env[j] < thr:
+            out = edge + direction * EDGE_PAD_S
+            return max(limit, out) if direction < 0 else min(limit, out)
+    return t                                   # голос не кончается — это не край слова, оставляем как было
+
+
 def pause_marks(cuts: dict, src: str) -> dict[int, float]:
     """Ручные пометки пауз одного видео: номер → сколько тишины оставить.
 
@@ -466,6 +493,10 @@ def kept_ranges(sw: SourceWords, deleted: set[int], kept_pauses: set[int], cuts:
             end = words[last].end + (pad if h is None else h)
         start = max(lo, start)
         end = min(hi, end)
+        # время слов у распознавания бывает неточным: если в месте разреза ещё звучит голос —
+        # отодвигаем разрез до тишины (иначе слово обрезается на середине)
+        start = _to_quiet(env, start, lo, -1)
+        end = _to_quiet(env, end, hi, +1)
         # разрез — в самую тихую точку рядом, но не внутрь оставленных или удалённых слов
         start = _snap(env, start, lo, words[first].start) if start > 0 else start
         end = _snap(env, end, words[last].end, hi) if end < dur else end
@@ -559,6 +590,45 @@ def broll_in_gap(cuts: dict, src: str, a: float, b: float) -> float:
     return sum(max(0.0, min(b, y) - max(a, x)) for x, y in cuts.get("broll", {}).get(src, []))
 
 
+EDGE_MATCH_S = 0.02
+
+
+def apply_edges(ranges: list[tuple[float, float]], edges: list, dur: float) -> list[tuple]:
+    """Ручные правки краёв кусков (растянули или укоротили кусок на ленте).
+
+    edges: [[край, как его посчитала программа; куда его передвинули]]. Возвращает
+    [(начало, конец, исходное начало, исходный конец)] — исходные края нужны, чтобы
+    запомнить следующую правку; у слившихся кусков — от первого и последнего."""
+    def moved(t: float) -> float:
+        for raw, to in edges:
+            if abs(float(raw) - t) <= EDGE_MATCH_S:
+                return float(to)
+        return t
+
+    adj = []
+    for a, b in ranges:
+        a2, b2 = max(0.0, moved(a)), min(dur, moved(b))
+        if b2 - a2 >= MIN_RANGE_S:
+            adj.append([round(a2, 3), round(b2, 3), a, b])
+    adj.sort()
+    out: list[list] = []
+    for r in adj:
+        if out and r[0] <= out[-1][1] + 0.01:
+            if r[1] >= out[-1][1]:
+                out[-1][1], out[-1][3] = r[1], r[3]
+        else:
+            out.append(r)
+    return [tuple(r) for r in out]
+
+
+def set_edge(cuts: dict, src: str, raw: float, to: float) -> None:
+    """Запомнить: край куска raw (как его посчитала программа) теперь стоит в to."""
+    edges = cuts.setdefault("edges", {}).setdefault(src, [])
+    edges[:] = [e for e in edges if abs(float(e[0]) - raw) > EDGE_MATCH_S]
+    if abs(to - raw) > 1e-3:
+        edges.append([round(raw, 3), round(to, 3)])
+
+
 def split_ranges(ranges: list[tuple[float, float]], muted: list[tuple[float, float]],
                  hidden: list[tuple[float, float]]) -> list[tuple[float, float, bool, bool]]:
     """Оставленные куски → куски с пометками: (начало, конец, без звука, без картинки)."""
@@ -605,6 +675,7 @@ def rebuild_clips(project, store: TranscriptStore) -> None:
     cuts = cuts_of(project)
     deleted_all = cuts.get("deleted", {})
     clips = []
+    keys: dict[str, tuple] = {}
     for s in cuts.get("sources", []):
         src = s["src"]
         sw = store.get(src)
@@ -616,14 +687,24 @@ def rebuild_clips(project, store: TranscriptStore) -> None:
             rngs = add_ranges(rngs, [(float(a), float(b)) for a, b in cuts.get("broll", {}).get(src, [])],
                               float(s["duration"]))
             muted = set(cuts.get("muted", {}).get(src, [])) | respoken(cuts, src)
-            pieces = split_ranges(rngs, mark_spans(sw, muted, cuts, env),
-                                  mark_spans(sw, set(cuts.get("hidden", {}).get(src, [])), cuts, env))
-        for a, b, m, h in pieces:
-            clips.append(Clip(new_id(), "video", src, float(s["duration"]), a, b, muted=m, hidden=h,
-                              has_audio=bool(s.get("has_audio", True)), width=int(s.get("width", 0)),
-                              height=int(s.get("height", 0)), label=s.get("label", Path(src).name),
-                              frames={k: list(v) for k, v in s.get("frames", {}).items()}))
+            mspans = mark_spans(sw, muted, cuts, env)
+            hspans = mark_spans(sw, set(cuts.get("hidden", {}).get(src, [])), cuts, env)
+            pieces = []
+            for a2, b2, ra, rb in apply_edges(rngs, cuts.get("edges", {}).get(src, []), float(s["duration"])):
+                part = split_ranges([(a2, b2)], mspans, hspans)
+                for n, (a, b, m, h) in enumerate(part):
+                    # края, которые можно тянуть на ленте: (как их посчитала программа) — чтобы запомнить правку
+                    pieces.append((a, b, m, h, ra if n == 0 else None, rb if n == len(part) - 1 else None))
+        for a, b, m, h, *raw in pieces:
+            c = Clip(new_id(), "video", src, float(s["duration"]), a, b, muted=m, hidden=h,
+                     has_audio=bool(s.get("has_audio", True)), width=int(s.get("width", 0)),
+                     height=int(s.get("height", 0)), label=s.get("label", Path(src).name),
+                     frames={k: list(v) for k, v in s.get("frames", {}).items()})
+            clips.append(c)
+            if raw:
+                keys[c.id] = (src, raw[0], raw[1], a, b)
     project.clips = clips
+    project.edge_keys = keys
 
 
 def source_time(project, t: float) -> tuple[str, float] | None:
