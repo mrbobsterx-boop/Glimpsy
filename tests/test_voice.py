@@ -14,6 +14,11 @@ from glimpsy.editor.transcript import SourceWords, Word
 FFMPEG = __import__("glimpsy.paths", fromlist=["x"]).find_executable("ffmpeg")
 
 
+def _mkdir(d: Path) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def test_reference_spans_skip_phrase_and_deleted():
     ws = [Word(f"w{k}", k * 1.0, k * 1.0 + 0.8) for k in range(20)]
     spans = voice.reference_spans(ws, 5, 6, deleted={4, 7}, want=4.0)
@@ -56,7 +61,7 @@ def test_fit_phrase_trims_and_stretches(tmp_path):
 def test_respeak_in_editor(tmp_path, qt_app, monkeypatch):
     from types import SimpleNamespace
 
-    from PySide6.QtWidgets import QApplication, QInputDialog
+    from PySide6.QtWidgets import QApplication
 
     from glimpsy.editor.project import Project
     from glimpsy.editor.window import EditorWindow
@@ -67,7 +72,7 @@ def test_respeak_in_editor(tmp_path, qt_app, monkeypatch):
     class FakeSpeaker:
         proc = None
 
-        def say(self, text, lang, ref, out):
+        def say(self, text, lang, ref, out, conds=None):
             said.append((text, lang, Path(ref).exists()))
             subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=0.9", str(out)],
                            check=True)
@@ -79,7 +84,13 @@ def test_respeak_in_editor(tmp_path, qt_app, monkeypatch):
     monkeypatch.setattr(voice, "supported", lambda: True)
     monkeypatch.setattr(voice, "installed", lambda: True)
     monkeypatch.setattr(voice, "speaker", lambda: FakeSpeaker())
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("явно должно", True)))
+    from PySide6.QtWidgets import QDialog
+
+    from glimpsy.editor.voices_dialog import RespeakDialog
+
+    monkeypatch.setattr(RespeakDialog, "exec",
+                        lambda self: (self.text.setText("явно должно"), QDialog.DialogCode.Accepted)[1])
+    monkeypatch.setattr(voice, "voices_dir", lambda: _mkdir(tmp_path / "voices"))
     video = tmp_path / "talk.mp4"
     subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=7",
                     "-f", "lavfi", "-i", "sine=f=300:d=7", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
@@ -129,5 +140,124 @@ def test_respeak_in_editor(tmp_path, qt_app, monkeypatch):
         assert [t.text for t in w.project.texts if t.auto][-1] == "по идее четыре."
         w.undo()
         assert [o for o in w.project.overlays if o.auto]
+    finally:
+        w.close()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_voice_library(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice, "voices_dir", lambda: _mkdir(tmp_path / "voices"))
+    wav = tmp_path / "talk.wav"
+    # 1 с тишины, 7 с «речи», 1 с тишины
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "aevalsrc='if(between(t,1,8),0.3*sin(2*PI*220*t),0)':s=48000:d=9", str(wav)], check=True)
+    v = voice.add_voice(FFMPEG, "  Мой голос ", wav)
+    assert v.name == "Мой голос" and v.seconds == pytest.approx(7.0, abs=0.3) and v.sample.exists()
+    assert [x.name for x in voice.list_voices()] == ["Мой голос"]
+    # из видео — только указанные куски, не длиннее 20 с
+    long = tmp_path / "long.wav"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=200:d=60", str(long)], check=True)
+    v2 = voice.add_voice(FFMPEG, "Саша", long, spans=[(0.0, 15.0), (20.0, 35.0)])
+    assert v2.seconds == pytest.approx(20.0, abs=0.2)
+    with pytest.raises(voice.VoiceError):
+        voice.add_voice(FFMPEG, "Коротко", long, spans=[(0.0, 2.0)])
+    assert len(voice.list_voices()) == 2                       # неудачный не остаётся
+    voice.rename_voice(v.id, "Я")
+    assert voice.get_voice(v.id).name == "Я"
+    voice.delete_voice(v2.id)
+    assert [x.name for x in voice.list_voices()] == ["Я"]
+
+
+def test_record_voice_dialog(tmp_path, qt_app):
+    import time as _t
+
+    from PySide6.QtWidgets import QApplication
+
+    from glimpsy.editor.voices_dialog import RecordVoiceDialog
+    from tests.test_audio import _FakeRecorder
+
+    dlg = RecordVoiceDialog(opener=lambda: _FakeRecorder(0.3))
+    dlg._toggle()                                               # начать
+    end = _t.time() + 10
+    while (dlg.meter is None or len(dlg.meter.samples()) < 48000 * 6) and _t.time() < end:
+        QApplication.processEvents()
+        _t.sleep(0.02)
+    dlg._toggle()                                               # готово
+    assert dlg.result() == dlg.DialogCode.Accepted and dlg.wav is not None and dlg.wav.stat().st_size > 48000 * 2 * 5
+    dlg.wav.unlink()
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_respeak_with_saved_voice_and_save_from_text(tmp_path, qt_app, monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication, QDialog, QInputDialog
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.voices_dialog import RespeakDialog
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    monkeypatch.setattr(voice, "voices_dir", lambda: _mkdir(tmp_path / "voices"))
+    said = []
+
+    class FakeSpeaker:
+        proc = None
+
+        def say(self, text, lang, ref, out, conds=None):
+            said.append((text, Path(ref), conds))
+            subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=f=500:d=0.8", str(out)],
+                           check=True)
+            return out
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(voice, "supported", lambda: True)
+    monkeypatch.setattr(voice, "installed", lambda: True)
+    monkeypatch.setattr(voice, "speaker", lambda: FakeSpeaker())
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Мой голос", True)))
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(a[2])))
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=12",
+                    "-f", "lavfi", "-i", "sine=f=300:d=12", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=12.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    words = [Word(f"слово{k}", 0.5 + k * 0.8, 0.5 + k * 0.8 + 0.7) for k in range(12)]
+    tr.TranscriptStore(p.dir).put(SourceWords(src, 12.0, words, language="ru"), None)
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        w.show()
+        QApplication.processEvents()
+        tr.rebuild_clips(w.project, w.tstore)
+        w._changed()
+        # слишком мало речи — голос не сохраняется
+        w._save_voice([("w", 0, 0), ("w", 0, 1)])
+        QApplication.processEvents()
+        assert voice.list_voices() == [] and "нужно хотя бы" in shown[0]
+        # 8 слов подряд (~6 с) — сохраняется в библиотеку
+        w._save_voice([("w", 0, k) for k in range(8)])
+        end = time.time() + 10
+        while not voice.list_voices() and time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.02)
+        saved = voice.list_voices()
+        assert [v.name for v in saved] == ["Мой голос"] and saved[0].seconds >= 5
+        # переозвучка сохранённым голосом: образец не вырезается, используется разобранный голос
+        monkeypatch.setattr(RespeakDialog, "exec", lambda self: (
+            self.text.setText("новая фраза"), self.voice.setCurrentIndex(self.voice.findData(saved[0].id)),
+            QDialog.DialogCode.Accepted)[2])
+        w._selection_do("respeak", [("w", 0, 10)])
+        end = time.time() + 20
+        while w._voice_job and time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.02)
+        QApplication.processEvents()
+        assert said == [("новая фраза", saved[0].sample, saved[0].conds)]
+        assert w.project.cuts["respeak"][src][0]["voice"] == "Мой голос"
     finally:
         w.close()

@@ -655,6 +655,7 @@ class EditorWindow(QMainWindow):
         m.addAction("Убрать / вернуть только картинку", lambda: self._selection_do("hide", keys))
         m.addSeparator()
         m.addAction("Переозвучить своим голосом…", lambda: self._selection_do("respeak", keys))
+        m.addAction("Сохранить голос из этого куска…", lambda: self._save_voice(keys))
         m.addAction("Вернуть всё", lambda: self._selection_do("restore", keys))
         m.exec(pos)
 
@@ -665,8 +666,6 @@ class EditorWindow(QMainWindow):
 
     def _respeak(self, words: list[tuple[int, int]]) -> None:
         """Выделенную фразу исправить и озвучить своим голосом."""
-        from PySide6.QtWidgets import QInputDialog
-
         from glimpsy.editor import voice
 
         si = words[0][0]
@@ -690,16 +689,64 @@ class EditorWindow(QMainWindow):
         if j - i > 40:
             QMessageBox.information(self, "Переозвучка", "Выделите фразу покороче (до 40 слов).")
             return
+        from glimpsy.editor.voices_dialog import RespeakDialog
+
         cuts = self.project.cuts
         old = " ".join(t for k in range(i, j + 1) if (t := tr.word_text(cuts, src, k, sw.words[k].text)))
-        text, ok = QInputDialog.getText(self, "Переозвучка своим голосом",
-                                        "Как должна звучать фраза (её скажет ваш голос):", text=old)
-        text = " ".join(text.split())
-        if not ok or not text:
+        ref = voice.reference_spans(sw.words, i, j, set(cuts.get("deleted", {}).get(src, [])))
+        dlg = RespeakDialog(old, sum(b - a for a, b in ref), self.ffmpeg, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = " ".join(dlg.text.text().split())
+        if not text:
             return
         if not voice.installed() and not self._install_voice():
             return
-        self._start_respeak(si, i, j, text)
+        self._start_respeak(si, i, j, text, dlg.voice_id)
+
+    def _save_voice(self, keys: list) -> None:
+        """Выделенная речь → голос в библиотеке (для переозвучки в любых проектах)."""
+        from PySide6.QtWidgets import QInputDialog
+
+        from glimpsy.editor import voice
+        from glimpsy.editor.voices_dialog import save_voice_async
+
+        words = [(si, i) for kind, si, i in keys if kind == "w"]
+        if not words:
+            return
+        si = words[0][0]
+        src = self._sources()[si]["src"]
+        sw = self.tstore.get(src)
+        if sw is None:
+            return
+        gone = set(self.project.cuts.get("deleted", {}).get(src, []))
+        idx = sorted(i for s_, i in words if s_ == si and i not in gone)
+        spans: list[tuple[float, float]] = []
+        for k in idx:
+            a, b = max(0.0, sw.words[k].start - 0.05), sw.words[k].end + 0.05
+            if spans and a - spans[-1][1] < 0.35:
+                spans[-1] = (spans[-1][0], b)
+            else:
+                spans.append((a, b))
+        total = sum(b - a for a, b in spans)
+        if total < voice.MIN_SAMPLE_S:
+            QMessageBox.information(self, "Голос", f"Выделено {total:.1f} с речи, а для голоса нужно хотя бы "
+                                    f"{voice.MIN_SAMPLE_S:.0f} с (лучше 10–20). Выделите кусок побольше.")
+            return
+        name, ok = QInputDialog.getText(self, "Сохранить голос",
+                                        "Как назвать голос (например, «Мой голос», «Саша»):", text="Мой голос")
+        name = " ".join(name.split())
+        if not ok or not name:
+            return
+
+        def done(msg: str) -> None:
+            if msg.startswith("ok:"):
+                self.statusBar().showMessage(f"Голос «{name}» сохранён — его можно выбрать при переозвучке "
+                                             f"в любом проекте.", 8000)
+            else:
+                QMessageBox.warning(self, "Голос", msg)
+
+        save_voice_async(self.ffmpeg, name, Path(src), spans, self, done)
 
     def _install_voice(self) -> bool:
         """Спросить и поставить голосовой модуль (один раз; долго)."""
@@ -747,7 +794,7 @@ class EditorWindow(QMainWindow):
                                 "диске и попробуйте ещё раз — уже скачанное повторно не качается.")
         return result["err"] is None
 
-    def _start_respeak(self, si: int, i: int, j: int, text: str) -> None:
+    def _start_respeak(self, si: int, i: int, j: int, text: str, voice_id: str = "") -> None:
         """Озвучить фразу в фоне; готово — встаёт на место исходной (одним шагом отмены)."""
         from glimpsy.editor import voice
 
@@ -759,6 +806,7 @@ class EditorWindow(QMainWindow):
         target = span[1] - span[0]
         lang = sw.language if sw.language in voice.LANGS else "ru"
         ref_spans = voice.reference_spans(sw.words, i, j, set(cuts.get("deleted", {}).get(src, [])))
+        saved = voice.get_voice(voice_id) if voice_id else None
         rid = new_id()
         out_dir = self.project.dir / "voice"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -766,7 +814,7 @@ class EditorWindow(QMainWindow):
         self._voice_job = True
         panel = self.text_panel_t
         first = voice.speaker().proc is None
-        panel.set_voice_status(f"Озвучиваю «{text}» вашим голосом… " +
+        panel.set_voice_status(f"Озвучиваю «{text}» " + (f"голосом «{saved.name}»… " if saved else "вашим голосом… ") +
                                ("Первая фраза — около минуты-двух (загружается нейросеть)." if first else
                                 "Обычно 20–40 секунд."))
         bridge = _ExportBridge(self)
@@ -777,7 +825,8 @@ class EditorWindow(QMainWindow):
             panel.set_voice_status("")
             self.history.push(self.project.to_dict())
             entry = {"id": rid, "i": i, "j": j, "text": text, "file": str(final.relative_to(self.project.dir)),
-                     "dur": round(result["dur"], 3), "orig": round(target, 3)}
+                     "dur": round(result["dur"], 3), "orig": round(target, 3),
+                     "voice": saved.name if saved else ""}
             self.project.cuts.setdefault("respeak", {}).setdefault(src, []).append(entry)
             fixes = self.project.cuts.setdefault("word_text", {}).setdefault(src, {})
             fixes[str(i)] = text
@@ -804,8 +853,11 @@ class EditorWindow(QMainWindow):
             raw = out_dir / f"respeak_{rid}_raw.wav"
             ref = out_dir / f"respeak_{rid}_ref.wav"
             try:
-                voice.make_reference(self.ffmpeg, Path(src), ref_spans, ref)
-                voice.speaker().say(text, lang, ref, raw)
+                if saved is not None:                      # сохранённый голос — образец уже готов
+                    voice.speaker().say(text, lang, saved.sample, raw, conds=saved.conds)
+                else:
+                    voice.make_reference(self.ffmpeg, Path(src), ref_spans, ref)
+                    voice.speaker().say(text, lang, ref, raw)
                 result["dur"] = voice.fit_phrase(self.ffmpeg, raw, final, target, Path(src), span[0], span[1])
                 bridge.done.emit("")
             except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так

@@ -23,6 +23,7 @@ import sys
 import tarfile
 import threading
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -193,14 +194,14 @@ def remove() -> None:
 # ---------------- программа-«озвучиватель» (работает в Python модуля) ----------------
 
 WORKER = r'''
-import json, sys, time, warnings
+import json, os, sys, time, warnings
 warnings.filterwarnings("ignore")
 
 
 def main():
     import torch
     torch.set_num_threads(max(2, min(8, __import__("os").cpu_count() or 4)))
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS, Conditionals
     import torchaudio
     model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
     if "--warmup" in sys.argv:
@@ -213,9 +214,16 @@ def main():
         req = json.loads(line)
         try:
             t = time.time()
-            wav = model.generate(req["text"], language_id=req.get("lang", "ru"),
-                                 audio_prompt_path=req.get("ref") or None,
-                                 exaggeration=float(req.get("exaggeration", 0.5)),
+            exa = float(req.get("exaggeration", 0.5))
+            conds = req.get("conds") or ""
+            if conds and os.path.exists(conds):
+                # сохранённый голос: уже разобранный образец — без повторного разбора
+                model.conds = Conditionals.load(conds).to(model.device)
+            elif req.get("ref"):
+                model.prepare_conditionals(req["ref"], exaggeration=exa)
+                if conds:
+                    model.conds.save(conds)
+            wav = model.generate(req["text"], language_id=req.get("lang", "ru"), exaggeration=exa,
                                  cfg_weight=float(req.get("cfg", 0.5)))
             torchaudio.save(req["out"], wav, model.sr)
             print(json.dumps({"ok": True, "out": req["out"], "seconds": round(time.time() - t, 1)}), flush=True)
@@ -264,13 +272,14 @@ class Speaker:
                 return data
         raise VoiceError("Голосовой модуль неожиданно закрылся.")
 
-    def say(self, text: str, lang: str, ref: Path | None, out: Path) -> Path:
-        """Озвучить фразу (долго — вызывать не из окна, а в фоне)."""
+    def say(self, text: str, lang: str, ref: Path | None, out: Path, conds: Path | None = None) -> Path:
+        """Озвучить фразу (долго — вызывать не из окна, а в фоне). ref — образец голоса; conds — где
+        хранится уже разобранный образец сохранённого голоса (нет файла — разобрать и сохранить)."""
         with self.lock:
             self._start()
             assert self.proc is not None and self.proc.stdin is not None
             req = {"text": text, "lang": lang if lang in LANGS else "ru", "ref": str(ref) if ref else "",
-                   "out": str(out)}
+                   "out": str(out), "conds": str(conds) if conds else ""}
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
             res = self._read(lambda d: "ok" in d)
@@ -298,6 +307,112 @@ def speaker() -> Speaker:
     return _speaker
 
 
+# ---------------- библиотека голосов ----------------
+
+MIN_SAMPLE_S = 5.0            # короче — голос получается непохожим
+MAX_SAMPLE_S = 20.0           # нейросеть всё равно слушает только первые ~10 с
+
+
+@dataclass
+class Voice:
+    """Сохранённый голос: образец речи и его разобранная версия (для скорости)."""
+    id: str
+    name: str
+    seconds: float
+    created: float
+
+    @property
+    def folder(self) -> Path:
+        return voices_dir() / self.id
+
+    @property
+    def sample(self) -> Path:
+        return self.folder / "sample.wav"
+
+    @property
+    def conds(self) -> Path:
+        return self.folder / "conds.pt"
+
+
+def voices_dir() -> Path:
+    """Голоса — отдельно от модуля: переустановка модуля их не трогает."""
+    d = paths.data_dir() / "voices"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def list_voices() -> list[Voice]:
+    out = []
+    for d in sorted(voices_dir().iterdir()) if voices_dir().exists() else []:
+        meta = d / "voice.json"
+        if not meta.exists() or not (d / "sample.wav").exists():
+            continue
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+            out.append(Voice(d.name, str(m["name"]), float(m.get("seconds", 0)), float(m.get("created", 0))))
+        except (OSError, ValueError, KeyError):
+            log.warning("Голос %s не читается", d)
+    return sorted(out, key=lambda v: v.created)
+
+
+def get_voice(voice_id: str) -> Voice | None:
+    return next((v for v in list_voices() if v.id == voice_id), None)
+
+
+def _write_meta(v: Voice) -> None:
+    (v.folder / "voice.json").write_text(json.dumps({"name": v.name, "seconds": round(v.seconds, 2),
+                                                     "created": v.created}, ensure_ascii=False), encoding="utf-8")
+
+
+def add_voice(ffmpeg: str, name: str, source: Path, spans: list[tuple[float, float]] | None = None) -> Voice:
+    """Сохранить голос: из куска видео (spans — где говорит человек) или из звукового файла/записи
+    (тишина по краям убирается). Берётся не больше 20 секунд."""
+    import time as _time
+    import uuid
+
+    from glimpsy.editor.music import probe_audio
+
+    vid = uuid.uuid4().hex[:12]
+    folder = voices_dir() / vid
+    folder.mkdir(parents=True)
+    sample = folder / "sample.wav"
+    try:
+        if spans:
+            make_reference(ffmpeg, source, spans, sample, limit=MAX_SAMPLE_S)
+        else:
+            edge = "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.1"
+            r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-vn",
+                                "-af", f"{edge},areverse,{edge},areverse", "-t", str(MAX_SAMPLE_S), "-ac", "1",
+                                "-ar", str(SAMPLE_RATE), str(sample)], capture_output=True, **subprocess_flags())
+            if r.returncode != 0 or not sample.exists():
+                raise VoiceError("Не удалось прочитать звук: " + r.stderr.decode("utf-8", "replace")[-300:])
+        try:
+            seconds = probe_audio(ffmpeg, sample)
+        except ValueError:
+            seconds = 0.0
+        if seconds < MIN_SAMPLE_S:
+            raise VoiceError(f"Для голоса нужно хотя бы {MIN_SAMPLE_S:.0f} секунд речи, а здесь "
+                             f"{seconds:.1f} с. Возьмите кусок подлиннее.".replace(".", ",", 1))
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    v = Voice(vid, name.strip() or "Голос", seconds, _time.time())
+    _write_meta(v)
+    return v
+
+
+def rename_voice(voice_id: str, name: str) -> None:
+    v = get_voice(voice_id)
+    if v is not None and name.strip():
+        v.name = name.strip()
+        _write_meta(v)
+
+
+def delete_voice(voice_id: str) -> None:
+    if voice_id and "/" not in voice_id and "\\" not in voice_id:
+        shutil.rmtree(voices_dir() / voice_id, ignore_errors=True)
+
+
 # ---------------- звук: образец голоса и подгонка фразы ----------------
 
 def reference_spans(words, i: int, j: int, deleted: set[int], want: float = 9.0) -> list[tuple[float, float]]:
@@ -322,13 +437,16 @@ def reference_spans(words, i: int, j: int, deleted: set[int], want: float = 9.0)
     return spans
 
 
-def make_reference(ffmpeg: str, src: Path, spans: list[tuple[float, float]], out: Path) -> Path:
-    """Вырезать образец голоса из видео (без пауз между кусками)."""
+def make_reference(ffmpeg: str, src: Path, spans: list[tuple[float, float]], out: Path,
+                   limit: float = 0.0) -> Path:
+    """Вырезать образец голоса из видео (без пауз между кусками; limit — не длиннее стольких секунд)."""
     if not spans:
         raise VoiceError("Рядом с фразой нет вашей речи для образца голоса.")
     sel = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in spans)
+    cut = ["-t", f"{limit:.2f}"] if limit > 0 else []
     r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn",
-                        "-af", f"aselect='{sel}',asetpts=N/SR/TB", "-ac", "1", "-ar", str(SAMPLE_RATE), str(out)],
+                        "-af", f"aselect='{sel}',asetpts=N/SR/TB", *cut, "-ac", "1", "-ar", str(SAMPLE_RATE),
+                        str(out)],
                        capture_output=True, **subprocess_flags())
     if r.returncode != 0 or not out.exists():
         raise VoiceError("Не удалось взять образец голоса: " + r.stderr.decode("utf-8", "replace")[-300:])
