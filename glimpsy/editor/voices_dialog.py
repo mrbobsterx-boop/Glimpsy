@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -305,7 +306,9 @@ class RecordVoiceDialog(QDialog):
             self.btn.setText("Начать запись")
             self.mic.setEnabled(True)
             return
-        self.wav = Path(tempfile.mkstemp(suffix=".wav", prefix="glimpsy_voice_")[1])
+        fd, name = tempfile.mkstemp(suffix=".wav", prefix="glimpsy_voice_")
+        os.close(fd)                              # иначе на Windows файл занят и не удаляется
+        self.wav = Path(name)
         write_wav(self.wav, samples)
         self.accept()
 
