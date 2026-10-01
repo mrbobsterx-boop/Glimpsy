@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from glimpsy.assembler import unique_path
-from glimpsy.editor.project import ASPECTS, DEFAULT_FRAME, Clip, Project
+from glimpsy.editor.project import ASPECTS, DEFAULT_FRAME, Clip, Project, cover_zoom
 from glimpsy.paths import subprocess_flags
 from glimpsy.recorder.encoder import Encoder, software_encoder
 
@@ -249,11 +249,28 @@ def simple_cuts(project: Project, clips: list[Clip]) -> bool:
     for c in clips:
         if c.kind != "video" or abs(c.speed - 1.0) > 1e-6 or c.motion_for(project.aspect) != "none":
             return False
-        if tuple(c.frame_for(project.aspect)) != tuple(DEFAULT_FRAME) or c.clicks_shown():
+        if c.clicks_shown():
             return False
+        zoom = c.frame_for(project.aspect)[0]
+        if tuple(c.frame_for(project.aspect)) != tuple(DEFAULT_FRAME) and c.width and c.height:
+            W, H = ASPECTS[project.aspect]
+            if zoom < cover_zoom(c.width, c.height, W, H) - 1e-3:
+                return False                   # уменьшенный кадр — с размытым фоном, это обычный экспорт
         if c.own_cursor and c.cursor:
             return False
     return True
+
+
+def frame_chain(frame: tuple[float, float, float], W: int, H: int) -> str:
+    """Кадрирование куска: вписать в кадр (как есть) или приблизить и сдвинуть (например, вертикальный
+    кадр из горизонтального видео) — лишнее обрезается, недостающее добивается полями."""
+    zoom, fx, fy = frame
+    if tuple(frame) == tuple(DEFAULT_FRAME):
+        return f"scale={W}:{H}:force_original_aspect_ratio=decrease"
+    s = f"min({W}/iw,{H}/ih)*{zoom:.5f}"
+    return (f"scale=w='2*trunc(iw*{s}/2)':h='2*trunc(ih*{s}/2)',"
+            f"crop=w='min(iw,{W})':h='min(ih,{H})':"
+            f"x='max(0,min(iw-ow,(iw-ow)/2-({fx:.5f})*{W}))':y='max(0,min(ih-oh,(ih-oh)/2-({fy:.5f})*{H}))'")
 
 
 def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, enc: Encoder,
@@ -282,7 +299,7 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
             n += 1
         k = len(pads)
         black = f",{BLACK_FILL}" if c.hidden else ""
-        parts.append(f"[{vi}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        parts.append(f"[{vi}:v]{frame_chain(c.frame_for(project.aspect), W, H)},"
                      f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps}{black},format=yuv420p[v{k}]")
         fade = min(EDGE_FADE_S, dur / 4)
         fade_out = max(0.0, dur - fade)

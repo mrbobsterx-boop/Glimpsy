@@ -56,6 +56,26 @@ log = logging.getLogger(__name__)
 ASPECT_CHOICES = [("16:9", "16:9 — YouTube"), ("9:16", "9:16 — Reels, TikTok, Shorts")]
 
 
+def vlog_apply(p: Project, plan, fmt: str, subs_on: bool) -> None:
+    """План автомонтажа → пометки монтажа по тексту в проекте p (без пересборки кусков)."""
+    from glimpsy.editor import vlog
+
+    cuts = p.cuts
+    for src, idx in plan.deleted.items():
+        cuts.setdefault("deleted", {})[src] = sorted(set(cuts.get("deleted", {}).get(src, [])) | idx)
+    cuts["broll"] = {src: [list(r) for r in rng] for src, rng in plan.broll.items()}
+    cuts.update({"pause_cut": True, "mode": "auto"})
+    aspect = vlog.FORMATS[fmt][1]
+    p.aspect = aspect
+    W, H = ASPECTS[aspect]
+    for s in cuts.get("sources", []):
+        w, h = int(s.get("width", 0)), int(s.get("height", 0))
+        if aspect == "9:16" and w > h > 0:             # горизонтальное видео в вертикальный ролик — по центру
+            s.setdefault("frames", {})["9:16"] = [round(cover_zoom(w, h, W, H), 4), 0.0, 0.0]
+    if subs_on:
+        cuts["subtitles"] = True
+
+
 class _ExportBridge(QObject):
     progress = Signal(float, str)
     done = Signal(str)
@@ -80,9 +100,11 @@ QScrollArea {{ background: transparent; }}
 
 class EditorWindow(QMainWindow):
     def __init__(self, project_dir: Path, ffmpeg: str, encoder_getter: Callable[[], Encoder],
-                 fallback_output: Path, on_sessions: Callable[[], None] | None = None) -> None:
+                 fallback_output: Path, on_sessions: Callable[[], None] | None = None,
+                 on_open: Callable[[Path], None] | None = None) -> None:
         super().__init__()
         self.on_sessions = on_sessions      # «Все записи»: вернуться к списку сессий
+        self.on_open = on_open              # открыть другой проект (вариант автомонтажа) в своём окне
         self.ffmpeg = ffmpeg
         self.encoder_getter = encoder_getter
         self.fallback_output = fallback_output
@@ -510,6 +532,8 @@ class EditorWindow(QMainWindow):
         p.subs_lang_changed.connect(self._on_subs_lang)
         self._mt_cache = mt.Cache(self.project.dir)
         self._voice_job = False
+        if self.project.cuts.get("subtitles") and not any(t.auto for t in self.project.texts):
+            QTimer.singleShot(0, self._recut)          # проект от автомонтажа — субтитры ещё не созданы
         self._mt_busy = False
         self._mt_todo: set[str] = set()
         p.settings_changed.connect(self._on_cut_settings)
@@ -537,7 +561,9 @@ class EditorWindow(QMainWindow):
             plist = []
             if sw is not None:
                 marks = tr.pause_marks(cuts, s["src"])
-                plist = [(i, g, marks[i] if marks.get(i, 0) > 0 else None) for i, g in tr.shown_pauses(sw, cuts, marks)]
+                plist = [(i, g, marks[i] if marks.get(i, 0) > 0 else None,
+                          tr.broll_in_gap(cuts, s["src"], *self._gap_bounds(sw, i)))
+                         for i, g in tr.shown_pauses(sw, cuts, marks)]
             items.append((s["src"], s.get("label", Path(s["src"]).name), sw, plist,
                           cuts.get("word_text", {}).get(s["src"], {})))
         view = self.text_panel_t.view
@@ -576,6 +602,8 @@ class EditorWindow(QMainWindow):
             marks = tr.pause_marks(cuts, s["src"])
             for i, gap in tr.shown_pauses(sw, cuts, marks):
                 st = tr.pause_state(i, gap, cuts, marks)
+                if st == "cut" and tr.broll_in_gap(cuts, s["src"], *self._gap_bounds(sw, i)) > 0.05:
+                    st = "short"                           # в вырезанной паузе оставлены кадры автомонтажа
                 if st != "keep":
                     states[("p", si, i)] = st
         self.text_panel_t.view.apply_states(states)
@@ -834,11 +862,12 @@ class EditorWindow(QMainWindow):
         words = tr.output_words(self.project, self.tstore)
         lang, src_lang = self._subs_langs()
         if lang and lang != src_lang:
-            lines, missing = mt.translated_cues(words, self._mt_cache, self.project.cuts.get("subs_mt", "m2m"), lang)
+            lines, missing = mt.translated_cues(words, self._mt_cache, self.project.cuts.get("subs_mt", "m2m"), lang,
+                                                max_chars=self._subs_chars())
             if missing:
                 self._translate_later(missing)
         else:
-            lines = tr.cues(words)
+            lines = tr.cues(words, self._subs_chars())
         items = []
         for a, b, text in lines:
             items.append(TextItem(new_id(), text, round(a, 2), round(max(0.3, b - a), 2), pos=dict(pos),
@@ -846,6 +875,10 @@ class EditorWindow(QMainWindow):
         self.project.texts.extend(items)
         self.subs_panel.refresh(self.project, self.timeline.selected_text)
         return len(items)
+
+    def _subs_chars(self) -> int:
+        """Длина строки субтитров: в вертикальном ролике — короче."""
+        return 24 if self.project.aspect == "9:16" else 42
 
     def _subs_langs(self) -> tuple[str, str]:
         """(язык субтитров или "", язык речи)."""
@@ -967,6 +1000,14 @@ class EditorWindow(QMainWindow):
 
     # ---------- паузы ----------
 
+    @staticmethod
+    def _gap_bounds(sw, i: int) -> tuple[float, float]:
+        """Где во времени исходника пауза после слова i (−1 — перед первым словом)."""
+        w = sw.words
+        if i < 0:
+            return 0.0, w[0].start if w else sw.duration
+        return w[i].end, (w[i + 1].start if i + 1 < len(w) else sw.duration)
+
     def _pause_gap(self, si: int, i: int) -> float | None:
         src = self._sources()[si]["src"]
         sw = self.tstore.get(src)
@@ -1046,6 +1087,10 @@ class EditorWindow(QMainWindow):
                     m.addAction(f"Укоротить до {v:.1f} с".replace(".", ","),
                                 lambda v=v: self._apply_pause(si, i, v, "short"))
             m.addAction("Своя длина…", lambda: self._custom_pause(si, i, gap))
+            a, b = self._gap_bounds(sw, i)
+            if tr.broll_in_gap(tr.cuts_of(self.project), src, a, b) > 0.05:
+                m.addSeparator()
+                m.addAction("Убрать кадры автомонтажа из этой паузы", lambda: self._drop_broll(src, a, b))
         else:
             word = sw.words[i].text
             entry = self._respeak_entry(src, i)
@@ -1061,6 +1106,13 @@ class EditorWindow(QMainWindow):
                 m.addAction(f"Добавить «{word.strip('.,!?…:;')}» в слова-паразиты",
                             lambda: self._set_fillers(self._fillers() + [word.strip(".,!?…:;").lower()]))
         m.exec(pos)
+
+    def _drop_broll(self, src: str, a: float, b: float) -> None:
+        self.history.push(self.project.to_dict())
+        rng = self.project.cuts.get("broll", {}).get(src, [])
+        self.project.cuts["broll"][src] = [r for r in rng if not (r[0] < b and r[1] > a)]
+        self._recut()
+        self._tr_build(keep_scroll=True)
 
     def _custom_pause(self, si: int, i: int, gap: float) -> None:
         from PySide6.QtWidgets import QInputDialog
@@ -1402,6 +1454,7 @@ class EditorWindow(QMainWindow):
             self.history.push(self.project.to_dict())
             for c in self.project.clips:
                 c.set_frame(aspect, *src.frame_for(aspect))
+            self._frames_to_sources(self.project.clips)
             self.statusBar().showMessage("Кадрирование применено ко всем фрагментам", 3000)
             self._changed()
             return
@@ -1437,7 +1490,21 @@ class EditorWindow(QMainWindow):
                 c.set_frame(aspect, *DEFAULT_FRAME)
             elif what == "frame_fill":
                 c.set_frame(aspect, cover_zoom(c.width or W, c.height or H, W, H), 0.0, 0.0)
+        if what.startswith("frame"):
+            self._frames_to_sources(targets)
         self._changed()
+
+    def _frames_to_sources(self, clips: list) -> None:
+        """Монтаж по тексту: кадрирование — у всего видео (куски пересобираются после каждого выреза)."""
+        if not self.project.text_edit:
+            return
+        for c in clips:
+            for s in self._sources():
+                if s["src"] == c.src:
+                    s["frames"] = {k: list(v) for k, v in c.frames.items()}
+            for other in self.project.clips:
+                if other.src == c.src and other is not c:
+                    other.frames = {k: list(v) for k, v in c.frames.items()}
 
     # ---------- кадрирование мышью в окне просмотра ----------
 
@@ -1457,6 +1524,7 @@ class EditorWindow(QMainWindow):
         for c in self._selected_clips():
             z0, x0, y0 = self._frame_start.get(c.id, c.frame_for(aspect))
             c.set_frame(aspect, z0 * zm, x0 + dx, y0 + dy)
+        self._frames_to_sources(self._selected_clips())
         self._refresh_inspector()
         self._save_timer.start()
 
@@ -1472,6 +1540,7 @@ class EditorWindow(QMainWindow):
         for c in targets:
             z, x, y = c.frame_for(aspect)
             c.set_frame(aspect, z * factor, x, y)
+        self._frames_to_sources(targets)
         self._refresh_inspector()
         self._sync_preview()
         self._save_timer.start()
@@ -2013,6 +2082,9 @@ class EditorWindow(QMainWindow):
         self.statusBar().showMessage("В буфере обмена нет видео или картинки", 3000)
 
     def auto_montage(self) -> None:
+        if self.project.text_edit:
+            self.vlog_montage()                 # свои видео (влог) — монтаж по речи и красивым кадрам
+            return
         from glimpsy.editor import automontage
         from glimpsy.editor.automontage_dialog import AutomontageDialog
 
@@ -2039,6 +2111,130 @@ class EditorWindow(QMainWindow):
         if report.notes:
             text += " (" + "; ".join(report.notes) + ")"
         self.statusBar().showMessage(text + ". Отменить — Ctrl+Z", 10000)
+
+    def vlog_montage(self) -> None:
+        """Автомонтаж влога: речь — по расшифровке, кадры без речи — по картинке. Разные форматы."""
+        from glimpsy.editor import vlog
+        from glimpsy.editor.vlog_dialog import VlogDialog
+
+        self.player.pause()
+        missing = [s for s in self._sources() if self.tstore.get(s["src"]) is None]
+        if missing:
+            ask = QMessageBox.question(
+                self, "Автомонтаж влога",
+                "Речь в видео ещё не расшифрована — автомонтаж не поймёт, где вы говорите, и соберёт ролик "
+                "только из красивых кадров.\n\nСначала расшифровать речь (кнопка в панели «Текст»)?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            if ask == QMessageBox.StandardButton.Yes:
+                self.transcribe()
+                return
+            if ask != QMessageBox.StandardButton.No:
+                return
+        dlg = VlogDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        fmt, target, subs_on, separate = dlg.format, dlg.target_s, dlg.subs.isChecked(), dlg.separate.isChecked()
+        sources = [dict(s) for s in self._sources()]
+        store = tr.TranscriptStore(self.project.dir)
+        cuts = tr.cuts_of(self.project)
+        prog = QProgressDialog("Смотрю видео…", "Отмена", 0, 1000, self)
+        prog.setWindowTitle("Автомонтаж влога")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setAutoClose(False)
+        prog.setAutoReset(False)
+        bridge = _ExportBridge(self)
+        cancel = threading.Event()
+        prog.canceled.connect(cancel.set)
+        bridge.progress.connect(lambda f, t: (prog.setValue(int(f * 1000)), prog.setLabelText(t)))
+        result: dict = {}
+
+        def done(_m: str) -> None:
+            prog.close()
+            self._apply_vlog(result["plan"], fmt, subs_on, separate)
+
+        def failed(msg: str) -> None:
+            prog.close()
+            if msg:
+                QMessageBox.warning(self, "Автомонтаж влога", msg)
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+
+        def run() -> None:
+            try:
+                visuals = {}
+                for n, s in enumerate(sources):
+                    cache = store.dir / f"{tr.source_key(s['src'])}.vis.npz"
+                    label = s.get("label", Path(s["src"]).name)
+                    if cache.exists():
+                        visuals[s["src"]] = vlog.Visual.load(cache)
+                        continue
+                    visuals[s["src"]] = vis = vlog.analyze_visual(
+                        self.ffmpeg, Path(s["src"]), float(s["duration"]),
+                        lambda f, n=n, label=label: bridge.progress.emit(
+                            (n + f) / len(sources), f"Смотрю видео «{label}»… {int(f * 100)}%"), cancel)
+                    store.dir.mkdir(parents=True, exist_ok=True)
+                    vis.save(cache)
+                bridge.progress.emit(1.0, "Собираю ролик…")
+                result["plan"] = vlog.plan(
+                    fmt, sources, lambda src: (sw.words if (sw := store.get(src)) else None), store.envelope,
+                    visuals.get, lambda src: set(cuts.get("deleted", {}).get(src, [])), target)
+                bridge.done.emit("")
+            except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так
+                if cancel.is_set():
+                    bridge.failed.emit("")
+                    return
+                log.exception("Автомонтаж влога не удался")
+                bridge.failed.emit(str(e))
+
+        threading.Thread(target=run, daemon=True, name="vlog").start()
+        prog.show()
+
+    def _apply_vlog(self, plan, fmt: str, subs_on: bool, separate: bool) -> None:
+        from glimpsy.editor import vlog
+
+        if plan.length < 1.0:
+            QMessageBox.information(self, "Автомонтаж влога", "Не нашлось, что оставить: в видео нет ни речи, "
+                                    "ни подходящих кадров.")
+            return
+        if separate and self.on_open is not None:
+            self._save()
+            target = self._variant_project(fmt)
+        else:
+            self.history.push(self.project.to_dict())
+            target = self.project
+        vlog_apply(target, plan, fmt, subs_on)
+        label = vlog.FORMATS[fmt][0].split(" — ")[0]
+        msg = (f"{label}: {fmt_time(plan.length)} — речь {fmt_time(plan.talk)}, кадров без речи: {plan.shots}.")
+        if target is self.project:
+            self._recut()
+            self.preview.set_aspect(self.project.aspect)
+            for b in self.aspect_group.buttons():
+                b.setChecked(b.property("aspect") == self.project.aspect)
+            self._tr_build(keep_scroll=True)
+            self.statusBar().showMessage(msg + " Отменить — Ctrl+Z", 12000)
+        else:
+            tr.rebuild_clips(target, tr.TranscriptStore(target.dir))
+            target.save()
+            self.statusBar().showMessage(msg + " Открыт отдельным проектом.", 12000)
+            self.on_open(target.dir)
+
+    def _variant_project(self, fmt: str) -> Project:
+        """Копия проекта (расшифровка — тоже) для варианта автомонтажа; исходники не копируются."""
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        d = self.project.dir.with_name(f"{self.project.dir.name}_{fmt}_{stamp}")
+        d.mkdir(parents=True)
+        shutil.copy2(self.project.dir / "edit.json", d / "edit.json")
+        if (self.project.dir / "transcript").exists():
+            shutil.copytree(self.project.dir / "transcript", d / "transcript",
+                            ignore=shutil.ignore_patterns("work"))
+        if (self.project.dir / "voice").exists():
+            shutil.copytree(self.project.dir / "voice", d / "voice")
+        p = Project.load(d)
+        p.name = f"{self.project.name} — {'короткий' if fmt == 'short' else 'влог'}"
+        p.created = time.time()
+        return p
 
     def before_after(self) -> None:
         from glimpsy.editor import before_after as ba

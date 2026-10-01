@@ -44,10 +44,11 @@ def _sec(v: float) -> str:
     return f"{v:.1f}".replace(".", ",")
 
 
-def _pause_text(gap: float, short: float | None = None) -> str:
+def _pause_text(gap: float, short: float | None = None, broll: float = 0.0) -> str:
+    shots = f" · кадры {_sec(broll)} с" if broll > 0.05 else ""
     if short is not None and short < gap:
-        return f"[пауза {_sec(gap)} → {_sec(short)} с] "
-    return f"[пауза {_sec(gap)} с] "
+        return f"[пауза {_sec(gap)} → {_sec(short)} с{shots}] "
+    return f"[пауза {_sec(gap)} с{shots}] "
 
 
 class TranscriptView(QTextEdit):
@@ -78,7 +79,8 @@ class TranscriptView(QTextEdit):
     # ---------- построение ----------
 
     def build(self, sources: list[tuple], scroll: int | None = None) -> None:
-        """sources: [(путь видео, подпись, слова или None, [(номер, длина паузы, укорочена до | None)],
+        """sources: [(путь видео, подпись, слова или None, [(номер, длина паузы, укорочена до | None,
+        секунд кадров автомонтажа)],
         {номер слова: исправленный текст})].
 
         Каждое предложение — с новой строки; паузы — там, где они в речи.
@@ -103,7 +105,7 @@ class TranscriptView(QTextEdit):
             if sw is None:
                 cur.insertText("(ещё не расшифровано)", head)
                 continue
-            gaps = {i: (g, short) for i, g, short in plist}
+            gaps = {x[0]: tuple(x[1:]) for x in plist}
             if -1 in gaps:
                 self._put(cur, ("p", si, -1), _pause_text(*gaps[-1]))
             for i, w in enumerate(words):

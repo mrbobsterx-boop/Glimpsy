@@ -384,8 +384,11 @@ class TimelinePlayer(QObject):
         self.position.emit(self.t)
 
     def shutdown(self) -> None:
+        # pause, а не stop: у Qt (движок FFmpeg) stop() звукового плеера изредка зависает навсегда,
+        # если звук ещё подгружается, — окно редактора тогда не закрывалось. Плееры всё равно
+        # удаляются вместе с окном.
         self.timer.stop()
         for d in self.decks:
-            d.mp.stop()
-        self.music.stop()
-        self.voice.stop()
+            d.mp.pause()
+        self.music.pause()
+        self.voice.pause()

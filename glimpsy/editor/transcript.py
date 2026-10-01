@@ -438,6 +438,26 @@ def mark_spans(sw: SourceWords, marked: set[int], cuts: dict,
     return out
 
 
+def add_ranges(ranges: list[tuple[float, float]], extra: list[tuple[float, float]],
+               dur: float) -> list[tuple[float, float]]:
+    """Добавить куски (кадры без речи от автомонтажа) к оставленным: объединить и упорядочить."""
+    if not extra:
+        return ranges
+    allr = sorted([*ranges, *((max(0.0, a), min(dur, b)) for a, b in extra if b > a)])
+    out: list[tuple[float, float]] = []
+    for a, b in allr:
+        if out and a <= out[-1][1] + 0.05:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((round(a, 3), round(b, 3)))
+    return out
+
+
+def broll_in_gap(cuts: dict, src: str, a: float, b: float) -> float:
+    """Сколько секунд кадров автомонтажа оставлено внутри паузы [a, b]."""
+    return sum(max(0.0, min(b, y) - max(a, x)) for x, y in cuts.get("broll", {}).get(src, []))
+
+
 def split_ranges(ranges: list[tuple[float, float]], muted: list[tuple[float, float]],
                  hidden: list[tuple[float, float]]) -> list[tuple[float, float, bool, bool]]:
     """Оставленные куски → куски с пометками: (начало, конец, без звука, без картинки)."""
@@ -492,13 +512,16 @@ def rebuild_clips(project, store: TranscriptStore) -> None:
         else:
             env = store.envelope(src)
             rngs = kept_ranges(sw, set(deleted_all.get(src, [])), set(), cuts, env, pause_marks(cuts, src))
+            rngs = add_ranges(rngs, [(float(a), float(b)) for a, b in cuts.get("broll", {}).get(src, [])],
+                              float(s["duration"]))
             muted = set(cuts.get("muted", {}).get(src, [])) | respoken(cuts, src)
             pieces = split_ranges(rngs, mark_spans(sw, muted, cuts, env),
                                   mark_spans(sw, set(cuts.get("hidden", {}).get(src, [])), cuts, env))
         for a, b, m, h in pieces:
             clips.append(Clip(new_id(), "video", src, float(s["duration"]), a, b, muted=m, hidden=h,
                               has_audio=bool(s.get("has_audio", True)), width=int(s.get("width", 0)),
-                              height=int(s.get("height", 0)), label=s.get("label", Path(src).name)))
+                              height=int(s.get("height", 0)), label=s.get("label", Path(src).name),
+                              frames={k: list(v) for k, v in s.get("frames", {}).items()}))
     project.clips = clips
 
 
