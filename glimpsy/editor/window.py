@@ -331,6 +331,8 @@ class EditorWindow(QMainWindow):
         tool("mic", "Запись", "Записать голос, камеру или то и другое — прямо в ролик, с места курсора",
              self.record)
         rl.addStretch(1)
+        tool("folder", "Папки", "Где лежат ролики, проекты, модели, переводчик, голоса и журналы — открыть",
+             self.show_folders)
         tool("chart-column", "Статистика", "Сколько работали и где — только для вас", self.show_stats)
         self.shortcuts = ShortcutsPanel()
         keys_btn = tool("keyboard", "Клавиши", "Все горячие клавиши", checkable=True)
@@ -2446,6 +2448,11 @@ class EditorWindow(QMainWindow):
         if last is not None:
             self.timeline.select_overlay(last.id)
         self._layer_changed()
+
+    def show_folders(self) -> None:
+        from glimpsy.ui.folders import FoldersDialog, places
+
+        FoldersDialog(places(self.fallback_output, self.project.dir), self).exec()
 
     def show_stats(self) -> None:
         from glimpsy.editor.stats_dialog import StatsDialog

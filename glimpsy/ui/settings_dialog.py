@@ -53,6 +53,8 @@ class SettingsDialog(QDialog):
             ("mic", "Звук", "Микрофон, звук компьютера и голосовой режим", self._audio_tab()),
             ("video", "Камера", "Окошко с веб-камеры в углу ролика", self._camera_tab()),
             ("info", "Система", "Сведения о компьютере и записи", self._system_tab(status)),
+            ("folder", "Папки программы", "Где что лежит: ролики, проекты, модели, голоса, журналы",
+             self._folders_tab()),
         ]
         self._camera_page = pages[5][3]
         self.nav = QListWidget()
@@ -483,6 +485,11 @@ class SettingsDialog(QDialog):
                 v.addWidget(_hint("• " + lim))
         v.addStretch(1)
         return w
+
+    def _folders_tab(self) -> QWidget:
+        from glimpsy.ui.folders import FoldersWidget, places
+
+        return FoldersWidget(places(self.s.output_dir))
 
     # ---------- логика ----------
 
