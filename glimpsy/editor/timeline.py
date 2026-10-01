@@ -340,7 +340,8 @@ class TimelineWidget(QWidget):
         f.setPixelSize(10)
         p.setFont(f)
         fm = p.fontMetrics()
-        badges = ("★ " if c.priority else "") + ("без звука · " if c.muted and c.has_audio else "")
+        badges = ("★ " if c.priority else "") + ("без звука · " if c.muted and c.has_audio else "") + \
+            ("без картинки · " if getattr(c, "hidden", False) else "")
         if round(c.speed, 2) != 1.0:
             badges += f"×{round(c.speed, 2):g} · "
         mode = c.motion_for(self.project.aspect) if self.project is not None else "none"

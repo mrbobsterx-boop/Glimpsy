@@ -77,6 +77,7 @@ class Clip:
     base_speed: float = 0.0       # скорость до автомонтажа (чтобы повторный запуск не ускорял ещё раз)
     region: list = field(default_factory=list)   # «зум на область»: [x, y, ширина, высота] в долях кадра
     own_cursor: bool = False      # записано без курсора — курсор рисует Glimpsy (вид и размер — у проекта)
+    hidden: bool = False          # картинка убрана (чёрный кадр), звук идёт — монтаж по тексту
 
     def clicks_shown(self) -> list:
         return self.clicks if self.click_fx and self.kind == "video" else []

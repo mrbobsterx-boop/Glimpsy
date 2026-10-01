@@ -503,6 +503,8 @@ class EditorWindow(QMainWindow):
         p.view.play_toggle.connect(self.player.toggle)
         p.view.context.connect(self._text_menu)
         p.view.edit_word.connect(self._edit_word)
+        p.view.selection_menu.connect(self._selection_menu)
+        p.selection_action.connect(lambda a: self._selection_do(a, p.view.keys_in_selection()))
         p.subtitles_toggled.connect(self._toggle_text_subs)
         p.settings_changed.connect(self._on_cut_settings)
         p.pause_length.connect(self._on_pause_length)
@@ -557,6 +559,10 @@ class EditorWindow(QMainWindow):
                     counts[f] = (n + len(hits), g + sum(1 for i in hits if i in gone))
                     for i in hits:
                         states[("w", si, i)] = "filler"
+            for field, flag in (("muted", "mute"), ("hidden", "hide")):
+                for i in cuts.get(field, {}).get(s["src"], []):
+                    k = ("w", si, i)
+                    states[k] = flag if states.get(k, "keep") in ("keep", "filler") else states[k] + " " + flag
             for i in gone:
                 states[("w", si, i)] = "cut"
             marks = tr.pause_marks(cuts, s["src"])
@@ -575,6 +581,41 @@ class EditorWindow(QMainWindow):
         if self.project.cuts.get("subtitles"):
             self._make_text_subs()
         self._changed()
+
+    # ---------- звук и картинка отдельно ----------
+
+    def _selection_do(self, action: str, keys: list) -> None:
+        """С выделенным текстом: вырезать всё, убрать звук, убрать картинку или вернуть всё."""
+        words = [(si, i) for kind, si, i in keys if kind == "w"]
+        if not words:
+            self.statusBar().showMessage("Сначала выделите слова в тексте", 3000)
+            return
+        if action == "cut":
+            self._cut_tokens(keys)
+            return
+        self.history.push(self.project.to_dict())
+        if action == "restore":
+            for si, i in words:
+                src = self._sources()[si]["src"]
+                for field in ("deleted", "muted", "hidden"):
+                    self._mark(field, src, i, False)
+        else:
+            field = "muted" if action == "mute" else "hidden"
+            # всё выделенное уже помечено — значит, вернуть; иначе — пометить
+            on = not all(i in self.project.cuts.get(field, {}).get(self._sources()[si]["src"], [])
+                         for si, i in words)
+            for si, i in words:
+                self._mark(field, self._sources()[si]["src"], i, on)
+        self._recut()
+
+    def _selection_menu(self, keys: list, pos) -> None:
+        m = QMenu(self)
+        m.addAction("Вырезать (звук и картинку)", lambda: self._selection_do("cut", keys))
+        m.addAction("Убрать / вернуть только звук", lambda: self._selection_do("mute", keys))
+        m.addAction("Убрать / вернуть только картинку", lambda: self._selection_do("hide", keys))
+        m.addSeparator()
+        m.addAction("Вернуть всё", lambda: self._selection_do("restore", keys))
+        m.exec(pos)
 
     # ---------- субтитры из текста ----------
 

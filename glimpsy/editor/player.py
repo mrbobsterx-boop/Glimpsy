@@ -298,9 +298,18 @@ class TimelinePlayer(QObject):
         elif status == S.InvalidMedia:
             log.warning("Не удалось открыть %s", d.src)
 
+    def _black(self) -> QImage:
+        if getattr(self, "_black_img", None) is None:
+            self._black_img = QImage(16, 9, QImage.Format.Format_RGB32)
+            self._black_img.fill(0)
+        return self._black_img
+
     def _on_frame(self, d: _Deck, frame: QVideoFrame) -> None:
         c = self._current()
         if d is not self.deck or c is None or c.kind != "video":
+            return
+        if c.hidden:                                   # картинка убрана — чёрный кадр, звук идёт
+            self.frame.emit(self._black())
             return
         img = frame.toImage()
         if not img.isNull():
@@ -337,9 +346,9 @@ class TimelinePlayer(QObject):
         g = 1.0
         prev = clips[idx - 1] if idx > 0 else None
         nxt = clips[idx + 1] if idx + 1 < len(clips) else None
-        if prev is not None and not (prev.src == c.src and abs(prev.out_s - c.in_s) < 1e-3):
+        if prev is not None and not (prev.src == c.src and abs(prev.out_s - c.in_s) < 1e-3 and not prev.muted):
             g = min(g, (src - c.in_s) / EDGE_FADE_S)
-        if nxt is not None and not (nxt.src == c.src and abs(nxt.in_s - c.out_s) < 1e-3):
+        if nxt is not None and not (nxt.src == c.src and abs(nxt.in_s - c.out_s) < 1e-3 and not nxt.muted):
             g = min(g, (c.out_s - src) / EDGE_FADE_S)
         g = max(0.0, min(1.0, g))
         vol = self.volume * g
@@ -362,7 +371,11 @@ class TimelinePlayer(QObject):
             self.active = 1 - self.active
             self.idx = nxt
             self._setup_deck(self.deck, c)
-            self.deck.audio.setVolume(self.volume * 0.25)       # начало куска — тихо, дальше нарастает
+            prev = self.project.clips[nxt - 1]
+            if not (prev.src == c.src and abs(prev.out_s - c.in_s) < 1e-3 and not prev.muted):
+                self.deck.audio.setVolume(self.volume * 0.25)   # начало куска после склейки — тихо, дальше нарастает
+            else:
+                self.deck.audio.setVolume(self.volume)
             self.deck.go(c.in_s, True)
             old.mp.pause()
             self._preload(nxt + 1)

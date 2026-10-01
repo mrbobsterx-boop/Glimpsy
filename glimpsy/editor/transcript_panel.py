@@ -31,6 +31,8 @@ COL_GONE = QColor("#6B7280")
 COL_PAUSE = QColor("#7C8494")
 COL_SHORT = QColor("#5FC9D3")
 COL_FILLER = QColor("#F2A65A")
+COL_MUTE = QColor("#8FB3FF")          # без звука (картинка идёт)
+COL_HIDE_BG = QColor(150, 90, 200, 70)  # без картинки (звук идёт)
 COL_NOW = QColor(34, 174, 187, 90)
 SENTENCE_END = ".?!…"
 
@@ -55,6 +57,7 @@ class TranscriptView(QTextEdit):
     play_toggle = Signal()
     context = Signal(tuple, QPoint)  # правая кнопка по слову или паузе (ключ, где показать меню)
     edit_word = Signal(tuple)        # двойной щелчок по слову — исправить его
+    selection_menu = Signal(list, QPoint)   # правая кнопка по выделенному тексту
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -128,7 +131,8 @@ class TranscriptView(QTextEdit):
     # ---------- состояние слов ----------
 
     def apply_states(self, states: dict[tuple, str]) -> None:
-        """states: ключ → "keep" | "cut" | "short" | "filler" — перекрашиваем только то, что изменилось."""
+        """states: ключ → "keep" | "cut" | "short" | "filler" | слова "mute" / "hide" через пробел
+        (без звука / без картинки) — перекрашиваем только то, что изменилось."""
         cur = QTextCursor(self.document())
         cur.beginEditBlock()
         for key, (a, b) in self._spans.items():
@@ -141,10 +145,15 @@ class TranscriptView(QTextEdit):
             fmt = QTextCharFormat()
             fmt.setProperty(KEY, "|".join(map(str, key)))
             pause = key[0] == "p"
-            fmt.setForeground(COL_GONE if st == "cut" else COL_SHORT if st == "short" else
-                              COL_FILLER if st == "filler" else COL_PAUSE if pause else COL_TEXT)
-            fmt.setFontStrikeOut(st == "cut")
-            if st == "filler":
+            flags = set(st.split())
+            fmt.setForeground(COL_GONE if "cut" in flags else COL_SHORT if "short" in flags else
+                              COL_MUTE if "mute" in flags else COL_FILLER if "filler" in flags else
+                              COL_PAUSE if pause else COL_TEXT)
+            fmt.setFontStrikeOut("cut" in flags)
+            fmt.setFontItalic("mute" in flags)
+            if "hide" in flags:
+                fmt.setBackground(COL_HIDE_BG)
+            if "filler" in flags:
                 fmt.setFontUnderline(True)
             cur.setCharFormat(fmt)
         cur.endEditBlock()
@@ -211,6 +220,10 @@ class TranscriptView(QTextEdit):
         super().mouseDoubleClickEvent(e)
 
     def contextMenuEvent(self, e) -> None:
+        keys = self.keys_in_selection()
+        if keys:
+            self.selection_menu.emit(keys, e.globalPos())
+            return
         key = self._key_at(self.cursorForPosition(e.pos()).position())
         if key is not None:
             self.context.emit(key, e.globalPos())
@@ -242,6 +255,7 @@ class TranscriptPanel(QFrame):
     fillers_cut = Signal(list)            # вырезать все найденные: [слово из списка]
     fillers_restore = Signal(list)        # вернуть все найденные
     subtitles_toggled = Signal(bool)      # субтитры на видео из текста: вкл / выкл
+    selection_action = Signal(str)        # с выделенным текстом: "cut" | "mute" | "hide" | "restore"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -369,6 +383,21 @@ class TranscriptPanel(QFrame):
         self.stats = QLabel()
         self.stats.setProperty("role", "hint")
         self.view = TranscriptView()
+        # что сделать с выделенным текстом
+        act = QHBoxLayout()
+        act.setSpacing(4)
+        for key, text, tip in (
+                ("cut", "Вырезать", "Убрать и звук, и картинку (Delete)"),
+                ("mute", "Без звука", "Картинка идёт, звук выключен. Ещё раз — вернуть звук"),
+                ("hide", "Без картинки", "Звук идёт, вместо картинки — чёрный кадр (сверху можно положить "
+                                         "своё фото или видео). Ещё раз — вернуть картинку"),
+                ("restore", "Вернуть", "Вернуть выделенному и звук, и картинку")):
+            b = theme.mark(QPushButton(text), "ghost")
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # выделение в тексте не пропадает
+            b.clicked.connect(lambda _=False, k=key: self.selection_action.emit(k))
+            act.addWidget(b)
+        act.addStretch(1)
         self.hint = QLabel()
         self.hint.setProperty("role", "hint")
         self.hint.setWordWrap(True)
@@ -385,6 +414,7 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.filler_box)
         lay.addWidget(self.subs)
         lay.addWidget(self.stats)
+        lay.addLayout(act)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.hint)
         self.setMinimumWidth(380)
@@ -404,7 +434,8 @@ class TranscriptPanel(QFrame):
         self.pause_box.setVisible(key in ("auto", "manual"))
         self.filler_box.setVisible(key == "fillers")
         self.pause_lbl.setText("Вырезать паузы длиннее" if key == "auto" else "Показывать паузы длиннее")
-        common = "Щелчок по слову — перейти, двойной — исправить. Выделите текст и Delete — вырезать. " \
+        common = "Щелчок по слову — перейти, двойной — исправить. Выделите текст и Delete — вырезать, или " \
+                 "кнопки над текстом: синий курсив — без звука, фиолетовый фон — без картинки. " \
                  "Щелчок по зачёркнутому — вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить."
         extra = {
             "auto": "Длинные паузы вырезаются сами. Щелчок по паузе — оставить её; правая кнопка — своя длина.",

@@ -411,6 +411,54 @@ def find_fillers(words: list[Word], fillers: list[str]) -> dict[str, list[int]]:
     return out
 
 
+def mark_spans(sw: SourceWords, marked: set[int], cuts: dict,
+               env: np.ndarray | None = None) -> list[tuple[float, float]]:
+    """Где во времени исходника лежат помеченные слова (подряд идущие — одним куском).
+
+    Края — в тишине между словами: не дальше запаса от слова и не дальше середины паузы.
+    """
+    words, dur = sw.words, sw.duration
+    pad = max(0.03, float(cuts["pad"]))
+    out: list[tuple[float, float]] = []
+    idx = sorted(i for i in marked if 0 <= i < len(words))
+    k = 0
+    while k < len(idx):
+        first = last = idx[k]
+        while k + 1 < len(idx) and idx[k + 1] == last + 1:
+            k += 1
+            last = idx[k]
+        k += 1
+        lo = words[first - 1].end if first > 0 else 0.0
+        hi = words[last + 1].start if last + 1 < len(words) else dur
+        a = words[first].start - min(pad, (words[first].start - lo) / 2)
+        b = words[last].end + min(pad, (hi - words[last].end) / 2)
+        a = _snap(env, a, lo, words[first].start) if a > 0 else 0.0
+        b = _snap(env, b, words[last].end, hi) if b < dur else dur
+        out.append((round(max(0.0, a), 3), round(min(dur, b), 3)))
+    return out
+
+
+def split_ranges(ranges: list[tuple[float, float]], muted: list[tuple[float, float]],
+                 hidden: list[tuple[float, float]]) -> list[tuple[float, float, bool, bool]]:
+    """Оставленные куски → куски с пометками: (начало, конец, без звука, без картинки)."""
+    def inside(t: float, spans) -> bool:
+        return any(a <= t < b for a, b in spans)
+
+    out: list[tuple[float, float, bool, bool]] = []
+    for a, b in ranges:
+        cuts_at = sorted({a, b, *(x for sp in (muted, hidden) for s in sp for x in s if a < x < b)})
+        for x, y in zip(cuts_at, cuts_at[1:]):
+            if y - x < 0.02:
+                continue
+            mid = (x + y) / 2
+            m, h = inside(mid, muted), inside(mid, hidden)
+            if out and out[-1][1] == x and out[-1][2:] == (m, h):
+                out[-1] = (out[-1][0], y, m, h)
+            else:
+                out.append((round(x, 3), round(y, 3), m, h))
+    return out
+
+
 def rebuild_clips(project, store: TranscriptStore) -> None:
     """Пересобрать фрагменты проекта по расшифровке и пометкам (для проектов «монтаж по тексту»)."""
     from glimpsy.editor.project import Clip, new_id
@@ -421,10 +469,15 @@ def rebuild_clips(project, store: TranscriptStore) -> None:
     for s in cuts.get("sources", []):
         src = s["src"]
         sw = store.get(src)
-        rngs = [(0.0, float(s["duration"]))] if sw is None else kept_ranges(
-            sw, set(deleted_all.get(src, [])), set(), cuts, store.envelope(src), pause_marks(cuts, src))
-        for a, b in rngs:
-            clips.append(Clip(new_id(), "video", src, float(s["duration"]), a, b,
+        if sw is None:
+            pieces = [(0.0, float(s["duration"]), False, False)]
+        else:
+            env = store.envelope(src)
+            rngs = kept_ranges(sw, set(deleted_all.get(src, [])), set(), cuts, env, pause_marks(cuts, src))
+            pieces = split_ranges(rngs, mark_spans(sw, set(cuts.get("muted", {}).get(src, [])), cuts, env),
+                                  mark_spans(sw, set(cuts.get("hidden", {}).get(src, [])), cuts, env))
+        for a, b, m, h in pieces:
+            clips.append(Clip(new_id(), "video", src, float(s["duration"]), a, b, muted=m, hidden=h,
                               has_audio=bool(s.get("has_audio", True)), width=int(s.get("width", 0)),
                               height=int(s.get("height", 0)), label=s.get("label", Path(src).name)))
     project.clips = clips
@@ -536,7 +589,7 @@ def output_words(project, store: TranscriptStore) -> list[tuple[float, float, st
     for c in project.clips:
         sw = store.get(c.src)
         if sw is not None:
-            gone = set(deleted_all.get(c.src, []))
+            gone = set(deleted_all.get(c.src, [])) | set(cuts.get("muted", {}).get(c.src, []))
             fixed = fixed_all.get(c.src, {})
             for i, w in enumerate(sw.words):
                 if i in gone or w.end <= c.in_s or w.start >= c.out_s:

@@ -133,6 +133,9 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
         cursor_idx = 1 if use_audio else 2
         cmd += cur.input_args(style, cur.height_px(src_size[0], size), clip.out_s - clip.in_s + 1)
     graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size, cursor_idx, (style, size))
+    if clip.hidden:                              # картинка убрана — чёрный кадр (до передачи кодеку)
+        tail = f",{enc.filter_suffix}[v]"
+        graph = graph[:-len(tail)] + f",{BLACK_FILL}{tail}" if graph.endswith(tail) else graph
     if use_audio:
         graph += ";[0:a]asetpts=PTS-STARTPTS," + ",".join(atempo_chain(clip.speed)) + "[a]"
         amap = "[a]"
@@ -232,6 +235,13 @@ def default_output(project: Project, fallback_dir: Path) -> Path:
 
 CHUNK_CLIPS = 24          # столько кусков склеивает один запуск FFmpeg
 EDGE_FADE_S = 0.035       # звук на стыках плавно затихает и нарастает — склейка не режет слух
+BLACK_FILL = "drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill"     # картинка убрана — чёрный кадр
+
+
+def joined_audio(a: Clip, b: Clip) -> bool:
+    """Звук двух соседних кусков идёт подряд из одного места записи — на стыке не затихать."""
+    return (a.src == b.src and abs(a.out_s - b.in_s) < 1e-3 and a.has_audio and b.has_audio
+            and not a.muted and not b.muted)
 
 
 def simple_cuts(project: Project, clips: list[Clip]) -> bool:
@@ -246,7 +256,8 @@ def simple_cuts(project: Project, clips: list[Clip]) -> bool:
     return True
 
 
-def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, enc: Encoder) -> list[str]:
+def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, enc: Encoder,
+                  edges: list[tuple[bool, bool]] | None = None) -> list[str]:
     """Один FFmpeg: несколько кусков (каждый — точный переход к началу в исходнике) → один файл.
 
     Видео — сразу в итоговом качестве, звук — без сжатия (сожмём один раз в конце, чтобы на
@@ -257,7 +268,8 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *enc.global_args]
     parts, pads = [], []
     n = 0
-    for c in clips:
+    edges = edges or [(True, True)] * len(clips)
+    for c, (fin, fout) in zip(clips, edges):
         dur = c.out_s - c.in_s
         cmd += ["-ss", f"{c.in_s:.3f}", "-t", f"{dur:.3f}", "-i", str(project.path_of(c))]
         vi = n
@@ -269,13 +281,15 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
             ai = n
             n += 1
         k = len(pads)
+        black = f",{BLACK_FILL}" if c.hidden else ""
         parts.append(f"[{vi}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps},format=yuv420p[v{k}]")
+                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps}{black},format=yuv420p[v{k}]")
         fade = min(EDGE_FADE_S, dur / 4)
         fade_out = max(0.0, dur - fade)
-        parts.append(f"[{ai}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"afade=t=in:d={fade:.3f}:curve=qsin,"
-                     f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}:curve=qsin[a{k}]")
+        fades = ([f"afade=t=in:d={fade:.3f}:curve=qsin"] if fin else []) + \
+                ([f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}:curve=qsin"] if fout else [])
+        parts.append(f"[{ai}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+                     + "".join("," + f for f in fades) + f"[a{k}]")
         pads.append(f"[v{k}][a{k}]")
     parts.append(f"{''.join(pads)}concat=n={len(pads)}:v=1:a=1[cv][ca]")
     parts.append(f"[cv]{enc.filter_suffix}[vout]")
@@ -287,6 +301,8 @@ def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, 
                 progress: Callable[[float, str], None], cancel: threading.Event) -> Encoder:
     """Нарезка → готовое видео: пачками по CHUNK_CLIPS кусков, затем склейка без перекодирования."""
     chunks = [clips[i:i + CHUNK_CLIPS] for i in range(0, len(clips), CHUNK_CLIPS)]
+    edges = [(i == 0 or not joined_audio(clips[i - 1], c), i + 1 == len(clips) or not joined_audio(c, clips[i + 1]))
+             for i, c in enumerate(clips)]
     files = []
     for i, chunk in enumerate(chunks):
         if cancel.is_set():
@@ -295,13 +311,13 @@ def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, 
         progress(i / (len(chunks) + 0.3), f"Куски {done + 1}–{done + len(chunk)} из {len(clips)}")
         part = work / f"chunk_{i:04d}.mkv"
         try:
-            _run(chunk_command(ffmpeg, project, chunk, part, enc), cancel)
+            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)]), cancel)
         except ExportError:
             if not enc.hw:
                 raise
             log.warning("Аппаратный кодек не справился при экспорте, пробуем программный")
             enc = software_encoder()
-            _run(chunk_command(ffmpeg, project, chunk, part, enc), cancel)
+            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)]), cancel)
         files.append(part)
     progress(len(chunks) / (len(chunks) + 0.3), "Склейка")
     lst = work / "chunks.txt"

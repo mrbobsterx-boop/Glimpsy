@@ -102,6 +102,20 @@ def test_find_fillers():
     assert tr.norm_word("Ё-моё!") == tr.norm_word("емое")
 
 
+def test_mute_and_hide_split_pieces():
+    sw = sw_simple()
+    cuts = dict(tr.DEFAULT_CUTS)
+    spans = tr.mark_spans(sw, {3}, cuts)                    # «э»: край — посередине паузы, не дальше запаса
+    assert spans == [(3.95, 4.45)]
+    rngs = tr.kept_ranges(sw, set(), set(), cuts)
+    pieces = tr.split_ranges(rngs, spans, [])
+    assert pieces == [(0.85, 2.05, False, False), (3.35, 3.95, False, False), (3.95, 4.45, True, False),
+                      (4.45, 5.15, False, False)]
+    # картинку убрали у «два три» (через вырезанную паузу), звук — у «три»
+    both = tr.split_ranges(rngs, tr.mark_spans(sw, {2}, cuts), tr.mark_spans(sw, {1, 2}, cuts))
+    assert [(m, h) for _a, _b, m, h in both] == [(False, False), (False, True), (True, True), (False, False)]
+
+
 def test_cut_snaps_to_quiet_point():
     sw = sw_simple()
     env = env_with_speech(7.0, [(1.0, 1.9), (3.5, 5.0)])
@@ -305,6 +319,18 @@ def test_text_modes_pauses_and_fillers(tmp_path, qt_app, monkeypatch):
         assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три четыре"]
         panel.subs.setChecked(False)
         assert not any(t.auto for t in w.project.texts)
+        # звук и картинка отдельно: выделили «три», убрали звук; «четыре» — картинку
+        w._selection_do("mute", [("w", 0, 2)])
+        assert panel.view._state[("w", 0, 2)] == "mute"
+        assert [c.muted for c in w.project.clips if c.in_s >= 3.0][:1] == [True]
+        w._selection_do("hide", [("w", 0, 4)])
+        assert any(c.hidden and not c.muted for c in w.project.clips)
+        assert panel.view._state[("w", 0, 4)] == "hide"
+        total = w.project.total
+        w._selection_do("mute", [("w", 0, 2)])                 # ещё раз — звук вернулся
+        assert not any(c.muted for c in w.project.clips) and w.project.total == pytest.approx(total)
+        w._selection_do("restore", [("w", 0, 4)])
+        assert not any(c.hidden for c in w.project.clips)
     finally:
         w.close()
 
@@ -345,6 +371,47 @@ def test_fast_cut_export_keeps_sync(tmp_path):
     assert len(onsets) >= 55
     drift = [t - round(t * 2) / 2 for t in onsets]
     assert max(abs(d) for d in drift) < 0.05, drift[-5:]
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_export_without_picture_or_sound(tmp_path):
+    """Кусок «без картинки» — чёрный, звук идёт без провала; кусок «без звука» — тихий, картинка есть."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from glimpsy.editor import export as ex
+    from glimpsy.editor.project import Clip, Project
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "src.mp4"
+    subprocess.run([FFMPEG, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi",
+                    "-i", "color=c=white:size=320x240:rate=30:d=4", "-f", "lavfi", "-i", "sine=f=440:r=48000:d=4",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=4.0, has_audio=True, width=320, height=240, fps=30)])
+    src = p.clips[0].src
+    p.clips = [Clip("a", "video", src, 4.0, 0.0, 1.0, has_audio=True, width=320, height=240),
+               Clip("b", "video", src, 4.0, 1.0, 2.0, has_audio=True, width=320, height=240, hidden=True),
+               Clip("c", "video", src, 4.0, 2.0, 3.0, has_audio=True, width=320, height=240, muted=True)]
+    assert ex.simple_cuts(p, p.clips)
+    out = ex.export_project(FFMPEG, p, tmp_path / "out.mp4", software_encoder())
+
+    def luma(t):
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-ss", str(t), "-i", str(out), "-frames:v", "1",
+                              "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+        return np.frombuffer(raw, np.uint8).mean()
+
+    assert luma(0.5) > 150 and luma(1.5) < 20 and luma(2.5) > 150      # (по бокам — поля кадра)
+    pcm = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(out), "-ac", "1", "-ar", "8000", "-f", "f32le", "-"],
+                         capture_output=True).stdout
+    a = np.frombuffer(pcm, np.float32)
+
+    def rms(t0, t1):
+        x = a[int(t0 * 8000):int(t1 * 8000)]
+        return float(np.sqrt((x * x).mean()))
+
+    assert rms(1.3, 1.7) > 0.06 and rms(2.3, 2.7) < 0.005
+    assert rms(0.99, 1.01) > 0.06                         # на стыке «картинка → без картинки» звук не проседает
 
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
