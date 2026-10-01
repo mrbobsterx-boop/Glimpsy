@@ -502,6 +502,8 @@ class EditorWindow(QMainWindow):
         p.view.delete_keys.connect(self._cut_tokens)
         p.view.play_toggle.connect(self.player.toggle)
         p.view.context.connect(self._text_menu)
+        p.view.edit_word.connect(self._edit_word)
+        p.subtitles_toggled.connect(self._toggle_text_subs)
         p.settings_changed.connect(self._on_cut_settings)
         p.pause_length.connect(self._on_pause_length)
         p.fillers_changed.connect(self._set_fillers)
@@ -528,7 +530,8 @@ class EditorWindow(QMainWindow):
             if sw is not None:
                 marks = tr.pause_marks(cuts, s["src"])
                 plist = [(i, g, marks[i] if marks.get(i, 0) > 0 else None) for i, g in tr.shown_pauses(sw, cuts, marks)]
-            items.append((s["src"], s.get("label", Path(s["src"]).name), sw, plist))
+            items.append((s["src"], s.get("label", Path(s["src"]).name), sw, plist,
+                          cuts.get("word_text", {}).get(s["src"], {})))
         view = self.text_panel_t.view
         self.text_panel_t.set_settings(cuts)
         view.build(items, view.verticalScrollBar().value() if keep_scroll else None)
@@ -567,9 +570,62 @@ class EditorWindow(QMainWindow):
         self.text_panel_t.set_stats(sum(float(s["duration"]) for s in self._sources()), self.project.total)
 
     def _recut(self) -> None:
-        """Пометки изменились — пересобрать фрагменты из расшифровки."""
+        """Пометки изменились — пересобрать фрагменты из расшифровки (и субтитры из текста, если включены)."""
         tr.rebuild_clips(self.project, self.tstore)
+        if self.project.cuts.get("subtitles"):
+            self._make_text_subs()
         self._changed()
+
+    # ---------- субтитры из текста ----------
+
+    def _make_text_subs(self) -> int:
+        """Автосубтитры ← оставленные слова (во времени готового ролика). Сдвиги и стиль общие."""
+        track = self.project.track_for("subtitles").id
+        old = [t for t in self.project.texts if t.auto]
+        pos = old[0].pos if old and all(t.pos == old[0].pos for t in old) else {}
+        self.project.texts = [t for t in self.project.texts if not t.auto]
+        items = []
+        for a, b, text in tr.cues(tr.output_words(self.project, self.tstore)):
+            items.append(TextItem(new_id(), text, round(a, 2), round(max(0.3, b - a), 2), pos=dict(pos),
+                                  auto=True, track=track))
+        self.project.texts.extend(items)
+        self.subs_panel.refresh(self.project, self.timeline.selected_text)
+        return len(items)
+
+    def _toggle_text_subs(self, on: bool) -> None:
+        self.history.push(self.project.to_dict())
+        self.project.cuts["subtitles"] = on
+        if on:
+            n = self._make_text_subs()
+            self.statusBar().showMessage(f"Субтитров на видео: {n}. Они сами обновляются при вырезании; "
+                                         f"вид меняется в панели «Субтитры» или у любого из них.", 8000)
+        else:
+            self.project.texts = [t for t in self.project.texts if not t.auto]
+            self.subs_panel.refresh(self.project, self.timeline.selected_text)
+        self._changed()
+
+    def _edit_word(self, key: tuple) -> None:
+        """Исправить слово, которое распознавание услышало неправильно (видео не меняется)."""
+        from PySide6.QtWidgets import QInputDialog
+
+        _kind, si, i = key
+        src = self._sources()[si]["src"]
+        sw = self.tstore.get(src)
+        if sw is None:
+            return
+        cur = tr.word_text(self.project.cuts, src, i, sw.words[i].text)
+        text, ok = QInputDialog.getText(self, "Исправить слово", "Как правильно:", text=cur)
+        text = " ".join(text.split())
+        if not ok or not text or text == cur:
+            return
+        self.history.push(self.project.to_dict())
+        fixes = self.project.cuts.setdefault("word_text", {}).setdefault(src, {})
+        if text == sw.words[i].text:
+            fixes.pop(str(i), None)
+        else:
+            fixes[str(i)] = text
+        self._recut()
+        self._tr_build(keep_scroll=True)
 
     def _mark(self, field: str, src: str, idx: int, on: bool) -> None:
         marks = self.project.cuts.setdefault(field, {})

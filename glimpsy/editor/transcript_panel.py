@@ -17,7 +17,7 @@ from bisect import bisect_right
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar,
     QPushButton, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -54,6 +54,7 @@ class TranscriptView(QTextEdit):
     delete_keys = Signal(list)       # выделенные слова и паузы — вырезать
     play_toggle = Signal()
     context = Signal(tuple, QPoint)  # правая кнопка по слову или паузе (ключ, где показать меню)
+    edit_word = Signal(tuple)        # двойной щелчок по слову — исправить его
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -73,7 +74,8 @@ class TranscriptView(QTextEdit):
     # ---------- построение ----------
 
     def build(self, sources: list[tuple], scroll: int | None = None) -> None:
-        """sources: [(путь видео, подпись, слова или None, [(номер, длина паузы, укорочена до | None)])].
+        """sources: [(путь видео, подпись, слова или None, [(номер, длина паузы, укорочена до | None)],
+        {номер слова: исправленный текст})].
 
         Каждое предложение — с новой строки; паузы — там, где они в речи.
         """
@@ -86,7 +88,7 @@ class TranscriptView(QTextEdit):
         head = QTextCharFormat()
         head.setFontWeight(QFont.Weight.Bold)
         head.setForeground(COL_PAUSE)
-        for si, (_src, label, sw, plist) in enumerate(sources):
+        for si, (_src, label, sw, plist, fixes) in enumerate(sources):
             if len(sources) > 1:
                 if si:
                     cur.insertBlock()
@@ -101,13 +103,14 @@ class TranscriptView(QTextEdit):
             if -1 in gaps:
                 self._put(cur, ("p", si, -1), _pause_text(*gaps[-1]))
             for i, w in enumerate(words):
-                self._put(cur, ("w", si, i), w.text)
+                text = fixes.get(str(i), w.text)
+                self._put(cur, ("w", si, i), text)
                 cur.insertText(" ", QTextCharFormat())
                 if i in gaps:
                     self._put(cur, ("p", si, i), _pause_text(*gaps[i]))
                 nxt = words[i + 1].start if i + 1 < len(words) else None
                 # каждое предложение — с новой строки (и после очень долгой паузы — тоже)
-                if nxt is not None and (w.text[-1:] in SENTENCE_END or nxt - w.end > 1.5):
+                if nxt is not None and (text[-1:] in SENTENCE_END or nxt - w.end > 1.5):
                     cur.insertBlock()
         cur.endEditBlock()
         if scroll is None:
@@ -200,6 +203,13 @@ class TranscriptView(QTextEdit):
         if key is not None:
             self.clicked.emit(key)
 
+    def mouseDoubleClickEvent(self, e) -> None:
+        key = self._key_at(self.cursorForPosition(e.position().toPoint()).position())
+        if key is not None and key[0] == "w":
+            self.edit_word.emit(key)
+            return
+        super().mouseDoubleClickEvent(e)
+
     def contextMenuEvent(self, e) -> None:
         key = self._key_at(self.cursorForPosition(e.pos()).position())
         if key is not None:
@@ -231,6 +241,7 @@ class TranscriptPanel(QFrame):
     fillers_changed = Signal(list)        # список слов-паразитов поправили
     fillers_cut = Signal(list)            # вырезать все найденные: [слово из списка]
     fillers_restore = Signal(list)        # вернуть все найденные
+    subtitles_toggled = Signal(bool)      # субтитры на видео из текста: вкл / выкл
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -351,6 +362,10 @@ class TranscriptPanel(QFrame):
         fl.addLayout(arow)
         fl.addLayout(brow)
 
+        self.subs = QCheckBox("Субтитры на видео из этого текста")
+        self.subs.setToolTip("Субтитры берутся из расшифровки и сами меняются, когда вы что-то вырезаете\n"
+                             "или исправляете слово (двойной щелчок по слову). Вид — как у любых субтитров.")
+        self.subs.toggled.connect(lambda on: None if self._loading else self.subtitles_toggled.emit(on))
         self.stats = QLabel()
         self.stats.setProperty("role", "hint")
         self.view = TranscriptView()
@@ -368,6 +383,7 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.mode)
         lay.addWidget(self.pause_box)
         lay.addWidget(self.filler_box)
+        lay.addWidget(self.subs)
         lay.addWidget(self.stats)
         lay.addWidget(self.view, 1)
         lay.addWidget(self.hint)
@@ -388,8 +404,8 @@ class TranscriptPanel(QFrame):
         self.pause_box.setVisible(key in ("auto", "manual"))
         self.filler_box.setVisible(key == "fillers")
         self.pause_lbl.setText("Вырезать паузы длиннее" if key == "auto" else "Показывать паузы длиннее")
-        common = "Щелчок по слову — перейти. Выделите текст и Delete — вырезать. Щелчок по зачёркнутому — " \
-                 "вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить."
+        common = "Щелчок по слову — перейти, двойной — исправить. Выделите текст и Delete — вырезать. " \
+                 "Щелчок по зачёркнутому — вернуть. Пробел — пуск/пауза, Ctrl+Z — отменить."
         extra = {
             "auto": "Длинные паузы вырезаются сами. Щелчок по паузе — оставить её; правая кнопка — своя длина.",
             "manual": "Паузы сами не режутся. Щелчок по паузе — вырезать её (ещё раз — вернуть); "
@@ -410,6 +426,7 @@ class TranscriptPanel(QFrame):
         self.mode.setCurrentIndex(max(0, self.mode.findData(mode)))
         self.pause_min.setValue(float(cuts["pause_min"]))
         self.pad.setValue(float(cuts["pad"]))
+        self.subs.setChecked(bool(cuts.get("subtitles")))
         self._show_mode(mode)
         self._loading = False
 

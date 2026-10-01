@@ -289,6 +289,22 @@ def test_text_modes_pauses_and_fillers(tmp_path, qt_app, monkeypatch):
         assert w.project.cuts["deleted"][src] == [3]
         panel.fillers_restore.emit(["э"])
         assert w.project.cuts["deleted"][src] == []
+        # субтитры из текста: появились на видео и следуют за вырезами и исправлениями
+        panel.subs.setChecked(True)
+        texts = [t.text for t in w.project.texts if t.auto]
+        assert texts == ["раз два.", "три э четыре"]
+        assert all(t.track == w.project.track_for("subtitles").id for t in w.project.texts)
+        w._cut_tokens([("w", 0, 3)])
+        assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три четыре"]
+        from PySide6.QtWidgets import QInputDialog
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("пять", True)))
+        w._edit_word(("w", 0, 4))
+        assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три пять"]
+        assert "три э пять" in panel.view.toPlainText()
+        w.undo()
+        assert [t.text for t in w.project.texts if t.auto] == ["раз два.", "три четыре"]
+        panel.subs.setChecked(False)
+        assert not any(t.auto for t in w.project.texts)
     finally:
         w.close()
 

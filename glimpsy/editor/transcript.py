@@ -530,39 +530,53 @@ def output_words(project, store: TranscriptStore) -> list[tuple[float, float, st
     """Оставленные слова во времени готового ролика: [(начало, конец, текст)]."""
     cuts = cuts_of(project)
     deleted_all = cuts.get("deleted", {})
+    fixed_all = cuts.get("word_text", {})
     out = []
     t0 = 0.0
     for c in project.clips:
         sw = store.get(c.src)
         if sw is not None:
             gone = set(deleted_all.get(c.src, []))
+            fixed = fixed_all.get(c.src, {})
             for i, w in enumerate(sw.words):
                 if i in gone or w.end <= c.in_s or w.start >= c.out_s:
                     continue
                 a = t0 + (max(w.start, c.in_s) - c.in_s) / c.speed
                 b = t0 + (min(w.end, c.out_s) - c.in_s) / c.speed
-                out.append((a, b, w.text))
+                out.append((a, b, fixed.get(str(i), w.text)))
         t0 += c.duration
     return out
 
 
-def make_srt(words: list[tuple[float, float, str]], max_chars: int = 42, max_gap: float = 0.8) -> str:
-    """Слова → субтитры: строка до max_chars знаков, новая — после паузы или конца предложения."""
-    cues: list[list[tuple[float, float, str]]] = []
+def word_text(cuts: dict, src: str, i: int, text: str) -> str:
+    """Слово с учётом исправления, сделанного в тексте."""
+    return cuts.get("word_text", {}).get(src, {}).get(str(i), text)
+
+
+def cues(words: list[tuple[float, float, str]], max_chars: int = 42,
+         max_gap: float = 0.8) -> list[tuple[float, float, str]]:
+    """Слова → фразы субтитров: строка до max_chars знаков, новая — после паузы или конца предложения."""
+    groups: list[list[tuple[float, float, str]]] = []
     for w in words:
-        cur = cues[-1] if cues else None
+        cur = groups[-1] if groups else None
         if cur is None or w[0] - cur[-1][1] > max_gap or \
                 len(" ".join(x[2] for x in cur)) + 1 + len(w[2]) > max_chars or \
                 re.search(r"[.!?…]$", cur[-1][2]):
-            cues.append([w])
+            groups.append([w])
         else:
             cur.append(w)
-    lines = []
-    for n, cue in enumerate(cues, 1):
-        a = cue[0][0]
-        b = max(cue[-1][1], a + 0.5)
-        if n < len(cues):
-            b = min(b, cues[n][0][0])
-        lines.append(f"{n}\n{_srt_time(a)} --> {_srt_time(b)}\n{' '.join(x[2] for x in cue)}\n")
-    return "\n".join(lines)
+    out = []
+    for n, g in enumerate(groups):
+        a = g[0][0]
+        b = max(g[-1][1], a + 0.5)
+        if n + 1 < len(groups):
+            b = min(b, groups[n + 1][0][0])
+        out.append((a, b, " ".join(x[2] for x in g)))
+    return out
+
+
+def make_srt(words: list[tuple[float, float, str]], max_chars: int = 42, max_gap: float = 0.8) -> str:
+    """Слова → файл субтитров .srt."""
+    return "\n".join(f"{n}\n{_srt_time(a)} --> {_srt_time(b)}\n{text}\n"
+                     for n, (a, b, text) in enumerate(cues(words, max_chars, max_gap), 1))
 
