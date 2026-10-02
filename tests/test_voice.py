@@ -343,6 +343,8 @@ def test_download_resumes_after_broken_connection(tmp_path, monkeypatch):
 
 def test_model_files_ready_check(tmp_path, monkeypatch):
     monkeypatch.setattr(voice, "home", lambda: _mkdir(tmp_path / "voice"))
+    # настоящие размеры — гигабайты; на Windows такой файл честно пишется на диск — берём маленькие
+    monkeypatch.setattr(voice, "MODEL_FILES", {"a.pt": 1000, "b.safetensors": 2000})
     assert not voice.model_ready()
     d = _mkdir(voice.model_dir())
     for f, n in voice.MODEL_FILES.items():
