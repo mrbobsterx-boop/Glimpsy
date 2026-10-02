@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import http.client
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,7 @@ def clean_env() -> dict:
         env.pop("LD_LIBRARY_PATH", None)
     env["HF_HOME"] = str(home() / "hf")
     env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    env["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     return env
@@ -131,27 +133,107 @@ def ssl_context():
     return ctx
 
 
-def _download(url: str, dest: Path, progress: Callable[[float], None], cancel: threading.Event) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "Glimpsy"})
+def _download(url: str, dest: Path, progress: Callable[[float], None], cancel: threading.Event,
+              size: int = 0, attempts: int = 40) -> None:
+    """Скачать файл с докачкой: связь оборвалась — продолжаем с того же места (до attempts раз)."""
+    import time as _time
+
     part = dest.with_name(dest.name + ".part")
-    with urllib.request.urlopen(req, timeout=60, context=ssl_context()) as r, open(part, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        got = 0
-        while True:
-            if cancel.is_set():
-                raise Cancelled()
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            got += len(chunk)
-            if total:
-                progress(got / total)
-    part.replace(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, attempts + 1):
+        have = part.stat().st_size if part.exists() else 0
+        headers = {"User-Agent": "Glimpsy"}
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60, context=ssl_context()) as r:
+                if have and r.status != 206:                 # сервер не умеет докачку — сначала
+                    have = 0
+                total = size or (have + int(r.headers.get("Content-Length") or 0))
+                with open(part, "ab" if have else "wb") as f:
+                    got = have
+                    while True:
+                        if cancel.is_set():
+                            raise Cancelled()
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if total:
+                            progress(min(1.0, got / total))
+            if size and part.stat().st_size < size:
+                raise OSError(f"скачано {part.stat().st_size} из {size} байт")
+            part.replace(dest)
+            return
+        except Cancelled:
+            raise
+        except (OSError, http.client.HTTPException) as e:          # обрыв, тайм-аут, сброс соединения
+            log.warning("Скачивание %s прервалось (попытка %d): %s", dest.name, attempt, e)
+            if attempt == attempts:
+                raise VoiceError(f"Не удалось скачать {dest.name}: связь с интернетом всё время обрывается "
+                                 f"({e}). Попробуйте ещё раз — скачанное не пропадёт.") from e
+            for _ in range(min(30, 2 * attempt) * 10):
+                if cancel.is_set():
+                    raise Cancelled()
+                _time.sleep(0.1)
 
 
 MEMORY_HINT = ("Похоже, компьютеру не хватило памяти — система остановила нейросеть. Закройте браузер, игры "
                "и другие тяжёлые программы и попробуйте ещё раз (уже скачанное заново не качается).")
+
+
+MODEL_URL = "https://huggingface.co/ResembleAI/chatterbox/resolve/main/"
+MODEL_FILES = {                    # файл: размер, байт
+    "ve.pt": 5698626,
+    "t3_mtl23ls_v2.safetensors": 2143989752,
+    "s3gen.pt": 1057165844,
+    "grapheme_mtl_merged_expanded_v1.json": 69989,
+    "conds.pt": 107374,
+    "Cangjie5_TC.json": 1920163,
+}
+
+
+def model_dir() -> Path:
+    return home() / "model"
+
+
+def model_ready() -> bool:
+    d = model_dir()
+    return all((d / f).exists() and (d / f).stat().st_size == n for f, n in MODEL_FILES.items())
+
+
+def _take_from_old_cache(name: str, size: int, dest: Path) -> None:
+    """Прошлые версии качали нейросеть в другой папке (hf/) — готовый файл берём оттуда."""
+    for f in (home() / "hf" / "hub").glob(f"models--ResembleAI--chatterbox/snapshots/*/{name}"):
+        try:
+            real = f.resolve()
+            if real.is_file() and real.stat().st_size == size:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(real), str(dest))
+                return
+        except OSError:
+            continue
+
+
+def download_model(progress: Callable[[float, str], None], cancel: threading.Event) -> None:
+    """Веса нейросети (≈ 3,2 ГБ) — напрямую, с докачкой и понятным ходом скачивания."""
+    total = sum(MODEL_FILES.values())
+    done = 0
+    for f, n in MODEL_FILES.items():
+        dest = model_dir() / f
+        if not (dest.exists() and dest.stat().st_size == n):
+            _take_from_old_cache(f, n, dest)
+        if not (dest.exists() and dest.stat().st_size == n):
+            def prog(x: float, before=done, n=n) -> None:
+                got = before + x * n
+                progress(got / total, f"Скачиваю голосовую нейросеть: {got / 1e9:.1f} из {total / 1e9:.1f} ГБ"
+                         .replace(".", ","))
+            _download(MODEL_URL + f, dest, prog, cancel, size=n)
+        done += n
+        progress(done / total, f"Скачиваю голосовую нейросеть: {done / 1e9:.1f} из {total / 1e9:.1f} ГБ"
+                 .replace(".", ","))
 
 
 def install_log() -> Path:
@@ -163,10 +245,14 @@ def _killed(code: int) -> bool:
     return code in (-9, 137, -6) or (sys.platform.startswith("win") and code in (3221225477, -1073741819))
 
 
-def _run(cmd: list[str], cancel: threading.Event, on_line: Callable[[str], None] | None = None) -> None:
+def _run(cmd: list[str], cancel: threading.Event, on_line: Callable[[str], None] | None = None,
+         offline: bool = False) -> None:
     log.info("Голосовой модуль: %s", " ".join(cmd))
+    env = clean_env()
+    if offline:
+        env["HF_HUB_OFFLINE"] = "1"
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                            errors="replace", env=clean_env(), **subprocess_flags())
+                            errors="replace", env=env, **subprocess_flags())
     tail: list[str] = []
     assert proc.stdout is not None
     with open(install_log(), "a", encoding="utf-8") as full:          # весь вывод — в журнал установки
@@ -227,10 +313,13 @@ def install(progress: Callable[[float, str], None], cancel: threading.Event | No
     _run(pip + torch_args, cancel, step(0.05, 0.45, "Ставлю PyTorch (≈ 1 ГБ)…", 40))
     # 3. нейросеть озвучки
     _run(pip + PACKAGES, cancel, step(0.45, 0.7, "Ставлю нейросеть озвучки…", 120))
-    # 4. программа-«озвучиватель» и веса нейросети (≈ 3 ГБ), один пробный запуск
+    # 4. веса нейросети (≈ 3,2 ГБ) — сами, с докачкой
+    download_model(lambda f, t: progress(0.7 + 0.25 * f, t), cancel)
+    shutil.rmtree(home() / "hf", ignore_errors=True)    # старая папка скачивания больше не нужна
+    # 5. пробный запуск: нейросеть загружается с диска (без интернета)
     write_worker()
-    _run([py, str(root / "glimpsy_voice.py"), "--warmup"], cancel,
-         step(0.7, 1.0, "Скачиваю голосовую нейросеть (≈ 3 ГБ)…", 30))
+    _run([py, str(root / "glimpsy_voice.py"), "--warmup", "--model", str(model_dir())], cancel,
+         step(0.95, 1.0, "Проверяю голосовую нейросеть (до минуты)…", 12), offline=True)
     (root / "ready").write_text(PY_TAG, encoding="utf-8")
     progress(1.0, "Голосовой модуль готов")
 
@@ -264,13 +353,46 @@ def low_memory_loading(torch):
     torch.nn.Module.load_state_dict = lsd
 
 
+def mem_free():
+    """Сколько памяти свободно (Linux), для журнала."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return f"{int(line.split()[1]) // 1024} МБ свободно"
+    except OSError:
+        pass
+    return ""
+
+
+def stage(text):
+    print(f"[шаг] {text} {mem_free()}", flush=True)
+
+
+def on_term(signum, frame):
+    # систему попросили закрыть процесс — оставим в журнале, на каком шаге и сколько было памяти
+    print(f"[остановлено системой: сигнал {signum}] {mem_free()}", flush=True)
+    sys.exit(128 + signum)
+
+
 def main():
+    import signal
+    signal.signal(signal.SIGTERM, on_term)
+    stage("запуск")
     import torch
     torch.set_num_threads(max(2, min(8, __import__("os").cpu_count() or 4)))
     low_memory_loading(torch)
+    # китайская часть при каждом запуске качает из интернета свою модель (~35 МБ) — нам не нужна
+    sys.modules["spacy_pkuseg"] = None
+    stage("загружаю библиотеки")
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS, Conditionals
     import torchaudio
-    model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
+    stage("загружаю нейросеть с диска")
+    if "--model" in sys.argv:
+        model = ChatterboxMultilingualTTS.from_local(sys.argv[sys.argv.index("--model") + 1], "cpu")
+    else:
+        model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
+    stage("нейросеть загружена")
     if "--warmup" in sys.argv:
         print("warmup ok", flush=True)
         return
@@ -323,9 +445,13 @@ class Speaker:
         if not installed():
             raise VoiceError("Голосовой модуль ещё не установлен.")
         worker = write_worker()                    # свежая версия — вдруг Glimpsy обновился
-        self.proc = subprocess.Popen([str(python_exe()), str(worker)], stdin=subprocess.PIPE,
+        args = ["--model", str(model_dir())] if model_ready() else []
+        env = clean_env()
+        if args:
+            env["HF_HUB_OFFLINE"] = "1"                # всё уже на диске — в интернет не ходим
+        self.proc = subprocess.Popen([str(python_exe()), str(worker), *args], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=open(home() / "worker.log", "w"), text=True,
-                                     encoding="utf-8", errors="replace", env=clean_env(), **subprocess_flags())
+                                     encoding="utf-8", errors="replace", env=env, **subprocess_flags())
         self._read(lambda d: d.get("ready"))
 
     def _read(self, done: Callable[[dict], bool]) -> dict:

@@ -292,3 +292,58 @@ def test_install_step_killed_by_system_says_memory(tmp_path, monkeypatch):
 
 def test_worker_loads_weights_without_a_second_copy():
     assert "low_memory_loading(torch)" in voice.WORKER and '"mmap", True' in voice.WORKER
+
+
+def test_download_resumes_after_broken_connection(tmp_path, monkeypatch):
+    """Слабый интернет: связь рвётся посреди файла — докачиваем с того же места, а не с начала."""
+    import http.server
+    import threading
+
+    data = bytes(range(256)) * 4000                                     # ~1 МБ
+    calls = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            calls.append(rng)
+            if rng is None:                                             # первый раз — обрыв на середине
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data[: len(data) // 2])
+                self.wfile.flush()
+                self.connection.shutdown(2)
+                return
+            start = int(rng.split("=")[1].rstrip("-"))
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+            self.send_header("Content-Length", str(len(data) - start))
+            self.end_headers()
+            self.wfile.write(data[start:])
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(voice.time if hasattr(voice, "time") else __import__("time"), "sleep", lambda s: None)
+    try:
+        dest = tmp_path / "model.bin"
+        seen = []
+        voice._download(f"http://127.0.0.1:{srv.server_address[1]}/m", dest, seen.append, threading.Event(),
+                        size=len(data))
+        assert dest.read_bytes() == data
+        assert calls[0] is None and calls[1] == f"bytes={len(data) // 2}-"   # докачка, а не заново
+        assert seen[-1] == 1.0
+    finally:
+        srv.shutdown()
+
+
+def test_model_files_ready_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(voice, "home", lambda: _mkdir(tmp_path / "voice"))
+    assert not voice.model_ready()
+    d = _mkdir(voice.model_dir())
+    for f, n in voice.MODEL_FILES.items():
+        with open(d / f, "wb") as fh:
+            fh.truncate(n)                                              # «пустой» файл нужного размера
+    assert voice.model_ready()
