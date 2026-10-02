@@ -297,14 +297,6 @@ def remap_cuts(cuts: dict, src: str, mapping: list[int]) -> None:
     wt = cuts.get("word_text", {}).get(src)
     if wt is not None:
         cuts["word_text"][src] = {str(new(int(k))): v for k, v in wt.items() if new(int(k)) >= 0}
-    rs = cuts.get("respeak", {}).get(src)
-    if rs is not None:
-        out = []
-        for r in rs:
-            idx = [new(k) for k in range(int(r["i"]), int(r["j"]) + 1) if new(k) >= 0]
-            if idx:
-                out.append({**r, "i": idx[0], "j": idx[-1]})
-        cuts["respeak"][src] = out
 
 
 def refine_words(words: list[Word], env: np.ndarray | None) -> list[Word]:
@@ -673,14 +665,6 @@ def split_ranges(ranges: list[tuple[float, float]], muted: list[tuple[float, flo
     return out
 
 
-def respoken(cuts: dict, src: str) -> set[int]:
-    """Слова, вместо которых звучит переозвучка (их исходный звук выключен)."""
-    out: set[int] = set()
-    for r in cuts.get("respeak", {}).get(src, []):
-        out.update(range(int(r["i"]), int(r["j"]) + 1))
-    return out
-
-
 def output_time(project, src: str, t: float) -> float | None:
     """Момент t исходника src → время в готовом ролике (None — этот момент вырезан)."""
     acc = 0.0
@@ -709,7 +693,7 @@ def rebuild_clips(project, store: TranscriptStore) -> None:
             rngs = kept_ranges(sw, set(deleted_all.get(src, [])), set(), cuts, env, pause_marks(cuts, src))
             rngs = add_ranges(rngs, [(float(a), float(b)) for a, b in cuts.get("broll", {}).get(src, [])],
                               float(s["duration"]))
-            muted = set(cuts.get("muted", {}).get(src, [])) | respoken(cuts, src)
+            muted = set(cuts.get("muted", {}).get(src, []))
             mspans = mark_spans(sw, muted, cuts, env)
             hspans = mark_spans(sw, set(cuts.get("hidden", {}).get(src, [])), cuts, env)
             pieces = []
@@ -893,19 +877,15 @@ def output_words(project, store: TranscriptStore) -> list[tuple[float, float, st
     for c in project.clips:
         sw = store.get(c.src)
         if sw is not None:
-            gone = set(deleted_all.get(c.src, [])) | (set(cuts.get("muted", {}).get(c.src, []))
-                                                        - respoken(cuts, c.src))
+            gone = set(deleted_all.get(c.src, [])) | set(cuts.get("muted", {}).get(c.src, []))
             fixed = fixed_all.get(c.src, {})
-            # переозвученная фраза звучит на месте всех своих слов
-            ends = {int(r["i"]): sw.words[min(int(r["j"]), len(sw.words) - 1)].end
-                    for r in cuts.get("respeak", {}).get(c.src, [])}
             for i, w in enumerate(sw.words):
                 if i in gone or w.end <= c.in_s or w.start >= c.out_s:
                     continue
                 a = t0 + (max(w.start, c.in_s) - c.in_s) / c.speed
-                b = t0 + (min(ends.get(i, w.end), c.out_s) - c.in_s) / c.speed
+                b = t0 + (min(w.end, c.out_s) - c.in_s) / c.speed
                 text = fixed.get(str(i), w.text)
-                if text:                                    # пусто — слово заменено переозвучкой
+                if text:                                    # пустое — слово убрали из текста
                     out.append((a, b, text))
         t0 += c.duration
     return out

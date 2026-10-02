@@ -509,13 +509,12 @@ def test_remap_cuts_after_cleaning():
     words = ["*звук", "отзыва*", "раз", "два.", "*поет*", "три"]
     _kept, mapping = tr.drop_noise([Word(t, k, k + 0.5) for k, t in enumerate(words)])
     cuts = {"deleted": {"/v": [1, 3, 5]}, "muted": {"/v": [2]}, "pause_marks": {"/v": {"-1": 0.0, "4": 0.5}},
-            "word_text": {"/v": {"2": "Раз", "4": "x"}}, "respeak": {"/v": [{"id": "r", "i": 3, "j": 5}]},
+            "word_text": {"/v": {"2": "Раз", "4": "x"}},
             "kept_pauses": {"/v": [4]}}
     tr.remap_cuts(cuts, "/v", mapping)
     assert cuts["deleted"]["/v"] == [1, 2] and cuts["muted"]["/v"] == [0]
     assert cuts["pause_marks"]["/v"] == {"-1": 0.0, "1": 0.5}          # пауза после «*поет*» — после «два.»
     assert cuts["word_text"]["/v"] == {"0": "Раз"}
-    assert cuts["respeak"]["/v"][0]["i"] == 1 and cuts["respeak"]["/v"][0]["j"] == 2
     assert cuts["kept_pauses"]["/v"] == [1]
 
 

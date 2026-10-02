@@ -529,6 +529,9 @@ class EditorWindow(QMainWindow):
             if mapping is not None:
                 tr.remap_cuts(self.project.cuts, s["src"], mapping)
                 cleaned = True
+        # переозвучки больше нет: её фразы из старых проектов убираем, исходный звук и слова — как были
+        if self._drop_respeak():
+            cleaned = True
         if cleaned:
             QTimer.singleShot(0, self._recut)
         elif any(self.tstore.get(s["src"]) for s in self.project.cuts.get("sources", [])):
@@ -545,11 +548,6 @@ class EditorWindow(QMainWindow):
         p.subtitles_toggled.connect(self._toggle_text_subs)
         p.subs_lang_changed.connect(self._on_subs_lang)
         self._mt_cache = mt.Cache(self.project.dir)
-        self._voice_job = False
-        # голосовая нейросеть: 5 минут без озвучки — выгружаем, чтобы не держала память
-        self._voice_idle = QTimer(self, interval=30_000)
-        self._voice_idle.timeout.connect(self._unload_voice_if_idle)
-        self._voice_idle.start()
         self._trim_timer = QTimer(self, singleShot=True, interval=500)
         self._trim_timer.timeout.connect(self._trims_done)
         if self.project.cuts.get("subtitles") and not any(t.auto for t in self.project.texts):
@@ -566,6 +564,20 @@ class EditorWindow(QMainWindow):
         p.retime_requested.connect(lambda: self.transcribe(retime=True))
         p.cancel_requested.connect(lambda: self._tr_cancel is not None and self._tr_cancel.set())
         self._tr_build()
+
+    def _drop_respeak(self) -> bool:
+        cuts = self.project.cuts
+        entries = cuts.pop("respeak", None)
+        auto = [o for o in self.project.overlays if getattr(o, "auto", "")]
+        if not entries and not auto:
+            return False
+        for src, rs in (entries or {}).items():
+            fixes = cuts.get("word_text", {}).get(src, {})
+            for r in rs:
+                for k in range(int(r["i"]), int(r["j"]) + 1):
+                    fixes.pop(str(k), None)
+        self.project.overlays = [o for o in self.project.overlays if not getattr(o, "auto", "")]
+        return True
 
     def _sources(self) -> list[dict]:
         return self.project.cuts.get("sources", [])
@@ -613,8 +625,6 @@ class EditorWindow(QMainWindow):
                     counts[f] = (n + len(hits), g + sum(1 for i in hits if i in gone))
                     for i in hits:
                         states[("w", si, i)] = "filler"
-            for i in tr.respoken(cuts, s["src"]):
-                states[("w", si, i)] = "voice"
             for field, flag in (("muted", "mute"), ("hidden", "hide")):
                 for i in cuts.get(field, {}).get(s["src"], []):
                     k = ("w", si, i)
@@ -636,7 +646,6 @@ class EditorWindow(QMainWindow):
     def _recut(self) -> None:
         """Пометки изменились — пересобрать фрагменты из расшифровки (и субтитры из текста, если включены)."""
         tr.rebuild_clips(self.project, self.tstore)
-        self._place_respeak()
         if self.project.cuts.get("subtitles"):
             self._make_text_subs()
         self._changed()
@@ -651,9 +660,6 @@ class EditorWindow(QMainWindow):
             return
         if action == "cut":
             self._cut_tokens(keys)
-            return
-        if action == "respeak":
-            self._respeak(words)
             return
         self.history.push(self.project.to_dict())
         if action == "restore":
@@ -676,277 +682,8 @@ class EditorWindow(QMainWindow):
         m.addAction("Убрать / вернуть только звук", lambda: self._selection_do("mute", keys))
         m.addAction("Убрать / вернуть только картинку", lambda: self._selection_do("hide", keys))
         m.addSeparator()
-        m.addAction("Переозвучить своим голосом…", lambda: self._selection_do("respeak", keys))
-        m.addAction("Сохранить голос из этого куска…", lambda: self._save_voice(keys))
         m.addAction("Вернуть всё", lambda: self._selection_do("restore", keys))
         m.exec(pos)
-
-    # ---------- переозвучка своим голосом ----------
-
-    def _respeak_entry(self, src: str, i: int) -> dict | None:
-        return next((r for r in self.project.cuts.get("respeak", {}).get(src, []) if r["i"] <= i <= r["j"]), None)
-
-    def _respeak(self, words: list[tuple[int, int]]) -> None:
-        """Выделенную фразу исправить и озвучить своим голосом."""
-        from glimpsy.editor import voice
-
-        si = words[0][0]
-        idx = sorted(i for s_, i in words if s_ == si)
-        i, j = idx[0], idx[-1]
-        src = self._sources()[si]["src"]
-        sw = self.tstore.get(src)
-        if sw is None:
-            return
-        if any(self._respeak_entry(src, k) for k in range(i, j + 1)):
-            QMessageBox.information(self, "Переозвучка", "Эта фраза уже переозвучена. Чтобы озвучить иначе, "
-                                    "сначала верните исходную (правая кнопка по зелёному слову).")
-            return
-        if self._voice_job:
-            QMessageBox.information(self, "Переозвучка", "Предыдущая фраза ещё озвучивается — подождите.")
-            return
-        if not voice.supported():
-            QMessageBox.warning(self, "Переозвучка", "На этом компьютере голосовой модуль не работает "
-                                "(нужен Linux или Windows на x86-64 либо Mac на Apple Silicon).")
-            return
-        if j - i > 40:
-            QMessageBox.information(self, "Переозвучка", "Выделите фразу покороче (до 40 слов).")
-            return
-        from glimpsy.editor.voices_dialog import RespeakDialog
-
-        cuts = self.project.cuts
-        old = " ".join(t for k in range(i, j + 1) if (t := tr.word_text(cuts, src, k, sw.words[k].text)))
-        ref = voice.reference_spans(sw.words, i, j, set(cuts.get("deleted", {}).get(src, [])))
-        dlg = RespeakDialog(old, sum(b - a for a, b in ref), self.ffmpeg, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        text = " ".join(dlg.text.text().split())
-        if not text:
-            return
-        if not voice.installed() and not self._install_voice():
-            return
-        if voice.speaker().proc is None and not self._enough_memory():
-            return
-        self._start_respeak(si, i, j, text, dlg.voice_id)
-
-    def _save_voice(self, keys: list) -> None:
-        """Выделенная речь → голос в библиотеке (для переозвучки в любых проектах)."""
-        from PySide6.QtWidgets import QInputDialog
-
-        from glimpsy.editor import voice
-        from glimpsy.editor.voices_dialog import save_voice_async
-
-        words = [(si, i) for kind, si, i in keys if kind == "w"]
-        if not words:
-            return
-        si = words[0][0]
-        src = self._sources()[si]["src"]
-        sw = self.tstore.get(src)
-        if sw is None:
-            return
-        gone = set(self.project.cuts.get("deleted", {}).get(src, []))
-        idx = sorted(i for s_, i in words if s_ == si and i not in gone)
-        spans: list[tuple[float, float]] = []
-        for k in idx:
-            a, b = max(0.0, sw.words[k].start - 0.05), sw.words[k].end + 0.05
-            if spans and a - spans[-1][1] < 0.35:
-                spans[-1] = (spans[-1][0], b)
-            else:
-                spans.append((a, b))
-        total = sum(b - a for a, b in spans)
-        if total < voice.MIN_SAMPLE_S:
-            QMessageBox.information(self, "Голос", f"Выделено {total:.1f} с речи, а для голоса нужно хотя бы "
-                                    f"{voice.MIN_SAMPLE_S:.0f} с (лучше 10–20). Выделите кусок побольше.")
-            return
-        name, ok = QInputDialog.getText(self, "Сохранить голос",
-                                        "Как назвать голос (например, «Мой голос», «Саша»):", text="Мой голос")
-        name = " ".join(name.split())
-        if not ok or not name:
-            return
-
-        def done(msg: str) -> None:
-            if msg.startswith("ok:"):
-                self.statusBar().showMessage(f"Голос «{name}» сохранён — его можно выбрать при переозвучке "
-                                             f"в любом проекте.", 8000)
-            else:
-                QMessageBox.warning(self, "Голос", msg)
-
-        save_voice_async(self.ffmpeg, name, Path(src), spans, self, done)
-
-    def _unload_voice_if_idle(self) -> None:
-        from glimpsy.editor import voice
-
-        if not self._voice_job and voice._speaker is not None and voice._speaker.unload_if_idle():
-            self.statusBar().showMessage("Голосовая нейросеть давно не нужна — выгружена, память освобождена. "
-                                         "Следующая переозвучка загрузит её снова (около минуты).", 8000)
-
-    def _enough_memory(self) -> bool:
-        """Мало свободной памяти для нейросети — предупредить (можно всё равно попробовать)."""
-        from glimpsy.editor import voice
-
-        warn = voice.memory_warning()
-        if not warn:
-            return True
-        box = QMessageBox(QMessageBox.Icon.Warning, "Мало памяти", warn, parent=self)
-        go = box.addButton("Всё равно попробовать", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        return box.clickedButton() is go
-
-    def _install_voice(self) -> bool:
-        """Спросить и поставить голосовой модуль (один раз; долго)."""
-        from glimpsy.editor import voice
-
-        ask = QMessageBox.question(
-            self, "Голосовой модуль",
-            f"Для озвучки вашим голосом нужен голосовой модуль — нейросеть Chatterbox (бесплатная, лицензия MIT: "
-            f"можно и для коммерческих роликов).\n\nОн скачается один раз (≈ {voice.SIZE_GB} ГБ, с интернета) и "
-            f"дальше работает без интернета, прямо на компьютере. Установка займёт 10–30 минут — "
-            f"смотря какой интернет.\n\nПоставить сейчас?")
-        if ask != QMessageBox.StandardButton.Yes:
-            return False
-        if not self._enough_memory():
-            return False
-        prog = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
-        prog.setWindowTitle("Голосовой модуль")
-        prog.setWindowModality(Qt.WindowModality.WindowModal)
-        prog.setMinimumDuration(0)
-        prog.setAutoClose(False)
-        prog.setAutoReset(False)
-        bridge = _ExportBridge(self)
-        cancel = threading.Event()
-        prog.canceled.connect(cancel.set)
-        bridge.progress.connect(lambda f, t: (prog.setValue(int(f * 1000)), prog.setLabelText(t)))
-        result = {"err": None}
-        loop = QEventLoop(self)
-        bridge.done.connect(lambda _m: loop.quit())
-        bridge.failed.connect(lambda m: (result.update(err=m), loop.quit()))
-
-        def run() -> None:
-            try:
-                voice.install(lambda f, t: bridge.progress.emit(f, t), cancel)
-                bridge.done.emit("")
-            except voice.Cancelled:
-                bridge.failed.emit("")
-            except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так
-                log.exception("Голосовой модуль не установился")
-                bridge.failed.emit(str(e))
-
-        threading.Thread(target=run, daemon=True, name="voice-install").start()
-        prog.show()
-        loop.exec()
-        prog.close()
-        if result["err"]:
-            QMessageBox.warning(self, "Голосовой модуль", result["err"] + "\n\nПроверьте интернет и место на "
-                                "диске и попробуйте ещё раз — уже скачанное повторно не качается.")
-        return result["err"] is None
-
-    def _start_respeak(self, si: int, i: int, j: int, text: str, voice_id: str = "") -> None:
-        """Озвучить фразу в фоне; готово — встаёт на место исходной (одним шагом отмены)."""
-        from glimpsy.editor import voice
-
-        src = self._sources()[si]["src"]
-        sw = self.tstore.get(src)
-        cuts = tr.cuts_of(self.project)
-        env = self.tstore.envelope(src)
-        span = tr.mark_spans(sw, set(range(i, j + 1)), cuts, env)[0]
-        target = span[1] - span[0]
-        lang = sw.language if sw.language in voice.LANGS else "ru"
-        ref_spans = voice.reference_spans(sw.words, i, j, set(cuts.get("deleted", {}).get(src, [])))
-        saved = voice.get_voice(voice_id) if voice_id else None
-        rid = new_id()
-        out_dir = self.project.dir / "voice"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        final = out_dir / f"respeak_{rid}.wav"
-        self._voice_job = True
-        panel = self.text_panel_t
-        first = voice.speaker().proc is None
-        panel.set_voice_status(f"Озвучиваю «{text}» " + (f"голосом «{saved.name}»… " if saved else "вашим голосом… ") +
-                               ("Первая фраза — около минуты-двух (загружается нейросеть)." if first else
-                                "Обычно 20–40 секунд."))
-        bridge = _ExportBridge(self)
-        result: dict = {}
-
-        def done(_m: str) -> None:
-            self._voice_job = False
-            panel.set_voice_status("")
-            self.history.push(self.project.to_dict())
-            entry = {"id": rid, "i": i, "j": j, "text": text, "file": str(final.relative_to(self.project.dir)),
-                     "dur": round(result["dur"], 3), "orig": round(target, 3),
-                     "voice": saved.name if saved else ""}
-            self.project.cuts.setdefault("respeak", {}).setdefault(src, []).append(entry)
-            fixes = self.project.cuts.setdefault("word_text", {}).setdefault(src, {})
-            fixes[str(i)] = text
-            for k in range(i + 1, j + 1):
-                fixes[str(k)] = ""
-            self._recut()
-            self._tr_build(keep_scroll=True)
-            over = result["dur"] - target
-            self.statusBar().showMessage(
-                "Фраза переозвучена." + (f" Она на {over:.1f} с длиннее исходной — немного зайдёт на следующие "
-                                         f"слова." if over > 0.3 else "") +
-                " Вернуть исходную — правая кнопка по зелёному слову или Ctrl+Z.", 10000)
-
-        def failed(msg: str) -> None:
-            self._voice_job = False
-            panel.set_voice_status("")
-            if msg:
-                QMessageBox.warning(self, "Переозвучка", msg)
-
-        bridge.done.connect(done)
-        bridge.failed.connect(failed)
-
-        def run() -> None:
-            raw = out_dir / f"respeak_{rid}_raw.wav"
-            ref = out_dir / f"respeak_{rid}_ref.wav"
-            try:
-                if saved is not None:                      # сохранённый голос — образец уже готов
-                    voice.speaker().say(text, lang, saved.sample, raw, conds=saved.conds)
-                else:
-                    voice.make_reference(self.ffmpeg, Path(src), ref_spans, ref)
-                    voice.speaker().say(text, lang, ref, raw)
-                result["dur"] = voice.fit_phrase(self.ffmpeg, raw, final, target, Path(src), span[0], span[1])
-                bridge.done.emit("")
-            except Exception as e:                      # noqa: BLE001 — показываем человеку, что пошло не так
-                log.exception("Переозвучка не удалась")
-                bridge.failed.emit(str(e))
-            finally:
-                raw.unlink(missing_ok=True)
-                ref.unlink(missing_ok=True)
-
-        threading.Thread(target=run, daemon=True, name="respeak").start()
-
-    def _unrespeak(self, src: str, rid: str) -> None:
-        entries = self.project.cuts.get("respeak", {}).get(src, [])
-        entry = next((r for r in entries if r["id"] == rid), None)
-        if entry is None:
-            return
-        self.history.push(self.project.to_dict())
-        entries.remove(entry)
-        fixes = self.project.cuts.get("word_text", {}).get(src, {})
-        for k in range(entry["i"], entry["j"] + 1):
-            fixes.pop(str(k), None)
-        self._recut()
-        self._tr_build(keep_scroll=True)
-
-    def _place_respeak(self) -> None:
-        """Переозвученные фразы — на дорожку «Голос», туда, где сейчас в ролике исходная фраза."""
-        self.project.overlays = [o for o in self.project.overlays if not o.auto]
-        cuts = tr.cuts_of(self.project)
-        track = None
-        for src, entries in cuts.get("respeak", {}).items():
-            sw = self.tstore.get(src)
-            if sw is None:
-                continue
-            env = self.tstore.envelope(src)
-            for r in entries:
-                spans = tr.mark_spans(sw, set(range(r["i"], r["j"] + 1)), cuts, env)
-                start = tr.output_time(self.project, src, spans[0][0]) if spans else None
-                if start is None:
-                    continue                               # фразу вырезали целиком
-                track = track or self.project.track_for("voice").id
-                self.project.overlays.append(OverlayItem(
-                    new_id(), "audio", r["file"], round(start, 3), float(r["dur"]), src_duration=float(r["dur"]),
-                    has_audio=True, label="Переозвучка: " + r["text"], track=track, auto=r["id"]))
 
     # ---------- субтитры из текста ----------
 
@@ -1220,11 +957,6 @@ class EditorWindow(QMainWindow):
                 m.addAction("Убрать кадры автомонтажа из этой паузы", lambda: self._drop_broll(src, a, b))
         else:
             word = sw.words[i].text
-            entry = self._respeak_entry(src, i)
-            if entry is not None:
-                m.addAction(f"Вернуть исходную фразу (вместо «{entry['text']}»)",
-                            lambda: self._unrespeak(src, entry["id"]))
-                m.addSeparator()
             gone = i in set(tr.cuts_of(self.project).get("deleted", {}).get(src, []))
             m.addAction("Вернуть слово" if gone else "Вырезать слово",
                         lambda: self._cut_tokens([key]) if not gone else self._on_text_token(key))
@@ -2731,8 +2463,6 @@ class EditorWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._save()
-        from glimpsy.editor import voice
-        voice.speaker().stop()
         self.ov_video.shutdown()
         QApplication.instance().removeEventFilter(self)
         self.player.shutdown()

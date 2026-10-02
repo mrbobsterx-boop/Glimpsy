@@ -1,4 +1,4 @@
-"""«Папки программы»: где что лежит (ролики, проекты, модели, голоса, журналы) — открыть одним нажатием.
+"""«Папки программы»: где что лежит (ролики, проекты, модели, журналы) — открыть одним нажатием.
 
 Чтобы не искать файлы Glimpsy по всему компьютеру: всё, что программа хранит, — списком,
 с размером и кнопкой «Открыть» (открывается в обычном файловом менеджере).
@@ -30,20 +30,17 @@ def places(output_dir: Path | str | None = None, project_dir: Path | None = None
     """Все папки программы — по порядку, как их обычно ищут."""
     from glimpsy.editor import subtitles as subs
     from glimpsy.editor import translate as mt
-    from glimpsy.editor import voice
     from glimpsy.editor.sessions import projects_root
 
     out: list[Place] = []
     if output_dir:
         out.append(Place("Готовые ролики", Path(output_dir), "сюда сохраняются записи экрана"))
     if project_dir is not None:
-        out.append(Place("Этот проект", Path(project_dir), "монтаж, расшифровка, переозвучка этого проекта"))
+        out.append(Place("Этот проект", Path(project_dir), "монтаж и расшифровка этого проекта"))
     out += [
         Place("Все проекты и сессии", projects_root(), "проекты редактора и записи для монтажа"),
         Place("Модели распознавания речи", subs.models_dir(), "для расшифровки и субтитров (whisper)"),
         Place("Переводчик субтитров", mt.model_dir("m2m").parent, "лежит в той же папке моделей"),
-        Place("Голосовой модуль", voice.home(), "нейросеть для переозвучки и журнал её установки"),
-        Place("Сохранённые голоса", voice.voices_dir(), "голоса для переозвучки"),
         Place("Журналы (логи)", paths.log_dir(), "пригодятся, если что-то пошло не так"),
         Place("Временные файлы записи", paths.temp_root(), "черновики, пока идёт запись; потом удаляются"),
         Place("Настройки", paths.config_dir(), "настройки программы"),

@@ -96,4 +96,23 @@ def run() -> int:
             log.info("Автозапуск переключён с Worklapse на Glimpsy")
     except Exception:
         log.exception("Не удалось перенести автозапуск")
+    remove_voice_module()
     return moved
+
+
+def remove_voice_module() -> None:
+    """Переозвучку голосом убрали из программы: её модуль (~5 ГБ) и сохранённые голоса больше не нужны.
+    Удаляем в фоне, чтобы не задерживать запуск."""
+    import shutil
+    import threading
+
+    olds = [d for d in (paths.data_dir() / "voice", paths.data_dir() / "voices") if d.exists()]
+    if not olds:
+        return
+
+    def run() -> None:
+        for d in olds:
+            shutil.rmtree(d, ignore_errors=True)
+            log.info("Удалён ненужный голосовой модуль: %s", d)
+
+    threading.Thread(target=run, daemon=True, name="remove-voice").start()
