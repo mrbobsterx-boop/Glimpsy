@@ -559,6 +559,7 @@ class EditorWindow(QMainWindow):
         p.fillers_restore.connect(lambda ws: self._cut_fillers(ws, False))
         self._sel_pause: tuple[int, int] | None = None
         p.transcribe_requested.connect(self.transcribe)
+        p.retime_requested.connect(lambda: self.transcribe(retime=True))
         p.cancel_requested.connect(lambda: self._tr_cancel is not None and self._tr_cancel.set())
         self._tr_build()
 
@@ -585,7 +586,8 @@ class EditorWindow(QMainWindow):
         view = self.text_panel_t.view
         self.text_panel_t.set_settings(cuts)
         view.build(items, view.verticalScrollBar().value() if keep_scroll else None)
-        self.text_panel_t.set_needs_transcript(sum(1 for it in items if it[2] is None))
+        self.text_panel_t.set_needs_transcript(sum(1 for it in items if it[2] is None),
+                                               sum(1 for it in items if it[2] is not None))
         self._tr_states()
 
     def _tr_states(self) -> None:
@@ -718,6 +720,8 @@ class EditorWindow(QMainWindow):
             return
         if not voice.installed() and not self._install_voice():
             return
+        if voice.speaker().proc is None and not self._enough_memory():
+            return
         self._start_respeak(si, i, j, text, dlg.voice_id)
 
     def _save_voice(self, keys: list) -> None:
@@ -764,6 +768,19 @@ class EditorWindow(QMainWindow):
 
         save_voice_async(self.ffmpeg, name, Path(src), spans, self, done)
 
+    def _enough_memory(self) -> bool:
+        """Мало свободной памяти для нейросети — предупредить (можно всё равно попробовать)."""
+        from glimpsy.editor import voice
+
+        warn = voice.memory_warning()
+        if not warn:
+            return True
+        box = QMessageBox(QMessageBox.Icon.Warning, "Мало памяти", warn, parent=self)
+        go = box.addButton("Всё равно попробовать", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is go
+
     def _install_voice(self) -> bool:
         """Спросить и поставить голосовой модуль (один раз; долго)."""
         from glimpsy.editor import voice
@@ -775,6 +792,8 @@ class EditorWindow(QMainWindow):
             f"дальше работает без интернета, прямо на компьютере. Установка займёт 10–30 минут — "
             f"смотря какой интернет.\n\nПоставить сейчас?")
         if ask != QMessageBox.StandardButton.Yes:
+            return False
+        if not self._enough_memory():
             return False
         prog = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
         prog.setWindowTitle("Голосовой модуль")
@@ -1307,8 +1326,9 @@ class EditorWindow(QMainWindow):
         if rebuild_text:
             self._tr_build(keep_scroll=True)                 # другие паузы видны в тексте
 
-    def transcribe(self) -> None:
-        """Расшифровать все ещё не расшифрованные видео проекта (в фоне)."""
+    def transcribe(self, retime: bool = False) -> None:
+        """Расшифровать все ещё не расшифрованные видео проекта (в фоне). retime — уже расшифрованные
+        послушать ещё раз и уточнить только время слов (текст и пометки монтажа не меняются)."""
         from glimpsy.editor.subtitles_dialog import SubtitlesDialog
 
         if self._tr_cancel is not None:
@@ -1316,7 +1336,7 @@ class EditorWindow(QMainWindow):
         if not subs.whisper_exe():
             QMessageBox.warning(self, "Расшифровка", "В этой сборке нет программы распознавания речи.")
             return
-        todo = [s for s in self._sources() if self.tstore.get(s["src"]) is None]
+        todo = [s for s in self._sources() if (self.tstore.get(s["src"]) is None) != retime]
         if not todo:
             return
         dlg = SubtitlesDialog(self.project.aspect, False, self, words=True)
@@ -1351,7 +1371,7 @@ class EditorWindow(QMainWindow):
                         bridge.progress.emit((n + f) / len(todo), prefix + text + f" {int(f * 100)}%")
 
                     tr.transcribe_source(self.ffmpeg, Path(s["src"]), s["src"], float(s["duration"]), model, lang,
-                                         tr.TranscriptStore(self.project.dir), prog, cancel)
+                                         tr.TranscriptStore(self.project.dir), prog, cancel, retime=retime)
                 bridge.done.emit("")
             except subs.Cancelled:
                 bridge.done.emit("")

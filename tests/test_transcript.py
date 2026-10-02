@@ -608,3 +608,26 @@ def test_stretched_piece_is_remembered(tmp_path, qt_app):
         assert not w.project.cuts.get("edges", {}).get(src)
     finally:
         w.close()
+
+
+def test_dtw_word_times_are_used():
+    """Выравнивание по звуку (t_dtw): обычное время Whisper сдвинуто на секунды — берём точное."""
+    tok = lambda t, a, b, d: {"text": t, "offsets": {"from": a, "to": b}, "p": 0.9, "t_dtw": d}  # noqa: E731
+    data = {"result": {"language": "ru"}, "transcription": [{"tokens": [
+        tok(" И", 5000, 5100, 826), tok(" ещё", 5480, 5600, 852), tok(" Сегод", 11100, 11200, 1290),
+        tok("ня", 11200, 11290, 1296)]}]}
+    words, _ = tr.parse_whisper_words(json.dumps(data))
+    assert [w.text for w in words] == ["И", "ещё", "Сегодня"]
+    assert words[0].start == pytest.approx(8.26 - tr.DTW_LEAD_S) and words[2].start == pytest.approx(12.65)
+    assert words[0].end <= words[1].start
+    cmd = tr.word_command("whisper", Path("m.bin"), Path("a.wav"), Path("/tmp/w"), "ru", "turbo")
+    assert cmd[cmd.index("-dtw") + 1] == "large.v3.turbo" and "-nfa" in cmd
+
+
+def test_retime_keeps_words_and_marks():
+    old = [Word("Привет.", 0, 1), Word("это", 2, 3), Word("мой", 3, 4), Word("эээ", 4, 4.5), Word("голос.", 5, 6)]
+    new = [Word("Привет.", 1.1, 1.5), Word("Это", 1.8, 2.0), Word("мой", 2.1, 2.3), Word("голос.", 2.9, 3.3)]
+    out = tr.retime_words(old, new, 10.0)
+    assert [w.text for w in out] == [w.text for w in old]                 # те же слова, те же номера
+    assert [w.start for w in out[:3]] == [1.1, 1.8, 2.1] and out[4].start == 2.9
+    assert 2.3 <= out[3].start < 2.9                                       # «эээ» — между соседями

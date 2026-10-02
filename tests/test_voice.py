@@ -83,6 +83,7 @@ def test_respeak_in_editor(tmp_path, qt_app, monkeypatch):
 
     monkeypatch.setattr(voice, "supported", lambda: True)
     monkeypatch.setattr(voice, "installed", lambda: True)
+    monkeypatch.setattr(voice, "memory_warning", lambda: "")
     monkeypatch.setattr(voice, "speaker", lambda: FakeSpeaker())
     from PySide6.QtWidgets import QDialog
 
@@ -215,6 +216,7 @@ def test_respeak_with_saved_voice_and_save_from_text(tmp_path, qt_app, monkeypat
 
     monkeypatch.setattr(voice, "supported", lambda: True)
     monkeypatch.setattr(voice, "installed", lambda: True)
+    monkeypatch.setattr(voice, "memory_warning", lambda: "")
     monkeypatch.setattr(voice, "speaker", lambda: FakeSpeaker())
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Мой голос", True)))
     from PySide6.QtWidgets import QMessageBox
@@ -347,3 +349,12 @@ def test_model_files_ready_check(tmp_path, monkeypatch):
         with open(d / f, "wb") as fh:
             fh.truncate(n)                                              # «пустой» файл нужного размера
     assert voice.model_ready()
+
+
+def test_low_memory_warning(monkeypatch):
+    monkeypatch.setattr(voice, "free_memory_mb", lambda: 1351)
+    w = voice.memory_warning()
+    assert "1,3 ГБ" in w and "браузер" in w
+    monkeypatch.setattr(voice, "free_memory_mb", lambda: 6000)
+    assert voice.memory_warning() == ""
+    assert voice._killed(143) and voice._killed(-15)                      # SIGTERM — тоже система

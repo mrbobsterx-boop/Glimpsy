@@ -180,8 +180,9 @@ def _download(url: str, dest: Path, progress: Callable[[float], None], cancel: t
                 _time.sleep(0.1)
 
 
-MEMORY_HINT = ("Похоже, компьютеру не хватило памяти — система остановила нейросеть. Закройте браузер, игры "
-               "и другие тяжёлые программы и попробуйте ещё раз (уже скачанное заново не качается).")
+MEMORY_HINT = ("Компьютеру не хватило памяти — система остановила нейросеть. Закройте браузер, игры "
+               "и другие тяжёлые программы, остановите запись экрана в Glimpsy и попробуйте ещё раз "
+               "(уже скачанное заново не качается).")
 
 
 MODEL_URL = "https://huggingface.co/ResembleAI/chatterbox/resolve/main/"
@@ -242,7 +243,30 @@ def install_log() -> Path:
 
 def _killed(code: int) -> bool:
     """Процесс остановила система (чаще всего — кончилась память)."""
-    return code in (-9, 137, -6) or (sys.platform.startswith("win") and code in (3221225477, -1073741819))
+    return code in (-9, 137, -6, -15, 143) or (sys.platform.startswith("win") and code in (3221225477, -1073741819))
+
+
+NEED_FREE_MB = 2500               # нейросети нужно ~1,1 ГБ своей памяти и ещё столько же — под её файлы
+
+
+def free_memory_mb() -> int:
+    """Сколько памяти сейчас свободно (МБ)."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available // (1 << 20))
+    except Exception:                                  # noqa: BLE001 — не узнали — не мешаем
+        return 1 << 20
+
+
+def memory_warning() -> str:
+    """Текст предупреждения, если памяти мало для нейросети (иначе пусто)."""
+    free = free_memory_mb()
+    if free >= NEED_FREE_MB:
+        return ""
+    return (f"Сейчас свободно {free / 1024:.1f} ГБ памяти, а голосовой нейросети нужно хотя бы "
+            f"{NEED_FREE_MB / 1024:.1f} ГБ. Если памяти не хватит, система её закроет.\n\n"
+            f"Закройте браузер, игры и другие тяжёлые программы, остановите запись экрана в Glimpsy — "
+            f"и попробуйте снова.").replace(".", ",", 2)
 
 
 def _run(cmd: list[str], cancel: threading.Event, on_line: Callable[[str], None] | None = None,

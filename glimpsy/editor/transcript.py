@@ -164,15 +164,21 @@ def _frames(env: np.ndarray, a: float, b: float) -> np.ndarray:
 
 # ---------------- разбор ответа Whisper ----------------
 
+DTW_LEAD_S = 0.25                # точка выравнивания приходится примерно на середину первого звука слова
+DTW_TAIL_S = 0.2
+
+
 def parse_whisper_words(text: str) -> tuple[list[Word], str]:
     """Подробный JSON whisper.cpp (-ojf): куски слов (токены) → слова со временем.
 
     Новое слово начинается с токена, у которого впереди пробел; знаки препинания
-    и продолжения слова приклеиваются к предыдущему.
+    и продолжения слова приклеиваются к предыдущему. Если есть точное время по выравниванию
+    со звуком (t_dtw, ключ -dtw), берём его: обычное время у Whisper бывает сдвинуто на секунды.
     """
     data = json.loads(text)
     words: list[Word] = []
     probs: list[list[float]] = []
+    dtw: list[list[float]] = []
     for seg in data.get("transcription", []):
         for tok in seg.get("tokens", []):
             t = tok.get("text", "")
@@ -181,16 +187,33 @@ def parse_whisper_words(text: str) -> tuple[list[Word], str]:
             off = tok.get("offsets", {})
             a, b = off.get("from", 0) / 1000.0, off.get("to", 0) / 1000.0
             p = float(tok.get("p", 1.0))
+            d = tok.get("t_dtw", -1)
+            d = d / 100.0 if isinstance(d, (int, float)) and d >= 0 else None
             if t.startswith(" ") or not words:
                 words.append(Word(t.strip(), a, max(a, b), p))
                 probs.append([p])
+                dtw.append([d] if d is not None else [])
             else:
                 w = words[-1]
                 w.text += t
                 w.end = max(w.end, b)
                 probs[-1].append(p)
+                if d is not None:
+                    dtw[-1].append(d)
     for w, ps in zip(words, probs):
         w.p = float(min(ps))
+    if words and all(dtw):
+        # точное время: начало — чуть раньше точки выравнивания первого куска слова,
+        # конец — после последнего куска, но не позже начала следующего слова
+        starts = [max(0.0, d[0] - DTW_LEAD_S) for d in dtw]
+        for k in range(1, len(starts)):
+            starts[k] = max(starts[k], starts[k - 1] + 0.02)
+        for k, w in enumerate(words):
+            w.start = round(starts[k], 3)
+            end = dtw[k][-1] + DTW_TAIL_S
+            if k + 1 < len(words):
+                end = min(end, starts[k + 1])
+            w.end = round(max(w.start + 0.05, end), 3)
     words = [w for w in words if w.text.strip()]
     return words, data.get("result", {}).get("language", "")
 
@@ -740,11 +763,17 @@ def whisper_threads() -> int:
     return max(2, min(8, os.cpu_count() or 4))
 
 
-def word_command(exe: str, model: Path, wav: Path, out_base: Path, language: str) -> list[str]:
+DTW_PRESETS = {"tiny": "tiny", "base": "base", "small": "small", "turbo": "large.v3.turbo"}
+
+
+def word_command(exe: str, model: Path, wav: Path, out_base: Path, language: str, model_key: str = "") -> list[str]:
     from glimpsy.editor.subtitles import _short_path
 
     cmd = [exe, "-m", _short_path(model), "-f", _short_path(wav), "-l", language, "-ojf",
            "-of", _short_path(out_base.parent) + "/" + out_base.name, "-pp", "-np", "-sns", "-t", str(whisper_threads())]
+    if model_key in DTW_PRESETS:
+        # точное время слов — выравнивание по звуку (DTW); с ускоренным вниманием оно не работает
+        cmd += ["-dtw", DTW_PRESETS[model_key], "-nfa"]
     if language in ("ru", "auto"):
         cmd += ["--prompt", PROMPT_RU]
     # без детектора речи: с ним время отдельных слов у whisper.cpp сбивается
@@ -753,7 +782,7 @@ def word_command(exe: str, model: Path, wav: Path, out_base: Path, language: str
 
 def transcribe_source(ffmpeg: str, src: Path, src_key: str, duration: float, model_key: str, language: str,
                       store: TranscriptStore, progress: Callable[[float, str], None] | None = None,
-                      cancel: threading.Event | None = None) -> SourceWords:
+                      cancel: threading.Event | None = None, retime: bool = False) -> SourceWords:
     """Распознать одно видео по словам и сохранить в проект."""
     from glimpsy.editor import subtitles as subs
 
@@ -776,7 +805,7 @@ def transcribe_source(ffmpeg: str, src: Path, src_key: str, duration: float, mod
         env = envelope(samples)
         out_base = work / "words"
         (work / "words.json").unlink(missing_ok=True)
-        cmd = word_command(exe, subs.model_path(model_key), wav, out_base, language)
+        cmd = word_command(exe, subs.model_path(model_key), wav, out_base, language, model_key)
         log.info("whisper (слова): %s", " ".join(cmd))
         progress(0.03, "Распознаю речь…")
         subs.run_whisper(cmd, lambda f: progress(0.03 + 0.95 * f, "Распознаю речь…"), cancel)
@@ -785,12 +814,63 @@ def transcribe_source(ffmpeg: str, src: Path, src_key: str, duration: float, mod
             raise TranscribeError("Программа распознавания не вернула результат.")
         words, lang = parse_whisper_words(js.read_text(encoding="utf-8", errors="replace"))
         words = refine_words(words, env)
-        sw = SourceWords(src_key, duration, words, lang or language, model_key)
+        old = store.get(src_key) if retime else None
+        if old is not None:
+            # уточняем только время: текст, номера слов и все пометки монтажа остаются как были
+            moved = retime_words(old.words, words, duration)
+            sw = SourceWords(src_key, duration, refine_times(moved, env), old.language, old.model)
+            log.info("Время слов %s уточнено: %d слов", src.name, len(moved))
+        else:
+            sw = SourceWords(src_key, duration, words, lang or language, model_key)
+            log.info("Расшифровка %s: %d слов, язык %s", src.name, len(words), lang)
         store.put(sw, env)
-        log.info("Расшифровка %s: %d слов, язык %s", src.name, len(words), lang)
         return sw
     finally:
         wav.unlink(missing_ok=True)
+
+
+def retime_words(old: list[Word], new: list[Word], duration: float) -> list[Word]:
+    """Перенести время из новой расшифровки на старые слова (те же слова по тексту — то же время);
+    слова, которых в новой нет, — равномерно между ближайшими найденными."""
+    import difflib
+
+    a = [norm_word(w.text) for w in old]
+    b = [norm_word(w.text) for w in new]
+    times: list[tuple[float, float] | None] = [None] * len(old)
+    for blk in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(blk.size):
+            nw = new[blk.b + k]
+            times[blk.a + k] = (nw.start, nw.end)
+    out: list[Word] = []
+    k = 0
+    while k < len(old):
+        if times[k] is not None:
+            out.append(Word(old[k].text, times[k][0], times[k][1], old[k].p))
+            k += 1
+            continue
+        j = k
+        while j < len(old) and times[j] is None:
+            j += 1
+        lo = out[-1].end if out else (old[k].start if j >= len(old) else 0.0)
+        hi = times[j][0] if j < len(old) else max(lo, min(duration, old[j - 1].end))
+        if hi <= lo:                                   # некуда поставить — оставляем прежнее время
+            for m in range(k, j):
+                out.append(Word(old[m].text, old[m].start, old[m].end, old[m].p))
+        else:
+            step = (hi - lo) / (j - k)
+            for m in range(k, j):
+                a0 = lo + (m - k) * step
+                out.append(Word(old[m].text, round(a0, 3), round(a0 + step * 0.9, 3), old[m].p))
+        k = j
+    return out
+
+
+def refine_times(words: list[Word], env: np.ndarray | None) -> list[Word]:
+    """Уточнить по громкости, не выбрасывая слов (номера слов должны сохраниться)."""
+    kept = refine_words(words, env)
+    if len(kept) == len(words):
+        return kept
+    return words
 
 
 # ---------------- субтитры .srt ----------------

@@ -251,6 +251,7 @@ class TranscriptPanel(QFrame):
 
     close_requested = Signal()
     transcribe_requested = Signal()
+    retime_requested = Signal()           # уточнить время слов (текст и пометки остаются)
     cancel_requested = Signal()
     settings_changed = Signal(dict)       # {"mode", "pause_cut", "pause_min", "pad"}
     pause_length = Signal(float)          # выбранную паузу: −1 — целиком, 0 — вырезать, иначе — до стольких секунд
@@ -282,6 +283,12 @@ class TranscriptPanel(QFrame):
         self.transcribe_btn = theme.mark(QPushButton(theme.icon("captions", "#FFFFFF", 16), "  Расшифровать речь"),
                                          "primary")
         self.transcribe_btn.clicked.connect(self.transcribe_requested)
+        self.retime_btn = theme.mark(QPushButton("Уточнить время слов"), "ghost")
+        self.retime_btn.setToolTip("Если субтитры и подсветка слов не совпадают со звуком: программа ещё раз\n"
+                                   "послушает видео и поправит только время слов. Текст и все пометки монтажа\n"
+                                   "останутся как были. Занимает примерно столько же, сколько расшифровка.")
+        self.retime_btn.clicked.connect(self.retime_requested)
+        self.retime_btn.setVisible(False)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
@@ -431,6 +438,7 @@ class TranscriptPanel(QFrame):
         lay.setSpacing(6)
         lay.addLayout(head)
         lay.addWidget(self.transcribe_btn)
+        lay.addWidget(self.retime_btn)
         lay.addLayout(prog)
         lay.addWidget(self.bar_text)
         lay.addWidget(self.mode)
@@ -558,7 +566,8 @@ class TranscriptPanel(QFrame):
         self.subs_status.setText(text)
         self.subs_status.setVisible(bool(text))
 
-    def set_needs_transcript(self, missing: int) -> None:
+    def set_needs_transcript(self, missing: int, done: int = 0) -> None:
+        self.retime_btn.setVisible(done > 0 and not self.bar.isVisible())
         self.transcribe_btn.setVisible(missing > 0)
         self.transcribe_btn.setText("  Расшифровать речь" + (f" ({missing} видео)" if missing > 1 else ""))
 
@@ -570,6 +579,7 @@ class TranscriptPanel(QFrame):
             self.bar.setValue(int(value * 1000))
             self.bar_text.setText(text)
             self.transcribe_btn.setVisible(False)
+            self.retime_btn.setVisible(False)
 
     def set_stats(self, before: float, after: float) -> None:
         cut = max(0.0, before - after)
