@@ -546,6 +546,10 @@ class EditorWindow(QMainWindow):
         p.subs_lang_changed.connect(self._on_subs_lang)
         self._mt_cache = mt.Cache(self.project.dir)
         self._voice_job = False
+        # голосовая нейросеть: 5 минут без озвучки — выгружаем, чтобы не держала память
+        self._voice_idle = QTimer(self, interval=30_000)
+        self._voice_idle.timeout.connect(self._unload_voice_if_idle)
+        self._voice_idle.start()
         self._trim_timer = QTimer(self, singleShot=True, interval=500)
         self._trim_timer.timeout.connect(self._trims_done)
         if self.project.cuts.get("subtitles") and not any(t.auto for t in self.project.texts):
@@ -767,6 +771,13 @@ class EditorWindow(QMainWindow):
                 QMessageBox.warning(self, "Голос", msg)
 
         save_voice_async(self.ffmpeg, name, Path(src), spans, self, done)
+
+    def _unload_voice_if_idle(self) -> None:
+        from glimpsy.editor import voice
+
+        if not self._voice_job and voice._speaker is not None and voice._speaker.unload_if_idle():
+            self.statusBar().showMessage("Голосовая нейросеть давно не нужна — выгружена, память освобождена. "
+                                         "Следующая переозвучка загрузит её снова (около минуты).", 8000)
 
     def _enough_memory(self) -> bool:
         """Мало свободной памяти для нейросети — предупредить (можно всё равно попробовать)."""

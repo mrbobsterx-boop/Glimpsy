@@ -360,3 +360,32 @@ def test_low_memory_warning(monkeypatch):
     monkeypatch.setattr(voice, "free_memory_mb", lambda: 6000)
     assert voice.memory_warning() == ""
     assert voice._killed(143) and voice._killed(-15)                      # SIGTERM — тоже система
+
+
+def test_speaker_unloads_when_idle():
+    class P:
+        stopped = False
+
+        def poll(self):
+            return None
+
+        class stdin:                                            # noqa: N801 — как у настоящего процесса
+            @staticmethod
+            def close():
+                pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            P.stopped = True
+
+    sp = voice.Speaker()
+    assert not sp.unload_if_idle(1000.0)                       # не запущена — нечего выгружать
+    sp.proc = P()
+    sp.last_used = 900.0
+    assert not sp.unload_if_idle(900.0 + sp.IDLE_S - 1)         # ещё рано
+    sp.lock.acquire()
+    assert not sp.unload_if_idle(900.0 + sp.IDLE_S + 1)         # идёт озвучка — не трогаем
+    sp.lock.release()
+    assert sp.unload_if_idle(900.0 + sp.IDLE_S + 1) and sp.proc is None

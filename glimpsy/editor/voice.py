@@ -459,9 +459,29 @@ def write_worker() -> Path:
 class Speaker:
     """Запущенный голосовой модуль: нейросеть загружается один раз и озвучивает фразы по очереди."""
 
+    IDLE_S = 300.0                    # столько без озвучки — нейросеть выгружается и освобождает память
+
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
+        self.last_used = 0.0
+
+    def unload_if_idle(self, now: float | None = None) -> bool:
+        """Давно не озвучивали — закрыть нейросеть (память освободится). True — выгрузили.
+        Если как раз идёт озвучка — не трогаем."""
+        import time as _time
+
+        now = _time.monotonic() if now is None else now
+        if self.proc is None or now - self.last_used < self.IDLE_S:
+            return False
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            self.stop()
+        finally:
+            self.lock.release()
+        log.info("Голосовая нейросеть выгружена: %.0f с без озвучки", now - self.last_used)
+        return True
 
     def _start(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -503,6 +523,8 @@ class Speaker:
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
             res = self._read(lambda d: "ok" in d)
+            import time as _time
+            self.last_used = _time.monotonic()
             if not res["ok"]:
                 raise VoiceError("Озвучка не получилась: " + res.get("error", ""))
             return out
