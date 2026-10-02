@@ -270,7 +270,7 @@ class Webcam:
                 pass
             self.proc = None
             if self.out is not None:
-                self.out.unlink(missing_ok=True)
+                _remove(self.out)
 
     def _failed(self, msg: str) -> None:
         self.fails += 1
@@ -337,6 +337,18 @@ def load_clips(session_dir: Path) -> list[CamClip]:
 
 
 PREVIEW_W, PREVIEW_H = 320, 180          # маленькая картинка с камеры для окна записи
+
+
+def _remove(path: Path) -> None:
+    """Удалить недоснятый файл. На Windows FFmpeg отпускает файл не сразу после остановки —
+    тогда немного подождём, а если не вышло — оставим (удалится при уборке проекта), но не упадём."""
+    for _ in range(10):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.2)
+    log.warning("Камера: не удалось удалить %s — файл занят", path)
 
 
 class CameraRecorder:
