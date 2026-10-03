@@ -143,7 +143,10 @@ class EditorWindow(QMainWindow):
         self._build_ui()
 
         # --- связи ---
-        self.player.frame.connect(self.preview.set_image)
+        self._raw_frame = None
+        self._compare = False
+        self._live_look: dict = {}
+        self.player.frame.connect(self._show_frame)
         self.player.position.connect(self._on_position)
         self.player.playing_changed.connect(
             lambda on: self.play_btn.setIcon(self._icon_pause if on else self._icon_play))
@@ -344,6 +347,8 @@ class EditorWindow(QMainWindow):
         self.enhance.set_project(self.project)
         self.enhance.sound_changed.connect(self._on_sound)
         self.enhance.listen.connect(self._listen)
+        self.enhance.look_changed.connect(self._on_look)
+        self.enhance.compare.connect(self._on_compare)
         left("enhance", "sparkles", "Улучшить", "Чистый голос, одинаковая громкость, картинка", self.enhance)
         tool("square-split-horizontal", "До/после", "Вставка «Было → стало»: шторка, таймлапс или стоп-кадр",
              self.before_after)
@@ -524,6 +529,45 @@ class EditorWindow(QMainWindow):
         self._save_timer.start()
         if what == "denoise" and value:
             self._ensure_denoise_model()
+
+    # ---------- улучшить: картинка ----------
+
+    def _show_frame(self, img) -> None:
+        """Кадр в просмотр — с цветом из «Улучшить» (кроме «Сравнить»)."""
+        from glimpsy.editor import look
+
+        from types import SimpleNamespace
+
+        self._raw_frame = img
+        shown = SimpleNamespace(look={**self.project.look, **self._live_look})   # ползунок ещё тянут
+        if self._compare or img is None or img.isNull() or not look.color_active(shown):
+            self.preview.set_image(img)
+            return
+        # цвет считаем для кадра размером с окно просмотра — так быстро и при воспроизведении
+        dpr = self.preview.devicePixelRatioF()
+        limit = max(320, int(self.preview.width() * dpr)), max(180, int(self.preview.height() * dpr))
+        if img.width() > limit[0] or img.height() > limit[1]:
+            img = img.scaled(limit[0], limit[1], Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        self.preview.set_image(look.apply_qimage(img, shown))
+
+    def _on_compare(self, on: bool) -> None:
+        self._compare = on
+        if self._raw_frame is not None:
+            self._show_frame(self._raw_frame)
+
+    def _on_look(self, values: dict) -> None:
+        values = dict(values)
+        if values.pop("_live", False):
+            self._live_look.update(values)
+        else:
+            self._live_look = {}
+            if any(self.project.look.get(k, 0) != v for k, v in values.items()):
+                self.history.push(self.project.to_dict(), key="look-" + "-".join(sorted(values)))
+                self.project.look.update(values)
+                self._save_timer.start()
+        if self._raw_frame is not None:
+            self._show_frame(self._raw_frame)
 
     def _ensure_denoise_model(self) -> None:
         from glimpsy.editor import sound

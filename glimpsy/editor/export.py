@@ -66,14 +66,18 @@ def motion_filter(clip: Clip, aspect: str, src_w: int, src_h: int, fps: int) -> 
 
 def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspect: str = "",
                  src_size: tuple[int, int] | None = None, cursor_idx: int | None = None,
-                 cursor_style: tuple[str, float] = ("arrow", 1.0)) -> str:
-    """Граф фильтров для картинки одного фрагмента (движение по курсору, скорость, кадрирование)."""
+                 cursor_style: tuple[str, float] = ("arrow", 1.0), pre: str = "", post: str = "") -> str:
+    """Граф фильтров для картинки одного фрагмента (движение по курсору, скорость, кадрирование).
+    pre — самым первым (стабилизация), post — самым последним (цвет), см. look.py."""
     moving, new_ar = ("", None)
     if aspect and src_size:
         moving, new_ar = motion_filter(clip, aspect, src_size[0], src_size[1], fps)
     from glimpsy.editor.clicks import ripple_graph
     parts, label = [], "0:v"
-    ripples = ripple_graph("0:v", "src", clip.clicks_shown(), clip.in_s, clip.out_s, clip.speed,
+    if pre:
+        parts.append(f"[0:v]{pre}[pre]")
+        label = "pre"
+    ripples = ripple_graph(label, "src", clip.clicks_shown(), clip.in_s, clip.out_s, clip.speed,
                            src_size[0] if src_size else clip.width)
     if ripples:        # круги кликов рисуются на исходном кадре, до зума и кадрирования
         parts.append(ripples)
@@ -90,8 +94,9 @@ def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspe
     head = "".join(p + ";" for p in parts) + f"[{label}]{moving}setpts=(PTS-STARTPTS)/{clip.speed:.5f},fps={fps}"
     zoom, fx, fy = clip.frame_for(aspect) if aspect else DEFAULT_FRAME
     src_ar = new_ar or ((clip.width / clip.height) if clip.width and clip.height else W / H)
+    post = post + "," if post else ""
     if (zoom, fx, fy) == DEFAULT_FRAME and abs(src_ar - W / H) < 0.02:
-        return f"{head},scale={W}:{H},setsar=1,{encoder_suffix}[v]"
+        return f"{head},scale={W}:{H},setsar=1,{post}{encoder_suffix}[v]"
     bw, bh = max(2, W // BG_BLUR_DIV // 2 * 2), max(2, H // BG_BLUR_DIV // 2 * 2)
     # Размер кадра считает сам FFmpeg по реальному размеру видео (iw, ih) — так точнее
     s = f"min({W}/iw,{H}/ih)*{zoom:.5f}"
@@ -101,11 +106,12 @@ def video_filter(clip: Clip, W: int, H: int, fps: int, encoder_suffix: str, aspe
         f"gblur=sigma=6,eq=brightness=-0.06,scale={W}:{H}[bg];"
         f"[b]scale=w='2*trunc(iw*{s}/2)':h='2*trunc(ih*{s}/2)'[fg];"
         f"[bg][fg]overlay=x='(W-w)/2+{fx * W:.2f}':y='(H-h)/2+{fy * H:.2f}',"
-        f"setsar=1,{encoder_suffix}[v]"
+        f"setsar=1,{post}{encoder_suffix}[v]"
     )
 
 
-def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: Encoder) -> list[str]:
+def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: Encoder,
+                    pre: str = "", post: str = "") -> list[str]:
     W, H = ASPECTS[project.aspect]
     fps = project.fps
     src = project.path_of(clip)
@@ -132,7 +138,8 @@ def segment_command(ffmpeg: str, project: Project, clip: Clip, out: Path, enc: E
 
         cursor_idx = 1 if use_audio else 2
         cmd += cur.input_args(style, cur.height_px(src_size[0], size), clip.out_s - clip.in_s + 1)
-    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size, cursor_idx, (style, size))
+    graph = video_filter(clip, W, H, fps, enc.filter_suffix, project.aspect, src_size, cursor_idx, (style, size),
+                         pre if clip.kind == "video" else "", post)
     if clip.hidden:                              # картинка убрана — чёрный кадр (до передачи кодеку)
         tail = f",{enc.filter_suffix}[v]"
         graph = graph[:-len(tail)] + f",{BLACK_FILL}{tail}" if graph.endswith(tail) else graph
@@ -274,7 +281,8 @@ def frame_chain(frame: tuple[float, float, float], W: int, H: int) -> str:
 
 
 def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, enc: Encoder,
-                  edges: list[tuple[bool, bool]] | None = None) -> list[str]:
+                  edges: list[tuple[bool, bool]] | None = None, pre: dict[str, str] | None = None,
+                  post: str = "") -> list[str]:
     """Один FFmpeg: несколько кусков (каждый — точный переход к началу в исходнике) → один файл.
 
     Видео — сразу в итоговом качестве, звук — без сжатия (сожмём один раз в конце, чтобы на
@@ -299,8 +307,11 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
             n += 1
         k = len(pads)
         black = f",{BLACK_FILL}" if c.hidden else ""
-        parts.append(f"[{vi}:v]{frame_chain(c.frame_for(project.aspect), W, H)},"
-                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps}{black},format=yuv420p[v{k}]")
+        first = (pre or {}).get(c.id, "")
+        last = f",{post}" if post else ""
+        parts.append(f"[{vi}:v]{first + ',' if first else ''}{frame_chain(c.frame_for(project.aspect), W, H)},"
+                     f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=0x111114,setsar=1,fps={fps}{last}{black},"
+                     f"format=yuv420p[v{k}]")
         fade = min(EDGE_FADE_S, dur / 4)
         fade_out = max(0.0, dur - fade)
         fades = ([f"afade=t=in:d={fade:.3f}:curve=qsin"] if fin else []) + \
@@ -315,7 +326,8 @@ def chunk_command(ffmpeg: str, project: Project, clips: list[Clip], out: Path, e
 
 
 def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, work: Path, enc: Encoder,
-                progress: Callable[[float, str], None], cancel: threading.Event) -> Encoder:
+                progress: Callable[[float, str], None], cancel: threading.Event,
+                pre: dict[str, str] | None = None, post: str = "") -> Encoder:
     """Нарезка → готовое видео: пачками по CHUNK_CLIPS кусков, затем склейка без перекодирования."""
     chunks = [clips[i:i + CHUNK_CLIPS] for i in range(0, len(clips), CHUNK_CLIPS)]
     edges = [(i == 0 or not joined_audio(clips[i - 1], c), i + 1 == len(clips) or not joined_audio(c, clips[i + 1]))
@@ -328,13 +340,15 @@ def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, 
         progress(i / (len(chunks) + 0.3), f"Куски {done + 1}–{done + len(chunk)} из {len(clips)}")
         part = work / f"chunk_{i:04d}.mkv"
         try:
-            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)]), cancel)
+            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)], pre, post), cancel,
+                 work)
         except ExportError:
             if not enc.hw:
                 raise
             log.warning("Аппаратный кодек не справился при экспорте, пробуем программный")
             enc = software_encoder()
-            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)]), cancel)
+            _run(chunk_command(ffmpeg, project, chunk, part, enc, edges[done:done + len(chunk)], pre, post), cancel,
+                 work)
         files.append(part)
     progress(len(chunks) / (len(chunks) + 0.3), "Склейка")
     lst = work / "chunks.txt"
@@ -362,7 +376,18 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
     try:
         layered = bool(text_layers or overlay_layers or getattr(project, "music", None)
                        or (project.voices() if hasattr(project, "voices") else []))
-        if smart and not layered and simple_cuts(project, clips) and _try_smart(ffmpeg, project, clips, out, work,
+        from glimpsy.editor import look
+
+        stab = look.prepare(ffmpeg, project, clips, work, lambda cmd: _run(cmd, cancel, work),
+                            lambda f, t: progress(f * 0.3, t)) if look.settings(project)["stabilize"] else {}
+        vidstab = bool(stab)
+        pre = {c.id: look.stabilize_filter(project, stab.get(c.id), vidstab) for c in clips if c.kind == "video"}
+        pre = {k: v for k, v in pre.items() if v}
+        post = look.color_filter(project)
+        if pre:                          # дальше прогресс — после анализа дрожания
+            base_progress = progress
+            progress = lambda f, t: base_progress(0.3 + 0.7 * f, t)          # noqa: E731
+        if smart and not layered and not pre and not post and simple_cuts(project, clips) and _try_smart(ffmpeg, project, clips, out, work,
                                                                                  progress, cancel):
             return out
         if len(clips) > 1 and simple_cuts(project, clips):
@@ -370,7 +395,7 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
             tmp = work / "final.mp4"
             joined = work / "joined.mp4" if layered else tmp
             enc = export_cuts(ffmpeg, project, clips, joined, work, encoder,
-                              lambda f, t: progress(f * (0.8 if layered else 0.95), t), cancel)
+                              lambda f, t: progress(f * (0.8 if layered else 0.95), t), cancel, pre, post)
             if layered:
                 progress(0.8, "Тексты, наложения и музыка")
                 joined = _sound(ffmpeg, project, joined, cancel, level=False)     # шум — только с голоса
@@ -389,13 +414,13 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
             progress(i / (len(clips) + 1), f"Фрагмент {i + 1} из {len(clips)}")
             part = work / f"part_{i:04d}.mp4"
             try:
-                _run(segment_command(ffmpeg, project, clip, part, enc), cancel)
+                _run(segment_command(ffmpeg, project, clip, part, enc, pre.get(clip.id, ""), post), cancel, work)
             except ExportError:
                 if not enc.hw:
                     raise
                 log.warning("Аппаратный кодек не справился при экспорте, пробуем программный")
                 enc = software_encoder()
-                _run(segment_command(ffmpeg, project, clip, part, enc), cancel)
+                _run(segment_command(ffmpeg, project, clip, part, enc, pre.get(clip.id, ""), post), cancel, work)
             parts.append(part)
         progress(len(clips) / (len(clips) + 1), "Склейка")
         lst = work / "concat.txt"
