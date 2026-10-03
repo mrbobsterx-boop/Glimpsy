@@ -91,6 +91,20 @@ def projects_root() -> Path:
     return paths.data_dir() / "projects"
 
 
+def project_for_video(video: Path) -> Path | None:
+    """Папка проекта, из которого получился готовый ролик (чтобы открыть его в редакторе)."""
+    target = str(Path(video))
+    for d in list_projects(projects_root()):
+        for name, key in (("project.json", "output"), ("edit.json", "source_video")):
+            f = d / name
+            try:
+                if f.exists() and json.loads(f.read_text(encoding="utf-8")).get(key) == target:
+                    return d
+            except (OSError, ValueError):
+                continue
+    return None
+
+
 class SessionsDialog(QDialog):
     def __init__(self, ffmpeg: str, open_project: Callable[..., None]) -> None:
         """open_project(папка, at=секунды) — открыть проект (и перейти к месту в ролике)."""

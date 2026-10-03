@@ -177,11 +177,26 @@ class TrayController(QObject):
         if not files:
             return
         self._last_video = files[0]
-        if len(files) == 1:
-            self.show_message("🎬 Ролик готов!", f"{files[0].name}\nНажмите, чтобы открыть папку.")
-        else:
-            self.show_message(f"🎬 Готово роликов: {len(files)}",
-                              "\n".join(f.name for f in files) + "\nНажмите, чтобы открыть папку.")
+        title = "🎬 Ролик готов!" if len(files) == 1 else f"🎬 Готово роликов: {len(files)}"
+        text = "\n".join(f.name for f in files)
+        if self._quiet():                            # снова идёт запись — окошко попало бы в ролик
+            self.show_message(title, text + "\nОткрыть: меню значка → «Редактор роликов».")
+            return
+        log.info("%s: %s", title, text)
+        from glimpsy.ui.toast import Toast
+
+        self._toast = Toast(title, text, [("Открыть в редакторе", lambda: self._edit_video(files[0])),
+                                          ("Показать папку", self._open_last_video)])
+        self._toast.popup()
+
+    def _edit_video(self, video: Path) -> None:
+        from glimpsy.editor.sessions import project_for_video
+
+        d = project_for_video(video)
+        if d is not None:
+            self._open_project(d)
+        else:                                        # проекта нет — список всех записей
+            self.open_editor()
 
     def _open_last_video(self) -> None:
         if self._last_video:
@@ -342,9 +357,10 @@ class TrayController(QObject):
             a = m.addAction(theme.icon("monitor", size=16), f"{name} — параллельно, свой ролик",
                             lambda _=False, mn=mon: self._add_screen_stream(mn))
             a.setEnabled(len(specs) < MAX_STREAMS)
-        hint = m.addAction(f"До {MAX_STREAMS} записей сразу, каждая — в свой ролик. Экраны пишутся всё "
-                           "время; окно — пока оно впереди. Звук и камера — только у окна (или у "
-                           "экрана под курсором, если окон нет).")
+        hint = m.addAction(f"До {MAX_STREAMS} записей сразу, каждая — в свой ролик")
+        hint.setToolTip("Экраны пишутся всё время; окно — пока оно впереди.\nЗвук и камера — только у окна "
+                        "(или у экрана под курсором, если окон нет).")
+        m.setToolTipsVisible(True)
         hint.setEnabled(False)
 
     def _monitor_list(self) -> list:
