@@ -348,7 +348,9 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
                    progress: Callable[[float, str], None] | None = None,
                    cancel: threading.Event | None = None,
                    text_layers: list[TextLayer] | None = None,
-                   overlay_layers: list["OverlayLayer"] | None = None) -> Path:
+                   overlay_layers: list["OverlayLayer"] | None = None,
+                   smart: bool = False) -> Path:
+    """smart — быстрое сохранение нарезки без пересчёта видео, где это возможно (см. smartcut)."""
     progress = progress or (lambda f, t: None)
     cancel = cancel or threading.Event()
     clips = [c for c in project.clips if c.duration > 0.05]
@@ -360,6 +362,9 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
     try:
         layered = bool(text_layers or overlay_layers or getattr(project, "music", None)
                        or (project.voices() if hasattr(project, "voices") else []))
+        if smart and not layered and simple_cuts(project, clips) and _try_smart(ffmpeg, project, clips, out, work,
+                                                                                 progress, cancel):
+            return out
         if len(clips) > 1 and simple_cuts(project, clips):
             # нарезка без эффектов (монтаж по тексту) — быстро, пачками
             tmp = work / "final.mp4"
@@ -407,6 +412,32 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _try_smart(ffmpeg: str, project: Project, clips: list[Clip], out: Path, work: Path,
+               progress: Callable[[float, str], None], cancel: threading.Event) -> bool:
+    """Быстрое сохранение. Не вышло (необычный файл) — False, и ролик соберётся обычным способом."""
+    from glimpsy.editor import smartcut
+
+    progress(0.0, "Быстрое сохранение: смотрю записи")
+    plan = smartcut.plan_for(ffmpeg, project, clips)
+    if plan is None:
+        log.info("Быстрое сохранение здесь не подходит — обычный экспорт")
+        return False
+    log.info("Быстрое сохранение: без пересчёта %.0f%% видео", plan.copied * 100)
+    edges = [(i == 0 or not joined_audio(clips[i - 1], c), i + 1 == len(clips) or not joined_audio(c, clips[i + 1]))
+             for i, c in enumerate(clips)]
+    tmp = work / "smart.mp4"
+    try:
+        smartcut.export(ffmpeg, project, clips, plan, tmp, work, edges, progress, lambda cmd: _run(cmd, cancel),
+                        cancel)
+    except ExportError as e:
+        log.warning("Быстрое сохранение не удалось, обычный экспорт: %s", e)
+        return False
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(tmp), out)
+    progress(1.0, "Готово")
+    return True
 
 
 def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: list[TextLayer],

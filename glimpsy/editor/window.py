@@ -240,6 +240,15 @@ class EditorWindow(QMainWindow):
         export_menu.addSeparator()
         export_menu.addAction(theme.icon("layers", size=16), "Оба формата сразу (два файла)",
                               lambda: self.export(["16:9", "9:16"]))
+        export_menu.addSeparator()
+        self.a_smart = export_menu.addAction("Быстрое сохранение (без пересчёта видео, где можно)")
+        self.a_smart.setCheckable(True)
+        self.a_smart.setChecked(QSettings("Glimpsy", "editor").value("export/smart", True, type=bool))
+        self.a_smart.setToolTip("Если вы только вырезали куски, нетронутые места видео берутся как есть — "
+                                "сохранение в разы быстрее, качество как у записи. С эффектами, текстами и "
+                                "музыкой ролик всё равно сохраняется обычным способом.")
+        self.a_smart.toggled.connect(lambda on: QSettings("Glimpsy", "editor").setValue("export/smart", on))
+        export_menu.setToolTipsVisible(True)
         self.export_btn.setMenu(export_menu)
         topbar = QFrame()
         topbar.setObjectName("topbar")
@@ -2419,6 +2428,8 @@ class EditorWindow(QMainWindow):
             jobs.append((snapshot, default_output(snapshot, self.fallback_output),
                          render_text_layers(snapshot, sub), render_overlay_layers(snapshot, sub)))
 
+        smart = self.a_smart.isChecked()
+
         def work() -> None:
             done = []
             try:
@@ -2430,7 +2441,8 @@ class EditorWindow(QMainWindow):
                         bridge.progress.emit((n + f) / len(jobs), prefix + t)
 
                     path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
-                                          overlay_layers=overlay_layers, progress=prog, cancel=cancel)
+                                          overlay_layers=overlay_layers, progress=prog, cancel=cancel,
+                                          smart=smart)
                     done.append(str(path))
                     if snapshot.text_edit:
                         # субтитры с таймкодами уже готового ролика — рядом с ним
