@@ -188,6 +188,22 @@ class EditorWindow(QMainWindow):
         self.timeline.fit()
         self.player.seek(0.0)
         self._update_actions()
+        store = QSettings("Glimpsy", "editor")
+        if not store.value("tour_done", False, type=bool):   # первый раз — обучение само
+            store.setValue("tour_done", True)
+            QTimer.singleShot(700, self.start_tour)
+
+    def start_tour(self) -> None:
+        """Обучение по редактору (кнопка «?»)."""
+        from glimpsy.editor.tour import TourOverlay
+
+        if getattr(self, "_tour", None) is not None:
+            return
+        self.player.pause()
+        targets = dict(self._tour_targets, timeline=self.timeline_scroll)
+        self._tour = TourOverlay(self, targets.get)
+        self._tour.finished.connect(lambda: setattr(self, "_tour", None))
+        self._tour.start()
 
     # ---------- раскладка окна ----------
 
@@ -264,8 +280,11 @@ class EditorWindow(QMainWindow):
         tl = QHBoxLayout(topbar)
         tl.setContentsMargins(14, 8, 12, 8)
         tl.setSpacing(10)
+        self._tour_targets: dict[str, QWidget] = {"format": seg, "montage": self.montage_btn,
+                                                  "export": self.export_btn}
         if self.on_sessions is not None:
             back = theme.mark(QPushButton(theme.icon("layout-grid", theme.MUTED, 16), "  Все записи"), "ghost")
+            self._tour_targets["back"] = back
             back.setToolTip("Вернуться к списку всех записей (проект сохраняется сам)")
             back.clicked.connect(self.back_to_sessions)
             tl.addWidget(back)
@@ -282,6 +301,13 @@ class EditorWindow(QMainWindow):
         tl.addWidget(seg)
         tl.addSpacing(6)
         tl.addWidget(self.export_btn)
+        help_btn = theme.mark(QPushButton("?"), "ghost")
+        help_btn.setFixedWidth(36)
+        help_btn.setStyleSheet("font-size: 16px; font-weight: 700;")
+        help_btn.setToolTip("Обучение: что где в редакторе и для чего")
+        help_btn.clicked.connect(self.start_tour)
+        tl.addWidget(help_btn)
+        self._tour_targets["help"] = help_btn
 
         # --- левая колонка инструментов ---
         rail = QFrame()
@@ -303,6 +329,7 @@ class EditorWindow(QMainWindow):
             if slot is not None:
                 b.clicked.connect(slot)
             rl.addWidget(b)
+            self._tour_targets.setdefault("tool:" + text, b)
             return b
 
         # панели слева: открывается одна, повторный щелчок по кнопке — свернуть.
@@ -340,7 +367,10 @@ class EditorWindow(QMainWindow):
         left("files", "folder-open", "Файлы", "Файлы с компьютера: видео, фото и музыка под рукой", self.library)
         left("media", "image-plus", "Медиа", "Видео и фото на дорожку «Медиа» — на весь кадр, с места курсора (M). "
              "Вставить между фрагментами видео — перетащите файл на дорожку видео или Ctrl+V", self.media_lib)
-        tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
+        add_text_btn = tool("type", "Текст", "Добавить текст в месте курсора (T)", self.add_text)
+        self._tour_targets["tool:Текст+"] = add_text_btn
+        if self._tour_targets.get("tool:Текст") is add_text_btn:      # «Текст» (монтаж по тексту) — только у видео
+            del self._tour_targets["tool:Текст"]
         left("subtitles", "captions", "Субтитры", "Все субтитры списком: распознать речь, исправить, удалить",
              self.subs_panel)
         left("overlay", "layers", "Наложение", "Картинка или видео поверх ролика", self.overlay_lib)
@@ -359,7 +389,7 @@ class EditorWindow(QMainWindow):
         tool("mic", "Запись", "Записать голос, камеру или то и другое — прямо в ролик, с места курсора",
              self.record)
         rl.addStretch(1)
-        tool("folder", "Папки", "Где лежат ролики, проекты, модели, переводчик, голоса и журналы — открыть",
+        tool("folder", "Папки", "Где лежат ролики, проекты, модели, переводчик и журналы — открыть",
              self.show_folders)
         tool("chart-column", "Статистика", "Сколько работали и где — только для вас", self.show_stats)
         self.shortcuts = ShortcutsPanel()
@@ -398,6 +428,7 @@ class EditorWindow(QMainWindow):
         cl.setContentsMargins(6, 6, 6, 0)
         cl.addWidget(self.preview, 1)
         cl.addLayout(transport)
+        self._tour_targets.update(preview=self.preview, play=self.play_btn)
 
         right = theme.mark(QFrame(), "panel")
         right.setObjectName("sidePanel")
@@ -408,6 +439,7 @@ class EditorWindow(QMainWindow):
         scroll.setWidget(self.side)
         rv.addWidget(scroll)
         right.setMinimumWidth(330)
+        self._tour_targets["side"] = right
 
         top = QSplitter(Qt.Orientation.Horizontal)
         top.setHandleWidth(6)
@@ -435,15 +467,21 @@ class EditorWindow(QMainWindow):
         bar = QHBoxLayout()
         bar.setContentsMargins(8, 4, 8, 2)
         bar.setSpacing(2)
+        edit_box = QWidget()
+        eb = QHBoxLayout(edit_box)
+        eb.setContentsMargins(0, 0, 0, 0)
+        eb.setSpacing(2)
         for a in (self.a_undo, self.a_redo):
-            bar.addWidget(tbtn(a))
+            eb.addWidget(tbtn(a))
         sep = theme.mark(QFrame(), "vdivider")
         sep.setFixedSize(1, 18)
-        bar.addSpacing(6)
-        bar.addWidget(sep)
-        bar.addSpacing(6)
+        eb.addSpacing(6)
+        eb.addWidget(sep)
+        eb.addSpacing(6)
         for a in (self.a_split, self.a_delete):
-            bar.addWidget(tbtn(a))
+            eb.addWidget(tbtn(a))
+        bar.addWidget(edit_box)
+        self._tour_targets["edit"] = edit_box
         add_track = theme.mark(QPushButton(theme.icon("plus", size=16), " Дорожка"), "ghost")
         add_track.setToolTip("Добавить дорожку — сколько угодно; правый щелчок по дорожке — ещё действия")
         track_menu = QMenu(add_track)
@@ -453,6 +491,7 @@ class EditorWindow(QMainWindow):
         add_track.setMenu(track_menu)
         bar.addSpacing(6)
         bar.addWidget(add_track)
+        self._tour_targets["tracks"] = add_track
         bar.addStretch(1)
         bar.addWidget(zoom_out)
         bar.addWidget(zoom_fit)
@@ -2616,6 +2655,8 @@ class EditorWindow(QMainWindow):
             return False
         # клавиши — только те, что пришли в это окно (открыто несколько редакторов или диалог — не наши)
         if ev.type() != QEvent.Type.KeyPress or not (isinstance(obj, QWidget) and obj.window() is self):
+            return False
+        if getattr(self, "_tour", None) is not None:      # идёт обучение — клавиши листают его
             return False
         assert isinstance(ev, QKeyEvent)
         focus = QApplication.focusWidget()
