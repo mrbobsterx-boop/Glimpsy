@@ -248,6 +248,7 @@ class EditorWindow(QMainWindow):
                               lambda: self.export(["16:9", "9:16"]))
         export_menu.addSeparator()
         export_menu.addAction(theme.icon("list", size=16), "Главы для YouTube…", self.show_chapters)
+        export_menu.addAction(theme.icon("image", size=16), "Обложка…", self.show_cover)
         export_menu.addSeparator()
         self.a_smart = export_menu.addAction("Быстрое сохранение (без пересчёта видео, где можно)")
         self.a_smart.setCheckable(True)
@@ -1207,6 +1208,19 @@ class EditorWindow(QMainWindow):
         if dlg.items != (self.project.cuts.get("chapters") or []):
             self.history.push(self.project.to_dict())
             self.project.cuts["chapters"] = dlg.items
+            self._save_timer.start()
+
+    def show_cover(self) -> None:
+        from glimpsy.editor.cover_dialog import CoverDialog
+
+        self.player.pause()
+        out_dir = Path(self.project.source_video).parent if self.project.source_video else Path(self.fallback_output)
+        dlg = CoverDialog(self.ffmpeg, self.project, out_dir, self)
+        dlg.exec()
+        opts = dlg.result_opts()
+        if opts != (self.project.cuts.get("cover") or {}):
+            self.history.push(self.project.to_dict())
+            self.project.cuts["cover"] = opts
             self._save_timer.start()
 
     def _cut_retakes(self, spans: list, cut: bool) -> None:
