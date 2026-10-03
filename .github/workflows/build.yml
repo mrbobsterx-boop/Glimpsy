@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write   # нужно, чтобы выкладывать файлы в Releases
 
+# Новый push отменяет недоделанную сборку той же ветки — в релиз попадает только свежая версия
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Консоль Windows по умолчанию не понимает кириллицу — включаем UTF-8 для Python
   PYTHONUTF8: "1"
@@ -46,6 +51,18 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements*.txt
+
+      # Номер сборки — внутрь программы: по нему она узнаёт, что вышла новая версия.
+      # Ветки claude/… — тестовый канал (релиз «dev»), main и теги — обычный.
+      - name: Номер сборки
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          case "$GITHUB_REF" in
+            refs/heads/claude/*) channel=dev ;;
+            *) channel=stable ;;
+          esac
+          python scripts/release_info.py build "$GITHUB_RUN_NUMBER" "$channel"
 
       - name: Системные библиотеки (Linux)
         if: runner.os == 'Linux'
@@ -120,6 +137,51 @@ jobs:
             dist/*.AppImage
           if-no-files-found: error
 
+      # Описание версии для автообновления (номер сборки и размеры файлов этой системы)
+      - name: Файл версии
+        shell: bash
+        run: python scripts/release_info.py manifest "$GITHUB_RUN_NUMBER" "${{ runner.os == 'Windows' && 'windows-x64' || runner.os == 'Linux' && 'linux-x64' || format('macos-{0}', matrix.mac_arch) }}"
+
+      # Тестовые сборки (ветки claude/…) — в релиз «dev»: оттуда их берёт автообновление.
+      # Сначала файлы программы, потом файл версии — чтобы программа не увидела новую
+      # версию раньше, чем её можно скачать.
+      - name: Выложить тестовую версию
+        if: startsWith(github.ref, 'refs/heads/claude/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Glimpsy — тестовая версия
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          body: |
+            Самая свежая тестовая сборка. Glimpsy обновляется до неё сам (меню значка в трее → «Проверить обновления…»).
+            * **Windows** — `Glimpsy-Windows-x64-portable.exe` или `Glimpsy-Windows-x64.zip`
+            * **Mac на M1–M4** — `Glimpsy-macOS-arm64.zip`, **Mac на Intel** — `Glimpsy-macOS-x86_64.zip`
+            * **Linux** — `Glimpsy-x86_64.AppImage`
+          files: |
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+
+      - name: Выложить файл версии
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          overwrite_files: true
+          files: dist/version-*.json
+
+      - name: Выложить файл версии (тестовая)
+        if: startsWith(github.ref, 'refs/heads/claude/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: dist/version-*.json
+
       # Номер версии берём из glimpsy/__init__.py
       - name: Номер версии
         id: ver
@@ -148,3 +210,11 @@ jobs:
             dist/*.zip
             dist/*.exe
             dist/*.AppImage
+
+      - name: Выложить файл версии
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.tag }}
+          overwrite_files: true
+          files: dist/version-*.json

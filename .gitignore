@@ -8,3 +8,4 @@ vendor/
 *.AppImage
 .pytest_cache/
 *.egg-info/
+glimpsy/_build.py

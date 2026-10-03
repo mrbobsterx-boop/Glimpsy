@@ -96,6 +96,14 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)     # программа живёт в трее
     app.setWindowIcon(state_icon("recording"))
 
+    from glimpsy import updater
+
+    updated = "--after-update" in sys.argv[:-1]
+    if updated:                    # перезапуск после обновления: ждём, пока старая копия закроется
+        try:
+            updater.wait_for_exit(int(sys.argv[sys.argv.index("--after-update") + 1]))
+        except ValueError:
+            pass
     # Программа уже запущена? Тогда просим её показаться и выходим — две копии не нужны
     if _notify_running_instance(b"editor" if "--editor" in sys.argv else b"show"):
         sys.exit(0)
@@ -106,6 +114,7 @@ def main() -> None:
                                              "исходников выполните: python scripts/fetch_ffmpeg.py")
         sys.exit(1)
 
+    updater.cleanup()
     from glimpsy import migrate
     if migrate.run():
         log.info("Данные Worklapse перенесены в Glimpsy")
@@ -147,7 +156,10 @@ def main() -> None:
         save_settings(settings)
     else:
         if not engine.running:          # когда запись уже идёт, уведомление попало бы в ролик
-            tray.show_message("Glimpsy запущен", "Значок — в трее возле часов.")
+            if updated:
+                tray.show_message("Glimpsy обновлён", "Новая версия установлена и запущена.")
+            else:
+                tray.show_message("Glimpsy запущен", "Значок — в трее возле часов.")
 
     if "--editor" in sys.argv:        # ярлык «Glimpsy — редактор»
         tray.open_editor()

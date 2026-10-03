@@ -54,6 +54,7 @@ class Settings:
     monitor_mode: str = "auto"         # auto = монитор под мышкой, manual = выбранный
     manual_monitor: int = 1            # номер монитора (с 1) для ручного режима
     autostart_recording: bool = True   # начинать запись сразу при запуске программы
+    check_updates: bool = True         # сама проверять, не вышла ли новая версия
     launch_at_login: bool = False      # запускать вместе с компьютером (реально хранится в системе)
 
     # --- Звук ---

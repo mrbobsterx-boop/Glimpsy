@@ -44,12 +44,15 @@ class TrayController(QObject):
         self._prompter_cmd.connect(self._prompter_run)
 
         self.menu = QMenu()
+        ic = theme.icon
+        self.a_update = self.menu.addAction(ic("download", theme.ACCENT_HOVER, 16), "Обновить Glimpsy — есть новая версия",
+                                            lambda: self.updates.show_dialog())
+        self.a_update.setVisible(False)
         self.a_status = self.menu.addAction("…")
         self.a_status.setEnabled(False)
         self.a_counts = self.menu.addAction("")
         self.a_counts.setEnabled(False)
         self.menu.addSeparator()
-        ic = theme.icon
         self.a_pause = self.menu.addAction(ic("pause", size=16), "Пауза", self.engine.toggle_pause)
         self.a_important = self.menu.addAction(ic("star", "#F5C518", 16), "Отметить важный момент",
                                                self.engine.mark_important)
@@ -67,6 +70,7 @@ class TrayController(QObject):
                             lambda: paths.open_in_file_manager(Path(self.s.output_dir)))
         self.menu.addAction(ic("settings", size=16), "Настройки…", self.open_settings)
         self.menu.addAction(ic("trash-2", size=16), "Очистить кэш…", self.clear_cache)
+        self.menu.addAction(ic("rotate-ccw", size=16), "Проверить обновления…", lambda: self.updates.check(manual=True))
         self.menu.addSeparator()
         self.menu.addAction(ic("power", size=16), "Выход", self.quit)
 
@@ -92,6 +96,10 @@ class TrayController(QObject):
         engine.assembly_failed.connect(lambda msg: self.show_message("Не удалось собрать ролик", msg))
         self._on_status(self.status)
         self.bind_hotkeys()
+        from glimpsy.ui.update import UpdateManager
+
+        self.updates = UpdateManager(self)
+        self.updates.available.connect(lambda _rel: self.a_update.setVisible(True))
 
     # ---------- горячие клавиши ----------
 
@@ -511,17 +519,24 @@ class TrayController(QObject):
         self.s.__dict__.update(new.__dict__)
         save_settings(self.s)
         self.engine.apply_settings(self.s)
+        self.updates.set_enabled(self.s.check_updates)
         if hotkeys_changed:
             self.bind_hotkeys()
 
-    def quit(self) -> None:
-        if self.engine.candidate_count:
+    def exporting(self) -> bool:
+        return any(getattr(w, "exporting", False) for w in self._editors)
+
+    def quit(self, force: bool = False) -> None:
+        """force — без вопросов (перезапуск после обновления): уже записанное сохранится."""
+        if self.engine.candidate_count and not force:
             ans = QMessageBox.question(
                 None, "Glimpsy",
                 "Выйти без сборки ролика?\nСохранённые фрагменты останутся — при следующем запуске "
                 "можно будет собрать ролик или продолжить запись.")
             if ans != QMessageBox.StandardButton.Yes:
                 return
+        for w in list(self._editors):        # сохранить открытые проекты
+            w.close()
         self.services.hotkeys.stop()
         if self._prompter is not None:
             self._prompter.hide()

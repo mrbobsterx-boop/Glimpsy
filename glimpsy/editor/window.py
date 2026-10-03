@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QEventLoop, QObject, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QMenu, QButtonGroup, QDialog, QFileDialog, QFrame, QScrollArea, QToolButton, QHBoxLayout, QLabel, QLineEdit,
@@ -114,6 +114,7 @@ class EditorWindow(QMainWindow):
         load_custom_fonts()                 # свои шрифты, добавленные раньше
         self.player = TimelinePlayer(self.project)
         self._export_cancel: threading.Event | None = None
+        self.exporting = False               # идёт сохранение видео (обновление программы подождёт)
 
         self.setWindowTitle(f"Glimpsy — {self.project.name}")
         self.resize(1280, 820)
@@ -2386,6 +2387,7 @@ class EditorWindow(QMainWindow):
         bridge.progress.connect(lambda f, t: (dlg.setValue(int(f * 1000)), dlg.setLabelText(t)))
 
         def finished(path: str) -> None:
+            self.exporting = False
             dlg.close()
             files = path.split("\n")
             box = QMessageBox(self)
@@ -2398,6 +2400,7 @@ class EditorWindow(QMainWindow):
                 paths.open_in_file_manager(Path(files[0]).parent)
 
         def failed(msg: str) -> None:
+            self.exporting = False
             dlg.close()
             if msg:
                 QMessageBox.warning(self, "Экспорт не удался", msg)
@@ -2452,6 +2455,7 @@ class EditorWindow(QMainWindow):
             finally:
                 shutil.rmtree(layers_dir, ignore_errors=True)
 
+        self.exporting = True
         threading.Thread(target=work, daemon=True, name="export").start()
         dlg.show()
 

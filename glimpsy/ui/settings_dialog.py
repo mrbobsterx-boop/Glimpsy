@@ -236,6 +236,8 @@ class SettingsDialog(QDialog):
 
         self.login = QCheckBox("Запускать Glimpsy вместе с компьютером")
         self.login.setChecked(autostart.is_enabled())   # правда — в системе, а не в файле настроек
+        self.updates = QCheckBox("Проверять, не вышла ли новая версия Glimpsy")
+        self.updates.setChecked(self.s.check_updates)
 
         f.addRow("Частота кадров", self.fps)
         f.addRow("Кольцевой буфер", self.buffer)
@@ -252,6 +254,7 @@ class SettingsDialog(QDialog):
         f.addRow("Видеокодек", self.encoder)
         f.addRow("", self.autostart)
         f.addRow("", self.login)
+        f.addRow("", self.updates)
         return w
 
     def _hotkeys_tab(self) -> QWidget:
@@ -546,6 +549,7 @@ class SettingsDialog(QDialog):
         s.encoder = self.encoder.currentData()
         s.autostart_recording = self.autostart.isChecked()
         s.launch_at_login = self.login.isChecked()
+        s.check_updates = self.updates.isChecked()
         s.important_before_s = self.imp_before.value()
         s.important_after_s = self.imp_after.value()
         s.blacklist = [x.strip() for x in self.blacklist.toPlainText().splitlines() if x.strip()]
