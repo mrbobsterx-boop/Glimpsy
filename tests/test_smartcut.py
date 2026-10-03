@@ -68,7 +68,7 @@ def test_smart_export_matches_exact_cut(tmp_path, bf):
     log = tmp_path / "psnr.log"
     subprocess.run([FFMPEG, "-v", "error", "-i", str(out), "-i", str(video), "-filter_complex",
                     f"[1:v]select='{sel}',setpts=N/30/TB[r];[0:v]setpts=N/30/TB[o];"
-                    f"[o][r]psnr=stats_file='{log.as_posix()}'", "-f", "null", "-"], check=True)
+                    f"[o][r]psnr=stats_file=psnr.log", "-f", "null", "-"], check=True, cwd=tmp_path)
     values = [float(v) for v in re.findall(r"psnr_avg:([\d.]+|inf)", log.read_text()) if v != "inf"]
     n = len(log.read_text().splitlines())
     assert n == frames

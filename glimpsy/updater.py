@@ -129,7 +129,7 @@ def target_path(kind: str, executable: str | None = None, env: dict | None = Non
         return Path(env["APPIMAGE"])
     if kind in ("exe", "folder"):
         return exe if kind == "exe" else exe.parent
-    s = str(exe)
+    s = (executable or sys.executable).replace("\\", "/")
     return Path(s[: s.index(".app/Contents/MacOS") + 4])
 
 
