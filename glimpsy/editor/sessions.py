@@ -92,7 +92,8 @@ def projects_root() -> Path:
 
 
 class SessionsDialog(QDialog):
-    def __init__(self, ffmpeg: str, open_project: Callable[[Path], None]) -> None:
+    def __init__(self, ffmpeg: str, open_project: Callable[..., None]) -> None:
+        """open_project(папка, at=секунды) — открыть проект (и перейти к месту в ролике)."""
         super().__init__()
         self.setWindowTitle("Glimpsy — мои сессии")
         self.resize(820, 620)
@@ -116,6 +117,26 @@ class SessionsDialog(QDialog):
         self.empty = theme.mark(QLabel("Пока нет ни одной сессии.\nЗапишите и соберите ролик — он появится здесь.\n"
                                        "Или смонтируйте своё видео — кнопка «Смонтировать видео…» внизу."), "muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # поиск по словам во всех проектах
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QLineEdit
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Найти слово или фразу во всех проектах — где и когда это было сказано")
+        self.search.setClearButtonEnabled(True)
+        self.search.addAction(theme.icon("scan-search", theme.MUTED, 16), QLineEdit.ActionPosition.LeadingPosition)
+        self._search_timer = QTimer(self, singleShot=True, interval=250)
+        self._search_timer.timeout.connect(self._do_search)
+        self.search.textChanged.connect(lambda _t: self._search_timer.start())
+        self._index = None
+        self.results = QListWidget()
+        self.results.setWordWrap(True)
+        self.results.itemDoubleClicked.connect(self._open_hit)
+        self.results.itemActivated.connect(self._open_hit)
+        self.results.setVisible(False)
+        self.results_info = theme.mark(QLabel(), "muted")
+        self.results_info.setVisible(False)
 
         self.b_open = theme.mark(QPushButton(theme.icon("film", "#FFFFFF", 16), "  Открыть в редакторе"), "primary")
         self.b_open.setDefault(True)
@@ -157,12 +178,57 @@ class SessionsDialog(QDialog):
         lay.setContentsMargins(20, 18, 20, 16)
         lay.setSpacing(12)
         lay.addLayout(head)
+        lay.addWidget(self.search)
+        lay.addWidget(self.results_info)
+        lay.addWidget(self.results, 1)
         lay.addWidget(self.list, 1)
         lay.addWidget(self.empty, 1)
         lay.addLayout(buttons)
         self.reload()
 
+    # ---------- поиск ----------
+
+    def _do_search(self) -> None:
+        from glimpsy.editor.search import Index
+
+        query = self.search.text().strip()
+        searching = len(query) >= 2
+        self.results.setVisible(searching)
+        self.results_info.setVisible(searching)
+        self.list.setVisible(not searching and self.list.count() > 0)
+        self.empty.setVisible(not searching and self.list.count() == 0)
+        if not searching:
+            return
+        if self._index is None:
+            from PySide6.QtWidgets import QApplication
+
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self._index = Index(list_projects(projects_root()))
+            finally:
+                QApplication.restoreOverrideCursor()
+        hits = self._index.search(query)
+        self.results.clear()
+        for h in hits:
+            item = QListWidgetItem(f"{h.name}  ·  {fmt_time(h.t)}\n{h.context}")
+            item.setData(Qt.ItemDataRole.UserRole, (str(h.project), h.t))
+            item.setToolTip("Двойной щелчок — открыть проект на этом месте")
+            self.results.addItem(item)
+        projects = len({h.project for h in hits})
+        self.results_info.setText(f"Найдено: {len(hits)} — в проектах: {projects}. Двойной щелчок — открыть "
+                                  "на этом месте." if hits else
+                                  "Ничего не нашлось. Ищется то, что звучит в роликах: расшифровка речи "
+                                  "и субтитры.")
+
+    def _open_hit(self, item: QListWidgetItem) -> None:
+        d, t = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            self.open_project(Path(d), at=float(t))
+        except TypeError:                               # открывальщик без перехода к месту
+            self.open_project(Path(d))
+
     def reload(self) -> None:
+        self._index = None
         self.list.clear()
         self._first_frames.clear()
         for d in list_projects(projects_root()):
@@ -191,8 +257,9 @@ class SessionsDialog(QDialog):
                 c = p.clips[0]
                 self._first_frames[self.list.count() - 1] = (p.path_of(c), c.in_s, c.kind == "image")
         empty = self.list.count() == 0
-        self.list.setVisible(not empty)
-        self.empty.setVisible(empty)
+        searching = len(self.search.text().strip()) >= 2
+        self.list.setVisible(not empty and not searching)
+        self.empty.setVisible(empty and not searching)
         if not empty:
             self.list.setCurrentRow(0)
         self._refresh_icons()

@@ -433,13 +433,16 @@ class TrayController(QObject):
         self._sessions.raise_()
         self._sessions.activateWindow()
 
-    def _open_project(self, project_dir: Path) -> None:
+    def _open_project(self, project_dir: Path, at: float | None = None) -> None:
+        """Открыть проект в редакторе; at — сразу перейти к этому месту ролика (секунды)."""
         from glimpsy.editor.window import EditorWindow
 
         for w in list(self._editors):          # уже открыт — просто показываем
             if w.project.dir == project_dir and w.isVisible():
                 w.raise_()
                 w.activateWindow()
+                if at is not None:
+                    w.player.seek(at)
                 return
         self._editors = [w for w in self._editors if w.isVisible()]
         try:
@@ -452,6 +455,8 @@ class TrayController(QObject):
         w.setWindowIcon(state_icon(State.RECORDING))
         self._editors.append(w)
         w.show()
+        if at is not None:                     # после первой раскладки окна (она перематывает в начало)
+            QTimer.singleShot(200, lambda: w.player.seek(at))
         if self._sessions:
             self._sessions.close()
 
