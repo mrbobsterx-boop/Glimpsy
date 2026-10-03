@@ -370,10 +370,13 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
             tmp = work / "final.mp4"
             joined = work / "joined.mp4" if layered else tmp
             enc = export_cuts(ffmpeg, project, clips, joined, work, encoder,
-                              lambda f, t: progress(f * (0.8 if layered else 1.0), t), cancel)
+                              lambda f, t: progress(f * (0.8 if layered else 0.95), t), cancel)
             if layered:
                 progress(0.8, "Тексты, наложения и музыка")
+                joined = _sound(ffmpeg, project, joined, cancel, level=False)     # шум — только с голоса
                 _compose_layers(ffmpeg, project, joined, tmp, text_layers or [], overlay_layers or [], enc, cancel)
+            progress(0.95, "Звук")
+            tmp = _sound(ffmpeg, project, tmp, cancel, voice=not layered)
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp), out)
             progress(1.0, "Готово")
@@ -406,12 +409,25 @@ def export_project(ffmpeg: str, project: Project, out: Path, encoder: Encoder,
               "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)], cancel)
         if layered:
             progress(len(clips) / (len(clips) + 1), "Тексты, наложения и музыка")
+            joined = _sound(ffmpeg, project, joined, cancel, level=False)
             _compose_layers(ffmpeg, project, joined, tmp, text_layers or [], overlay_layers or [], enc, cancel)
+        tmp = _sound(ffmpeg, project, tmp, cancel, voice=not layered)
         shutil.move(str(tmp), out)
         progress(1.0, "Готово")
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _sound(ffmpeg: str, project: Project, src: Path, cancel: threading.Event, voice: bool = True,
+           level: bool = True) -> Path:
+    """Обработка звука (шумоподавление, громкость), если она включена; картинка не пересчитывается."""
+    from glimpsy.editor import sound
+
+    out = src.with_name(src.stem + ("_v" if voice else "") + ("_l" if level else "") + src.suffix)
+    if sound.process(ffmpeg, project, src, out, lambda cmd, cwd=None: _run(cmd, cancel, cwd), voice, level):
+        return out
+    return src
 
 
 def _try_smart(ffmpeg: str, project: Project, clips: list[Clip], out: Path, work: Path,
@@ -434,6 +450,8 @@ def _try_smart(ffmpeg: str, project: Project, clips: list[Clip], out: Path, work
     except ExportError as e:
         log.warning("Быстрое сохранение не удалось, обычный экспорт: %s", e)
         return False
+    progress(0.97, "Звук")
+    tmp = _sound(ffmpeg, project, tmp, cancel)
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(tmp), out)
     progress(1.0, "Готово")
@@ -537,9 +555,9 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
     _run(cmd, cancel)
 
 
-def _run(cmd: list[str], cancel: threading.Event) -> None:
+def _run(cmd: list[str], cancel: threading.Event, cwd: Path | None = None) -> None:
     log.debug("ffmpeg %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **subprocess_flags())
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=cwd, **subprocess_flags())
     while True:
         try:
             _, err = proc.communicate(timeout=0.3)

@@ -336,6 +336,13 @@ class EditorWindow(QMainWindow):
              self.subs_panel)
         left("overlay", "layers", "Наложение", "Картинка или видео поверх ролика", self.overlay_lib)
         left("music", "music", "Музыка", "Фоновая музыка на весь ролик", self.music_lib)
+        from glimpsy.editor.enhance_panel import EnhancePanel
+
+        self.enhance = EnhancePanel()
+        self.enhance.set_project(self.project)
+        self.enhance.sound_changed.connect(self._on_sound)
+        self.enhance.listen.connect(self._listen)
+        left("enhance", "sparkles", "Улучшить", "Чистый голос, одинаковая громкость, картинка", self.enhance)
         tool("square-split-horizontal", "До/после", "Вставка «Было → стало»: шторка, таймлапс или стоп-кадр",
              self.before_after)
         tool("mic", "Запись", "Записать голос, камеру или то и другое — прямо в ролик, с места курсора",
@@ -504,6 +511,100 @@ class EditorWindow(QMainWindow):
             panel.set_open(False)
             if not any(b.isChecked() for b, _p in self._left.values()):
                 QSettings("Glimpsy", "editor").setValue("left_panel", "")
+
+    # ---------- улучшить: звук ----------
+
+    def _on_sound(self, what: str, value) -> None:
+        if self.project.sound.get(what) == value:
+            return
+        self.history.push(self.project.to_dict(), key=f"sound-{what}")
+        self.project.sound[what] = value
+        self._save_timer.start()
+        if what == "denoise" and value:
+            self._ensure_denoise_model()
+
+    def _ensure_denoise_model(self) -> None:
+        from glimpsy.editor import sound
+        from glimpsy.editor.subtitles_dialog import Downloader
+
+        if sound.model_ready() or getattr(self, "_rnn_dl", None) is not None:
+            return
+        self.enhance.set_model_status("Скачиваю нейросеть шумоподавления (0,3 МБ)…")
+        dl = self._rnn_dl = Downloader(self)
+
+        def done(err: str) -> None:
+            self._rnn_dl = None
+            if err:
+                log.warning("Модель шумоподавления не скачалась: %s", err)
+                self.enhance.set_model_status("Нейросеть не скачалась — шум уберётся обычным способом "
+                                              "(чуть хуже). Попробуйте позже: сдвиньте ползунок ещё раз.")
+            else:
+                self.enhance.set_model_status("")
+
+        dl.finished.connect(done)
+        dl.start([(sound.MODEL_URL, sound.model_path())])
+
+    def _listen(self, which: str) -> None:
+        """«Как было / как будет»: 8 секунд с места курсора — без обработки и с ней."""
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+        if getattr(self, "_listen_player", None) is None:
+            self._listen_player = QMediaPlayer(self)
+            self._listen_out = QAudioOutput(self)
+            self._listen_player.setAudioOutput(self._listen_out)
+            self._listen_files: dict = {}
+        self._listen_player.stop()
+        if which == "stop":
+            return
+        self.player.pause()
+        i, off = self.project.locate(self.player.t)
+        if i is None:
+            return
+        clip = self.project.clips[i]
+        if clip.kind != "video" or not clip.has_audio:
+            self.enhance.set_listen_status("Здесь в ролике нет звука записи — поставьте курсор на место с голосом.")
+            return
+        src = self.project.path_of(clip)
+        start = clip.in_s + off * clip.speed
+        key = (str(src), round(start, 1), json.dumps(self.project.sound, sort_keys=True))
+        files = self._listen_files.get(key)
+        if files:
+            self._play_listen(files[0 if which == "before" else 1])
+            return
+        self.enhance.set_listen_status("Готовлю…")
+        work = paths.temp_root() / "listen"
+        work.mkdir(parents=True, exist_ok=True)
+        n = len(self._listen_files)
+        before, after = work / f"before_{n}.wav", work / f"after_{n}.wav"
+        bridge = _ExportBridge(self)
+        snapshot = Project(self.project.dir, self.project.name)
+        snapshot.sound = dict(self.project.sound)
+
+        def ready(_msg: str) -> None:
+            self._listen_files[key] = (before, after)
+            self.enhance.set_listen_status("Послушать 8 секунд с места курсора.")
+            self._play_listen(before if which == "before" else after)
+
+        bridge.done.connect(ready)
+        bridge.failed.connect(lambda msg: self.enhance.set_listen_status(f"Не получилось: {msg}"))
+
+        def work_fn() -> None:
+            from glimpsy.editor import sound
+
+            try:
+                sound.preview(self.ffmpeg, snapshot, src, start, before, after)
+                bridge.done.emit("")
+            except Exception as e:                      # noqa: BLE001 — показать человеку, что не так
+                log.exception("Не удалось подготовить «до/после»")
+                bridge.failed.emit(str(e)[-200:])
+
+        threading.Thread(target=work_fn, daemon=True, name="listen").start()
+
+    def _play_listen(self, path: Path) -> None:
+        from PySide6.QtCore import QUrl
+
+        self._listen_player.setSource(QUrl.fromLocalFile(str(path)))
+        self._listen_player.play()
 
     def toggle_left(self, name: str) -> None:
         b = self._left[name][0]
@@ -1444,6 +1545,7 @@ class EditorWindow(QMainWindow):
             b.setChecked(b.property("aspect") == self.project.aspect)
         if self.project.text_edit:
             self._tr_build(keep_scroll=True)          # режим, порог и подписи пауз — как в восстановленном
+        self.enhance.set_project(self.project)
         self._changed()
 
     def split(self) -> None:

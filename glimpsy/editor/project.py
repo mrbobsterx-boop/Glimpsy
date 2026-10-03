@@ -165,6 +165,8 @@ class Project:
     # монтаж по тексту: исходные видео, что вырезано и настройки пауз (см. transcript.py);
     # пусто — обычный проект
     cuts: dict = field(default_factory=dict)
+    sound: dict = field(default_factory=dict)        # обработка звука: шумоподавление, громкость (sound.py)
+    look: dict = field(default_factory=dict)         # обработка картинки: стабилизация, цвет (look.py)
 
     def __post_init__(self) -> None:
         self.normalize_tracks()
@@ -365,6 +367,8 @@ class Project:
             "cursor": dict(self.cursor),
             "tracks": [asdict(t) for t in self.tracks],
             "cuts": copy.deepcopy(self.cuts),
+            "sound": dict(self.sound),
+            "look": dict(self.look),
         }
 
     def restore(self, data: dict) -> None:
@@ -391,6 +395,8 @@ class Project:
         self.tracks = [Track(str(t["id"]), str(t["kind"]), str(t.get("name", ""))) for t in data.get("tracks", [])
                        if t.get("kind") in TRACK_KINDS]
         self.cuts = copy.deepcopy(data.get("cuts") or {})
+        self.sound = dict(data.get("sound") or {})
+        self.look = dict(data.get("look") or {})
         self.normalize_tracks()
 
     def save(self) -> None:
