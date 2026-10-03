@@ -241,6 +241,8 @@ class EditorWindow(QMainWindow):
         export_menu.addAction(theme.icon("layers", size=16), "Оба формата сразу (два файла)",
                               lambda: self.export(["16:9", "9:16"]))
         export_menu.addSeparator()
+        export_menu.addAction(theme.icon("list", size=16), "Главы для YouTube…", self.show_chapters)
+        export_menu.addSeparator()
         self.a_smart = export_menu.addAction("Быстрое сохранение (без пересчёта видео, где можно)")
         self.a_smart.setCheckable(True)
         self.a_smart.setChecked(QSettings("Glimpsy", "editor").value("export/smart", True, type=bool))
@@ -1132,6 +1134,32 @@ class EditorWindow(QMainWindow):
                 for i in hits:
                     self._mark("deleted", s["src"], i, cut)
         self._recut()
+
+    # ---------- главы для YouTube ----------
+
+    def _spoken_words(self) -> list[tuple[float, float, str]]:
+        """Речь во времени ролика: из расшифровки (монтаж по тексту) или из субтитров."""
+        store = getattr(self, "tstore", None)
+        if self.project.text_edit and store is not None:
+            return tr.output_words(self.project, store)
+        from glimpsy.editor.subtitles_panel import subtitle_items
+
+        return [(t.start, t.end, w) for t in subtitle_items(self.project) for w in t.text.split()]
+
+    def show_chapters(self) -> None:
+        from glimpsy.editor import chapters as ch
+        from glimpsy.editor.chapters_dialog import ChaptersDialog
+
+        self.player.pause()
+        total = self.project.total
+        dlg = ChaptersDialog(self.project.cuts.get("chapters") or [], total,
+                             lambda: ch.suggest(self._spoken_words(), total), lambda: self.player.t,
+                             self.player.seek, self)
+        dlg.exec()
+        if dlg.items != (self.project.cuts.get("chapters") or []):
+            self.history.push(self.project.to_dict())
+            self.project.cuts["chapters"] = dlg.items
+            self._save_timer.start()
 
     def _cut_retakes(self, spans: list, cut: bool) -> None:
         """Вырезать (или вернуть) неудачные попытки: (видео, первое слово, слово повтора)."""
@@ -2578,6 +2606,13 @@ class EditorWindow(QMainWindow):
                                           overlay_layers=overlay_layers, progress=prog, cancel=cancel,
                                           smart=smart)
                     done.append(str(path))
+                    chapters = snapshot.cuts.get("chapters")
+                    if chapters:                       # главы для описания на YouTube — рядом с роликом
+                        from glimpsy.editor import chapters as ch
+
+                        txt = Path(path).with_suffix(".chapters.txt")
+                        txt.write_text(ch.as_text(chapters, snapshot.total) + "\n", encoding="utf-8")
+                        done.append(str(txt))
                     if snapshot.text_edit:
                         # субтитры с таймкодами уже готового ролика — рядом с ним
                         words = tr.output_words(snapshot, tr.TranscriptStore(snapshot.dir))
