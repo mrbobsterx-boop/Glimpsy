@@ -670,6 +670,9 @@ class EditorWindow(QMainWindow):
         p.fillers_changed.connect(self._set_fillers)
         p.fillers_cut.connect(lambda ws: self._cut_fillers(ws, True))
         p.fillers_restore.connect(lambda ws: self._cut_fillers(ws, False))
+        p.retakes_cut.connect(lambda spans: self._cut_retakes(spans, True))
+        p.retakes_restore.connect(lambda spans: self._cut_retakes(spans, False))
+        p.retake_selected.connect(self._goto_word)
         self._sel_pause: tuple[int, int] | None = None
         p.transcribe_requested.connect(self.transcribe)
         p.retime_requested.connect(lambda: self.transcribe(retime=True))
@@ -723,6 +726,8 @@ class EditorWindow(QMainWindow):
             return
         cuts = tr.cuts_of(self.project)
         fillers = cuts.get("mode") == "fillers"
+        retakes = cuts.get("mode") == "retakes"
+        found: list[tuple[int, int, int, str, bool]] = []
         counts: dict[str, tuple[int, int]] = {}
         states: dict[tuple, str] = {}
         for si, s in enumerate(self._sources()):
@@ -736,10 +741,17 @@ class EditorWindow(QMainWindow):
                     counts[f] = (n + len(hits), g + sum(1 for i in hits if i in gone))
                     for i in hits:
                         states[("w", si, i)] = "filler"
+            if retakes:
+                for r in tr.find_retakes(sw.words):
+                    text = " ".join(sw.words[i].text for i in r.words)
+                    found.append((si, r.start, r.end, text, all(i in gone for i in r.words)))
+                    for i in r.words:
+                        states[("w", si, i)] = "retake"
             for field, flag in (("muted", "mute"), ("hidden", "hide")):
                 for i in cuts.get(field, {}).get(s["src"], []):
                     k = ("w", si, i)
-                    states[k] = flag if states.get(k, "keep") in ("keep", "filler") else states[k] + " " + flag
+                    states[k] = flag if states.get(k, "keep") in ("keep", "filler", "retake") \
+                        else states[k] + " " + flag
             for i in gone:
                 states[("w", si, i)] = "cut"
             marks = tr.pause_marks(cuts, s["src"])
@@ -752,6 +764,8 @@ class EditorWindow(QMainWindow):
         self.text_panel_t.view.apply_states(states)
         if fillers:
             self.text_panel_t.set_fillers(self._fillers(), counts)
+        if retakes:
+            self.text_panel_t.set_retakes(found)
         self.text_panel_t.set_stats(sum(float(s["duration"]) for s in self._sources()), self.project.total)
 
     def _recut(self) -> None:
@@ -1118,6 +1132,24 @@ class EditorWindow(QMainWindow):
                 for i in hits:
                     self._mark("deleted", s["src"], i, cut)
         self._recut()
+
+    def _cut_retakes(self, spans: list, cut: bool) -> None:
+        """Вырезать (или вернуть) неудачные попытки: (видео, первое слово, слово повтора)."""
+        if not spans:
+            return
+        self.history.push(self.project.to_dict())
+        sources = self._sources()
+        for si, a, b in spans:
+            if 0 <= si < len(sources):
+                for i in range(a, b):
+                    self._mark("deleted", sources[si]["src"], i, cut)
+        self._recut()
+
+    def _goto_word(self, si: int, i: int) -> None:
+        sources = self._sources()
+        sw = self.tstore.get(sources[si]["src"]) if 0 <= si < len(sources) else None
+        if sw is not None and 0 <= i < len(sw.words):
+            self.player.seek(self._timeline_time(sources[si]["src"], sw.words[i].start))
 
     # ---------- щелчки по тексту ----------
 

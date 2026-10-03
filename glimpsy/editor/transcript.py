@@ -558,6 +558,66 @@ def find_fillers(words: list[Word], fillers: list[str]) -> dict[str, list[int]]:
     return out
 
 
+# ---------------- неудачные дубли ----------------
+
+RETAKE_MAX_WORDS = 30        # неудачная попытка длиннее — это уже не дубль, а другая мысль
+RETAKE_MAX_S = 25.0
+RETAKE_SIMILAR = 0.6         # насколько попытка похожа на начало повтора
+RETAKE_GAP_S = 0.3           # пауза, после которой слово считается началом фразы
+
+
+@dataclass
+class Retake:
+    start: int               # первое слово неудачной попытки
+    end: int                 # слово, с которого начат повтор (не входит в попытку)
+
+    @property
+    def words(self) -> range:
+        return range(self.start, self.end)
+
+
+def phrase_starts(words: list[Word]) -> list[int]:
+    """Где начинаются фразы: после точки, запятой и т. п. или после паузы."""
+    out = [0] if words else []
+    for k in range(1, len(words)):
+        prev = words[k - 1]
+        if prev.text.rstrip().endswith((".", "!", "?", "…", ",", ";", ":", "—", "-")) or \
+                words[k].start - prev.end > RETAKE_GAP_S:
+            out.append(k)
+    return out
+
+
+def find_retakes(words: list[Word]) -> list[Retake]:
+    """Неудачные дубли: фразу начали, сбились и сказали заново с тех же слов.
+
+    «Сегодня мы погово… Сегодня мы поговорим о камере» → неудачная попытка — «Сегодня мы погово…»
+    (всё от её начала до повтора). Повтор узнаём по тем же первым словам (двум, а если они
+    совсем короткие, вроде «и в», — трём) и по тому, что попытка похожа на начало повтора.
+    Несколько попыток подряд — каждая отдельно, остаётся последняя.
+    """
+    import difflib
+
+    normed = [norm_word(w.text) for w in words]
+    starts = phrase_starts(words)
+    out: list[Retake] = []
+    for n, i in enumerate(starts):
+        m = 2 if any(len(x) > 2 for x in normed[i:i + 2]) else 3
+        head = normed[i:i + m]
+        if len(head) < m or not all(head):
+            continue
+        for j in starts[n + 1:]:
+            if j - i > RETAKE_MAX_WORDS or words[j].start - words[i].start > RETAKE_MAX_S:
+                break
+            if j < i + m or normed[j:j + m] != head:
+                continue
+            attempt = normed[i:j]
+            again = normed[j:j + len(attempt)]
+            if difflib.SequenceMatcher(None, attempt, again, autojunk=False).ratio() >= RETAKE_SIMILAR:
+                out.append(Retake(i, j))
+            break
+    return out
+
+
 def mark_spans(sw: SourceWords, marked: set[int], cuts: dict,
                env: np.ndarray | None = None) -> list[tuple[float, float]]:
     """Где во времени исходника лежат помеченные слова (подряд идущие — одним куском).

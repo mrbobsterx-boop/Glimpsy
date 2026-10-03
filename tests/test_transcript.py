@@ -630,3 +630,67 @@ def test_retime_keeps_words_and_marks():
     assert [w.text for w in out] == [w.text for w in old]                 # те же слова, те же номера
     assert [w.start for w in out[:3]] == [1.1, 1.8, 2.1] and out[4].start == 2.9
     assert 2.3 <= out[3].start < 2.9                                       # «эээ» — между соседями
+
+
+def _spoken(text, pause_before=()):
+    out, t = [], 0.5
+    for k, w in enumerate(text.split()):
+        if k in pause_before:
+            t += 0.6
+        out.append(Word(w, t, t + 0.3))
+        t += 0.35
+    return out
+
+
+@pytest.mark.parametrize("text, pauses, expected", [
+    ("Сегодня мы погово… Сегодня мы поговорим о камере.", (), [(0, 3)]),
+    ("Привет всем привет всем меня зовут Боб", (2,), [(0, 2)]),
+    ("И вот мы пошли в магазин. И вот там было много людей.", (), []),          # просто похожее начало
+    ("Это очень важно. Это очень. Это очень важная вещь", (), [(0, 3), (3, 5)]),   # две попытки подряд
+    ("и в доме и в саду", (), []),                                               # короткие слова — мало
+    ("Камера снимает очень хорошо и тихо", (), []),
+])
+def test_find_retakes(text, pauses, expected):
+    got = [(r.start, r.end) for r in tr.find_retakes(_spoken(text, pauses))]
+    assert got == expected
+
+
+@pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
+def test_retakes_in_editor(tmp_path, qt_app):
+    """Режим «Неудачные дубли»: попытки подсвечены, «Удалить все отмеченные» их вырезает, «Вернуть» — назад."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import Qt
+
+    from glimpsy.editor.project import Project
+    from glimpsy.editor.window import EditorWindow
+    from glimpsy.recorder.encoder import software_encoder
+
+    video = tmp_path / "talk.mp4"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x180:rate=30:d=9",
+                    "-f", "lavfi", "-i", "sine=f=300:d=9", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(video)], check=True)
+    p = Project.for_videos(tmp_path / "projects", [video],
+                           [SimpleNamespace(duration=9.0, has_audio=True, width=320, height=180)])
+    src = p.clips[0].src
+    words = _spoken("Сегодня мы погово… Сегодня мы поговорим о камере. Это очень. Это очень важная вещь")
+    tr.TranscriptStore(p.dir).put(SourceWords(src, 9.0, words), None)
+    w = EditorWindow(p.dir, FFMPEG, software_encoder, tmp_path)
+    try:
+        panel = w.text_panel_t
+        panel.mode.setCurrentIndex(panel.mode.findData("retakes"))
+        assert w.project.cuts["mode"] == "retakes"
+        assert not panel.retake_box.isHidden() and panel.retake_list.count() == 2
+        assert panel.view._state[("w", 0, 0)] == "retake" and panel.view._state[("w", 0, 3)] == "keep"
+        panel.retake_list.item(1).setCheckState(Qt.CheckState.Unchecked)      # второе — оставить
+        panel.retakes_cut.emit(panel.checked_retakes())
+        assert w.project.cuts["deleted"][src] == [0, 1, 2]
+        assert panel.view._state[("w", 0, 1)] == "cut"
+        assert "удалено 1" in panel.retake_count.text()
+        panel.retakes_restore.emit(panel.checked_retakes())
+        assert w.project.cuts["deleted"][src] == []
+        w.undo()
+        assert w.project.cuts["deleted"][src] == [0, 1, 2]
+    finally:
+        w.close()

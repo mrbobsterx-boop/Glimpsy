@@ -31,12 +31,14 @@ COL_GONE = QColor("#6B7280")
 COL_PAUSE = QColor("#7C8494")
 COL_SHORT = QColor("#5FC9D3")
 COL_FILLER = QColor("#F2A65A")
+COL_RETAKE = QColor("#E879F9")          # неудачный дубль
 COL_MUTE = QColor("#8FB3FF")          # без звука (картинка идёт)
 COL_HIDE_BG = QColor(150, 90, 200, 70)  # без картинки (звук идёт)
 COL_NOW = QColor(34, 174, 187, 90)
 SENTENCE_END = ".?!…"
 
-MODES = [("auto", "Вырезать паузы"), ("manual", "Паузы вручную"), ("fillers", "Слова-паразиты")]
+MODES = [("auto", "Вырезать паузы"), ("manual", "Паузы вручную"), ("fillers", "Слова-паразиты"),
+         ("retakes", "Неудачные дубли")]
 
 
 def _sec(v: float) -> str:
@@ -150,12 +152,13 @@ class TranscriptView(QTextEdit):
             flags = set(st.split())
             fmt.setForeground(COL_GONE if "cut" in flags else COL_SHORT if "short" in flags else
                               COL_MUTE if "mute" in flags else
-                              COL_FILLER if "filler" in flags else COL_PAUSE if pause else COL_TEXT)
+                              COL_FILLER if "filler" in flags else COL_RETAKE if "retake" in flags else
+                              COL_PAUSE if pause else COL_TEXT)
             fmt.setFontStrikeOut("cut" in flags)
             fmt.setFontItalic("mute" in flags)
             if "hide" in flags:
                 fmt.setBackground(COL_HIDE_BG)
-            if "filler" in flags:
+            if "filler" in flags or "retake" in flags:
                 fmt.setFontUnderline(True)
             cur.setCharFormat(fmt)
         cur.endEditBlock()
@@ -257,6 +260,9 @@ class TranscriptPanel(QFrame):
     fillers_changed = Signal(list)        # список слов-паразитов поправили
     fillers_cut = Signal(list)            # вырезать все найденные: [слово из списка]
     fillers_restore = Signal(list)        # вернуть все найденные
+    retakes_cut = Signal(list)            # вырезать отмеченные дубли: [(видео, начало, конец)]
+    retakes_restore = Signal(list)        # вернуть их
+    retake_selected = Signal(int, int)    # перейти к дублю: видео, слово
     subtitles_toggled = Signal(bool)      # субтитры на видео из текста: вкл / выкл
     selection_action = Signal(str)        # с выделенным текстом: "cut" | "mute" | "hide" | "restore"
     subs_lang_changed = Signal(str)       # язык субтитров: "" — как в речи, иначе код (de, en…)
@@ -386,6 +392,31 @@ class TranscriptPanel(QFrame):
         fl.addLayout(arow)
         fl.addLayout(brow)
 
+        # неудачные дубли
+        self.retake_list = QListWidget()
+        self.retake_list.setMaximumHeight(170)
+        self.retake_list.setToolTip("Отмеченные попытки удалятся, останется последний, удачный вариант.\n"
+                                    "Щелчок по строке — перейти к этому месту.")
+        self.retake_list.itemClicked.connect(self._on_retake_clicked)
+        self.retake_count = QLabel()
+        self.retake_count.setProperty("role", "hint")
+        rcut = theme.mark(QPushButton("Удалить все отмеченные"), "primary")
+        rcut.clicked.connect(lambda: self.retakes_cut.emit(self.checked_retakes()))
+        rback = theme.mark(QPushButton("Вернуть"), "ghost")
+        rback.setToolTip("Вернуть отмеченные попытки")
+        rback.clicked.connect(lambda: self.retakes_restore.emit(self.checked_retakes()))
+        rrow = QHBoxLayout()
+        rrow.addWidget(rcut)
+        rrow.addWidget(rback)
+        rrow.addStretch(1)
+        self.retake_box = QWidget()
+        rl = QVBoxLayout(self.retake_box)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+        rl.addWidget(self.retake_count)
+        rl.addWidget(self.retake_list)
+        rl.addLayout(rrow)
+
         self.subs = QCheckBox("Субтитры на видео из этого текста")
         self.subs.setToolTip("Субтитры берутся из расшифровки и сами меняются, когда вы что-то вырезаете\n"
                              "или исправляете слово (двойной щелчок по слову). Вид — как у любых субтитров.")
@@ -438,6 +469,7 @@ class TranscriptPanel(QFrame):
         lay.addWidget(self.mode)
         lay.addWidget(self.pause_box)
         lay.addWidget(self.filler_box)
+        lay.addWidget(self.retake_box)
         lay.addLayout(subs_row)
         lay.addWidget(self.subs_status)
         lay.addWidget(self.stats)
@@ -460,6 +492,7 @@ class TranscriptPanel(QFrame):
     def _show_mode(self, key: str) -> None:
         self.pause_box.setVisible(key in ("auto", "manual"))
         self.filler_box.setVisible(key == "fillers")
+        self.retake_box.setVisible(key == "retakes")
         self.pause_lbl.setText("Вырезать паузы длиннее" if key == "auto" else "Показывать паузы длиннее")
         common = "Щелчок по слову — перейти, двойной — исправить. Выделите текст и Delete — вырезать, или " \
                  "кнопки над текстом: синий курсив — без звука, фиолетовый фон — без картинки. " \
@@ -470,6 +503,9 @@ class TranscriptPanel(QFrame):
                       "правая кнопка или поле сверху — укоротить до своей длины.",
             "fillers": "Найденные слова подчёркнуты оранжевым. Отметьте нужные в списке и нажмите "
                        "«Вырезать отмеченные». Вернуть одно — щёлкните по нему в тексте.",
+            "retakes": "Фразы, которые вы начали и сказали заново, подчёркнуты розовым — это неудачные "
+                       "попытки, последний вариант остаётся. Снимите отметку с того, что удалять не нужно, "
+                       "и нажмите «Удалить все отмеченные».",
         }[key]
         self.hint.setText(extra + " " + common)
 
@@ -547,6 +583,41 @@ class TranscriptPanel(QFrame):
         if it is not None:
             word = it.data(Qt.ItemDataRole.UserRole)
             self.fillers_changed.emit([f for f in self._fillers if f != word])
+
+    # ---------- неудачные дубли ----------
+
+    def set_retakes(self, items: list[tuple[int, int, int, str, bool]]) -> None:
+        """items: (видео, начало, конец, текст попытки, уже вырезана). Отметки сохраняем."""
+        old = {self.retake_list.item(n).data(Qt.ItemDataRole.UserRole): self.retake_list.item(n).checkState()
+               for n in range(self.retake_list.count())}
+        self.retake_list.blockSignals(True)
+        self.retake_list.clear()
+        gone = 0
+        for si, a, b, text, cut in items:
+            short = text if len(text) <= 60 else text[:57] + "…"
+            it = QListWidgetItem(("✓ " if cut else "") + f"«{short}»")
+            it.setData(Qt.ItemDataRole.UserRole, (si, a, b))
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(old.get((si, a, b), Qt.CheckState.Checked))
+            if cut:
+                it.setForeground(COL_GONE)
+                gone += 1
+            self.retake_list.addItem(it)
+        self.retake_list.blockSignals(False)
+        self.retake_count.setText(f"Найдено: {len(items)}" + (f", удалено {gone}" if gone else "")
+                                  if items else "Повторов не найдено.")
+
+    def checked_retakes(self) -> list[tuple[int, int, int]]:
+        out = []
+        for n in range(self.retake_list.count()):
+            it = self.retake_list.item(n)
+            if it.checkState() == Qt.CheckState.Checked:
+                out.append(tuple(it.data(Qt.ItemDataRole.UserRole)))
+        return out
+
+    def _on_retake_clicked(self, it: QListWidgetItem) -> None:
+        si, a, _b = it.data(Qt.ItemDataRole.UserRole)
+        self.retake_selected.emit(int(si), int(a))
 
     # ---------- прочее ----------
 
