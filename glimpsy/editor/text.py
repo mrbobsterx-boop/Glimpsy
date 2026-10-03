@@ -16,7 +16,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPainterPath, QPen
 
 from glimpsy import paths
@@ -39,7 +39,12 @@ DEFAULT_STYLE = {
     "bg_radius": 0.35,          # скругление подложки в долях высоты строки
     "shadow": False,
     "anim": "fade",
+    "karaoke": "none",          # подсветка слова, которое звучит (см. KARAOKE)
+    "hl_color": "#FFD400",      # цвет подсветки
 }
+
+KARAOKE = {"none": "Без подсветки слов", "color": "Слово подсвечивается цветом", "box": "Слово на цветной плашке",
+           "fill": "Сказанное закрашивается", "word": "По одному слову, крупно"}
 
 
 @dataclass
@@ -52,6 +57,7 @@ class TextItem:
     pos: dict = field(default_factory=dict)   # {"9:16": [x, y]} — центр текста в долях кадра
     auto: bool = False           # создан автосубтитрами (их можно пересоздать или убрать разом)
     track: str = ""              # дорожка (id); пусто — по типу: субтитры или текст
+    words: list = field(default_factory=list)  # время слов от начала текста [[начало, конец], …] (караоке)
 
     @property
     def end(self) -> float:
@@ -70,7 +76,51 @@ def effective_style(item: TextItem, project_style: dict) -> dict:
     base.update(project_style or {})
     if item.style is not None:
         base.update(item.style)
+    if base.get("karaoke", "none") != "none":
+        base["anim"] = "none"          # подсветка слов — уже анимация; так просмотр и ролик совпадают
     return base
+
+
+# ---------------- караоке: какое слово звучит ----------------
+
+def word_times(item: TextItem) -> list[tuple[float, float]]:
+    """Время каждого слова от начала текста. Если точного нет (перевод, ручной субтитр) —
+    делим время по длине слов."""
+    words = item.text.split()
+    if item.words and len(item.words) == len(words):
+        return [(float(a), float(b)) for a, b in item.words]
+    if not words:
+        return []
+    total = sum(len(w) + 1 for w in words)
+    span = max(0.1, item.duration - 0.1)
+    out, t = [], 0.05
+    for w in words:
+        d = span * (len(w) + 1) / total
+        out.append((t, t + d))
+        t += d
+    return out
+
+
+def active_word(item: TextItem, t: float) -> int:
+    """Номер слова, которое звучит в момент t от начала ролика (до первого — первое)."""
+    rel = t - item.start
+    k = 0
+    for i, (a, _b) in enumerate(word_times(item)):
+        if rel >= a - 0.02:
+            k = i
+    return k
+
+
+def karaoke_segments(item: TextItem) -> list[tuple[float, float, int]]:
+    """Отрезки (начало, конец — от начала ролика) с номером подсвеченного слова."""
+    times = word_times(item)
+    out = []
+    for k, (a, _b) in enumerate(times):
+        s0 = 0.0 if k == 0 else a
+        s1 = item.duration if k + 1 == len(times) else times[k + 1][0]
+        if s1 - s0 > 0.01:
+            out.append((item.start + s0, item.start + s1, k))
+    return out
 
 
 # ---------------- свои шрифты ----------------
@@ -114,8 +164,12 @@ def make_font(style: dict, W: int, H: int) -> QFont:
     return font
 
 
-def render_text(text: str, style: dict, W: int, H: int) -> QImage:
-    """Картинка текста (с подложкой) в масштабе ролика W×H, фон прозрачный."""
+def render_text(text: str, style: dict, W: int, H: int, active: int | None = None) -> QImage:
+    """Картинка текста (с подложкой) в масштабе ролика W×H, фон прозрачный.
+    active — номер подсвеченного слова (караоке), None — без подсветки."""
+    mode = style.get("karaoke", "none")
+    if active is not None and mode != "none" and text.split():
+        return render_karaoke(text, style, W, H, active)
     font = make_font(style, W, H)
     probe = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
     p = QPainter(probe)
@@ -151,6 +205,77 @@ def render_text(text: str, style: dict, W: int, H: int) -> QImage:
         p.drawText(text_rect.translated(shadow, shadow), flags, text)
     p.setPen(QPen(QColor(style.get("color", "#ffffff"))))
     p.drawText(text_rect, flags, text)
+    p.end()
+    return img
+
+
+def render_karaoke(text: str, style: dict, W: int, H: int, active: int) -> QImage:
+    """Текст, где подсвечено слово active: строки раскладываем сами, чтобы знать, где каждое слово
+    (размер картинки один и тот же для всех слов — текст не прыгает)."""
+    from PySide6.QtGui import QFontMetricsF
+
+    mode = style.get("karaoke", "color")
+    words = text.split()
+    active = max(0, min(active, len(words) - 1))
+    if mode == "word":                                 # одно слово, крупнее обычного
+        big = dict(style, karaoke="none", size=float(style.get("size", 0.055)) * 1.6)
+        return render_text(words[active], big, W, H)
+    font = make_font(style, W, H)
+    fm = QFontMetricsF(font)
+    space = fm.horizontalAdvance(" ")
+    max_w = W * 0.88
+    lines: list[list[int]] = [[]]
+    width = 0.0
+    for i, w in enumerate(words):
+        ww = fm.horizontalAdvance(w)
+        if lines[-1] and width + space + ww > max_w:
+            lines.append([])
+            width = 0.0
+        width += (space if lines[-1] else 0) + ww
+        lines[-1].append(i)
+    widths = [sum(fm.horizontalAdvance(words[i]) for i in ln) + space * (len(ln) - 1) for ln in lines]
+    px = font.pixelSize()
+    pad_x, pad_y = px * 0.45, px * 0.22
+    lh = fm.height()
+    shadow = px * 0.06 if style.get("shadow") else 0
+    box_pad = px * 0.12
+    w = int(max(widths) + pad_x * 2 + shadow * 2 + box_pad * 2) + 2
+    h = int(lh * len(lines) + pad_y * 2 + shadow * 2) + 2
+    img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    p.setFont(font)
+    rect = QRectF(shadow, shadow, w - shadow * 2 - 2, h - shadow * 2 - 2)
+    if style.get("bg"):
+        bg = QColor(style.get("bg_color", "#000000"))
+        bg.setAlphaF(max(0.0, min(1.0, float(style.get("bg_opacity", 0.55)))))
+        path = QPainterPath()
+        r = float(style.get("bg_radius", 0.35)) * px
+        path.addRoundedRect(rect, r, r)
+        p.fillPath(path, bg)
+    color = QColor(style.get("color", "#ffffff"))
+    hl = QColor(style.get("hl_color", "#FFD400"))
+    for n, ln in enumerate(lines):
+        x = rect.x() + (rect.width() - widths[n]) / 2
+        y = rect.y() + pad_y + lh * n + fm.ascent()
+        for i in ln:
+            ww = fm.horizontalAdvance(words[i])
+            on = i == active
+            pen = hl if (on and mode == "color") or (i <= active and mode == "fill") else color
+            if on and mode == "box":
+                box = QPainterPath()
+                box.addRoundedRect(QRectF(x - box_pad, y - fm.ascent() - box_pad * 0.3, ww + box_pad * 2,
+                                          lh + box_pad * 0.6), px * 0.18, px * 0.18)
+                p.fillPath(box, hl)
+                pen = QColor("#111111") if hl.lightnessF() > 0.55 else QColor("#ffffff")
+            if shadow:
+                p.setPen(QColor(0, 0, 0, 170))
+                p.drawText(QPointF(x + shadow, y + shadow), words[i])
+            p.setPen(QPen(pen))
+            p.drawText(QPointF(x, y), words[i])
+            x += ww + space
     p.end()
     return img
 

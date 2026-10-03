@@ -237,9 +237,12 @@ class EditorWindow(QMainWindow):
         self.export_btn = theme.mark(QPushButton(theme.icon("download", "#FFFFFF", 16), "  Экспорт"), "primary")
         self.export_btn.setToolTip("Сохранить готовый ролик (Ctrl+E — в текущем формате)")
         export_menu = QMenu(self.export_btn)
-        export_menu.addAction(theme.icon("monitor", size=16), "16:9 — YouTube", lambda: self.export(["16:9"]))
-        export_menu.addAction(theme.icon("smartphone", size=16), "9:16 — Reels, TikTok, Shorts",
-                              lambda: self.export(["9:16"]))
+        from glimpsy.editor.export import PLATFORMS
+
+        for key, icon in (("youtube", "monitor"), ("shorts", "smartphone"), ("telegram", "download")):
+            pf = PLATFORMS[key]
+            export_menu.addAction(theme.icon(icon, size=16), f"{pf['label']}  —  {pf['hint']}",
+                                  lambda _=False, k=key: self.export([PLATFORMS[k]["aspect"]], platform=k))
         export_menu.addSeparator()
         export_menu.addAction(theme.icon("layers", size=16), "Оба формата сразу (два файла)",
                               lambda: self.export(["16:9", "9:16"]))
@@ -874,10 +877,11 @@ class EditorWindow(QMainWindow):
                 self._translate_later(missing)
         else:
             lines = tr.cues(words, self._subs_chars())
+        timing = tr.cue_words(words, self._subs_chars()) if not (lang and lang != src_lang) else []
         items = []
-        for a, b, text in lines:
+        for n, (a, b, text) in enumerate(lines):
             items.append(TextItem(new_id(), text, round(a, 2), round(max(0.3, b - a), 2), pos=dict(pos),
-                                  auto=True, track=track))
+                                  auto=True, track=track, words=timing[n] if n < len(timing) else []))
         self.project.texts.extend(items)
         self.subs_panel.refresh(self.project, self.timeline.selected_text)
         return len(items)
@@ -2585,11 +2589,22 @@ class EditorWindow(QMainWindow):
 
     # ---------- экспорт ----------
 
-    def export(self, aspects: list[str] | None = None) -> None:
-        """Экспорт в текущем формате или сразу в нескольких (16:9 и 9:16 — два файла)."""
+    def export(self, aspects: list[str] | None = None, platform: str = "") -> None:
+        """Экспорт в текущем формате или сразу в нескольких (16:9 и 9:16 — два файла).
+        platform — готовые настройки для соцсети (export.PLATFORMS)."""
+        from glimpsy.assembler import unique_path
+        from glimpsy.editor.export import PLATFORMS, shrink
+
         self.player.pause()
         self._save()
         aspects = aspects or [self.project.aspect]
+        pf = PLATFORMS.get(platform, {})
+        if pf.get("max_s") and self.project.total > pf["max_s"]:
+            ans = QMessageBox.question(
+                self, "Экспорт", f"Ролик длиннее {pf['max_s'] // 60} минут — Shorts и Reels такие не принимают "
+                "(YouTube покажет его как обычное видео). Всё равно сохранить?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
         dlg = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
         dlg.setWindowTitle("Экспорт ролика" if len(aspects) == 1 else "Экспорт: 16:9 и 9:16")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
@@ -2649,6 +2664,13 @@ class EditorWindow(QMainWindow):
                     path = export_project(self.ffmpeg, snapshot, out, enc, text_layers=text_layers,
                                           overlay_layers=overlay_layers, progress=prog, cancel=cancel,
                                           smart=smart)
+                    if pf.get("height"):                 # файл поменьше — для мессенджера
+                        prog(0.97, "Делаю файл поменьше")
+                        small = unique_path(Path(path).with_name(Path(path).stem + pf.get("suffix", "_small")
+                                                                 + ".mp4"))
+                        shrink(self.ffmpeg, Path(path), small, pf["height"], pf["crf"], pf["audio"], cancel)
+                        Path(path).unlink(missing_ok=True)
+                        path = small
                     done.append(str(path))
                     chapters = snapshot.cuts.get("chapters")
                     if chapters:                       # главы для описания на YouTube — рядом с роликом

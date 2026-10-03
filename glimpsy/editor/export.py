@@ -168,7 +168,9 @@ class TextLayer:
 
 def render_text_layers(project: Project, out_dir: Path) -> list[TextLayer]:
     """Нарисовать все тексты в PNG. Вызывать из основного потока (нужен Qt)."""
-    from glimpsy.editor.text import effective_style, placement, render_text
+    import dataclasses
+
+    from glimpsy.editor.text import effective_style, karaoke_segments, placement, render_text
 
     W, H = ASPECTS[project.aspect]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +180,16 @@ def render_text_layers(project: Project, out_dir: Path) -> list[TextLayer]:
         if not t.text.strip() or t.start >= total:
             continue
         style = effective_style(t, project.text_style)
+        if style.get("karaoke", "none") != "none":
+            # караоке: на каждое слово — своя картинка, показывается, пока это слово звучит
+            for s0, s1, k in karaoke_segments(t):
+                img = render_text(t.text, style, W, H, k)
+                png = out_dir / f"text_{i:03d}_{k:03d}.png"
+                img.save(str(png))
+                part = dataclasses.replace(t, start=s0, duration=s1 - s0)
+                x, y = placement(img.width(), img.height(), t.pos_for(project.aspect), W, H)
+                layers.append(TextLayer(png, part, style, x, y, img.width(), img.height()))
+            continue
         img = render_text(t.text, style, W, H)
         png = out_dir / f"text_{i:03d}.png"
         img.save(str(png))
@@ -228,6 +240,24 @@ def render_overlay_layers(project: Project, out_dir: Path) -> list[OverlayLayer]
                 layer.shadow_png = sp
         layers.append(layer)
     return layers
+
+
+# Готовые настройки «для соцсетей»: формат кадра и, если нужно, файл поменьше
+PLATFORMS = {
+    "youtube": {"label": "Для YouTube", "aspect": "16:9", "hint": "16:9, 1080p, лучшее качество"},
+    "shorts": {"label": "Для Shorts, Reels, TikTok", "aspect": "9:16", "hint": "вертикально 9:16, 1080×1920",
+               "max_s": 180},
+    "telegram": {"label": "Для Telegram", "aspect": "16:9", "hint": "16:9, 720p — файл в несколько раз меньше",
+                 "height": 720, "crf": 26, "audio": "128k", "suffix": "_telegram"},
+}
+
+
+def shrink(ffmpeg: str, src: Path, out: Path, height: int, crf: int, audio: str,
+           cancel: threading.Event | None = None) -> None:
+    """Файл поменьше (для мессенджеров): уменьшить кадр и сжать сильнее."""
+    _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vf", f"scale=-2:{height}",
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-c:a", "aac",
+          "-b:a", audio, "-movflags", "+faststart", str(out)], cancel or threading.Event())
 
 
 def default_output(project: Project, fallback_dir: Path) -> Path:

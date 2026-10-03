@@ -252,13 +252,17 @@ class PreviewWidget(QWidget):
         self.update()
 
     def _text_image(self, item, style) -> QImage:
+        from glimpsy.editor.text import active_word
+
         c = self.canvas_rect()
-        key = json.dumps([item.text, style, int(c.width()), int(c.height())], sort_keys=True, ensure_ascii=False)
+        active = active_word(item, self.t) if style.get("karaoke", "none") != "none" else None
+        key = json.dumps([item.text, style, int(c.width()), int(c.height()), active], sort_keys=True,
+                         ensure_ascii=False)
         img = self._text_cache.get(key)
         if img is None:
-            if len(self._text_cache) > 200:
+            if len(self._text_cache) > 300:
                 self._text_cache.clear()
-            img = self._text_cache[key] = render_text(item.text, style, int(c.width()), int(c.height()))
+            img = self._text_cache[key] = render_text(item.text, style, int(c.width()), int(c.height()), active)
         return img
 
     def _text_rect(self, item, style) -> QRectF:

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from glimpsy.editor.text import ANIMATIONS, TextItem, add_font
+from glimpsy.editor.text import ANIMATIONS, KARAOKE, TextItem, add_font
 
 POSITIONS = (("Верх", 0.12), ("Центр", 0.5), ("Низ", 0.85))
 REF_PX = 1080   # размер показываем в пикселях для кадра 1080 по меньшей стороне
@@ -107,6 +107,18 @@ class TextPanel(QWidget):
             self.anim.addItem(label, key)
         self.anim.currentIndexChanged.connect(lambda _: self._emit("anim", self.anim.currentData()))
 
+        self.karaoke = QComboBox()
+        for key, label in KARAOKE.items():
+            self.karaoke.addItem(label, key)
+        self.karaoke.setToolTip("Караоке: всё предложение на экране, а слово, которое звучит, выделяется.\n"
+                                "Точнее всего — у субтитров из расшифровки речи.")
+        self.karaoke.currentIndexChanged.connect(lambda _: self._emit("karaoke", self.karaoke.currentData()))
+        self.hl_color = ColorButton()
+        self.hl_color.picked.connect(lambda c: self._emit("hl_color", c))
+        kara_row = QHBoxLayout()
+        kara_row.addWidget(self.karaoke, 1)
+        kara_row.addWidget(self.hl_color)
+
         pos_row = QHBoxLayout()
         for label, y in POSITIONS:
             b = QPushButton(label)
@@ -129,6 +141,7 @@ class TextPanel(QWidget):
         form.addRow("Прозрачность", self.bg_opacity)
         form.addRow("Скругление", self.bg_radius)
         form.addRow("Анимация", self.anim)
+        form.addRow("Слова", kara_row)
         form.addRow("Положение", pos_row)
 
         delete = QPushButton("Удалить текст")
@@ -173,6 +186,10 @@ class TextPanel(QWidget):
         self.bg_opacity.setValue(int(round(style["bg_opacity"] * 100)))
         self.bg_radius.setValue(int(round(style["bg_radius"] * 100)))
         self.anim.setCurrentIndex(max(0, self.anim.findData(style["anim"])))
+        self.karaoke.setCurrentIndex(max(0, self.karaoke.findData(style.get("karaoke", "none"))))
+        self.hl_color.set_color(style.get("hl_color", "#FFD400"))
+        self.hl_color.setEnabled(style.get("karaoke", "none") not in ("none", "word"))
+        self.anim.setEnabled(style.get("karaoke", "none") == "none")
         self._loading = False
 
     def focus_text(self) -> None:

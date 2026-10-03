@@ -956,6 +956,17 @@ def word_text(cuts: dict, src: str, i: int, text: str) -> str:
     return cuts.get("word_text", {}).get(src, {}).get(str(i), text)
 
 
+def cue_words(words: list[tuple[float, float, str]], max_chars: int = 42,
+              max_gap: float = 0.8) -> list[list[tuple[float, float]]]:
+    """Время слов каждой строки cues() — от начала строки (для подсветки слов, «караоке»)."""
+    out = []
+    for a, b, text in cues(words, max_chars, max_gap):
+        n = len(text.split())
+        inside = [w for w in words if a - 1e-6 <= w[0] < b + 1e-6][:n]
+        out.append([[round(w[0] - a, 3), round(w[1] - a, 3)] for w in inside] if len(inside) == n else [])
+    return out
+
+
 def cues(words: list[tuple[float, float, str]], max_chars: int = 42,
          max_gap: float = 0.8) -> list[tuple[float, float, str]]:
     """Слова → фразы субтитров: строка до max_chars знаков, новая — после паузы или конца предложения."""
