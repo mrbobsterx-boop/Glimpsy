@@ -35,6 +35,7 @@ class OverlayItem:
     layout: dict = field(default_factory=dict)   # {"9:16": [cx, cy, ширина]}
     track: str = ""                 # дорожка (id); пусто — «Наложение»
     auto: str = ""                  # создано программой (переозвучка фразы: её номер) — пересоздаётся само
+    bg: str = ""                    # фон за человеком на видео: "" — как есть, "remove" — убрать, "blur" — размыть
 
     @property
     def end(self) -> float:
@@ -114,7 +115,7 @@ def video_alpha_filter(w: int, h: int, radius: float, opacity: float) -> str:
     if r >= 1:
         inside = (f"clip({r:.2f}-hypot(max(0,max({r:.2f}-X,X-(W-1-{r:.2f}))),"
                   f"max(0,max({r:.2f}-Y,Y-(H-1-{r:.2f}))))+0.5,0,1)")
-        parts.append(f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*{opacity:.3f}*{inside}'")
+        parts.append(f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{opacity:.3f}*{inside}'")
     elif opacity < 0.999:
         parts.append(f"colorchannelmixer=aa={opacity:.3f}")
     return ",".join(parts)

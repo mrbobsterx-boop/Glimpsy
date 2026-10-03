@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QLabel, QPushButton, QSlider, QSpinBox,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QLabel, QPushButton, QSlider, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -40,6 +40,18 @@ class OverlayPanel(QWidget):
         self.radius.valueChanged.connect(lambda v: self._emit("radius", v / 100))
         self.shadow = QCheckBox("Тень")
         self.shadow.toggled.connect(lambda on: self._emit("shadow", on))
+        from glimpsy.editor.bgremove import MODES
+
+        self.bg = QComboBox()
+        for key, label in MODES.items():
+            self.bg.addItem(label, key)
+        self.bg.setToolTip("Убрать или размыть фон за человеком — без зелёного экрана.\n"
+                           "Первый раз программа скачает нейросеть (≈25 МБ) и обработает видео.")
+        self.bg.currentIndexChanged.connect(lambda _i: self._emit("bg", self.bg.currentData()))
+        self.bg_status = QLabel()
+        self.bg_status.setWordWrap(True)
+        self.bg_status.setProperty("role", "hint")
+        self.bg_status.setVisible(False)
         self.sound = QCheckBox("Звук видео")
         self.sound.toggled.connect(lambda on: self._emit("muted", not on))
 
@@ -60,6 +72,8 @@ class OverlayPanel(QWidget):
         form.addRow("Прозрачность", self.opacity)
         form.addRow("Скругление", self.radius)
         form.addRow(self.shadow)
+        form.addRow("Фон", self.bg)
+        form.addRow(self.bg_status)
         form.addRow(self.sound)
         form.addRow("Положение", grid)
         form.addRow(full)
@@ -100,11 +114,17 @@ class OverlayPanel(QWidget):
         self.opacity.setValue(int(round(item.opacity * 100)))
         self.radius.setValue(int(round(item.radius * 100)))
         self.shadow.setChecked(item.shadow)
+        self.form.setRowVisible(self.bg, item.kind == "video")
+        self.bg.setCurrentIndex(max(0, self.bg.findData(getattr(item, "bg", ""))))
         self.sound.setVisible(item.kind != "image")
         self.sound.setEnabled(item.has_audio)
         self.sound.setChecked(item.has_audio and not item.muted)
         self.sound.setText(("Звук включён" if audio else "Звук видео") if item.has_audio else "Звук (в файле его нет)")
         self._loading = False
+
+    def set_bg_status(self, text: str) -> None:
+        self.bg_status.setText(text)
+        self.bg_status.setVisible(bool(text))
 
     def _emit(self, what: str, value) -> None:
         if not self._loading and self.item is not None:

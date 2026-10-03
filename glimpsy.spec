@@ -41,6 +41,9 @@ datas += collect_data_files("soundcard")
 # переводчик субтитров (CTranslate2): его библиотеки лежат рядом с модулем
 hidden += ["ctranslate2", "sentencepiece"]
 binaries += collect_dynamic_libs("ctranslate2")
+# убрать фон за человеком на камере (ONNX Runtime + модель MODNet, она скачивается сама)
+hidden += ["onnxruntime"]
+binaries += collect_dynamic_libs("onnxruntime")
 
 a = Analysis(
     [str(ROOT / "glimpsy" / "__main__.py")],

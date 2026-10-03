@@ -549,15 +549,25 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
             parts.append(f"[{k}:v]format=rgba[o{k}]")
             put(f"o{k}", ov.x - ov.pad, ov.y - ov.pad, S, E)
             continue
-        if ov.shadow_png is not None:
+        from glimpsy.editor import bgremove
+
+        cut_bg = getattr(it, "bg", "") and bgremove.mask_ready(project.dir, it.src)
+        if ov.shadow_png is not None and not cut_bg:          # тень прямоугольника без фона ни к чему
             k = still(ov.shadow_png)
             parts.append(f"[{k}:v]format=rgba[o{k}]")
             put(f"o{k}", ov.x - ov.pad, ov.y - ov.pad, S, E)
         cmd.extend(["-ss", f"{it.in_s:.3f}", "-t", f"{E - S:.3f}", "-i", str(ov.video)])
         n += 1
         k = n
-        parts.append(f"[{k}:v]setpts=PTS-STARTPTS+{S:.3f}/TB,"
-                     f"{video_alpha_filter(ov.w, ov.h, it.radius, it.opacity)}[o{k}]")
+        if cut_bg:                                             # человек без фона (маска — отдельным входом)
+            stem = bgremove.mask_stem(project.dir, it.src)
+            cmd.extend(["-ss", f"{it.in_s:.3f}", "-t", f"{E - S:.3f}", "-i", str(stem.with_suffix(".mp4"))])
+            n += 1
+            parts.append(bgremove.ffmpeg_chain(k, n, S, ov.w, ov.h, it.bg, f"cut{k}"))
+            parts.append(f"[cut{k}]{video_alpha_filter(ov.w, ov.h, it.radius, it.opacity)}[o{k}]")
+        else:
+            parts.append(f"[{k}:v]setpts=PTS-STARTPTS+{S:.3f}/TB,"
+                         f"{video_alpha_filter(ov.w, ov.h, it.radius, it.opacity)}[o{k}]")
         put(f"o{k}", ov.x, ov.y, S, E)
         if it.has_audio and not it.muted:
             parts.append(f"[{k}:a]asetpts=PTS-STARTPTS,adelay=delays={S * 1000:.0f}:all=1[a{k}]")

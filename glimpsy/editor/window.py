@@ -1388,10 +1388,89 @@ class EditorWindow(QMainWindow):
                 img = self._ov_images[str(path)] = QImage(str(path))
             return img
         live = self.ov_video.frame(o.id)
+        if live is not None and getattr(o, "bg", ""):
+            mask = self._preview_mask(o.src)
+            if mask is not None:                      # фон за человеком убран или размыт
+                local = max(0.0, min(o.duration, t - o.start))
+                from glimpsy.editor import bgremove
+
+                return bgremove.apply_preview(live, mask.at(o.in_s + local), o.bg)
         if live is not None:
             return live
         local = max(0.0, min(o.duration, t - o.start))          # плеер ещё открывает файл — пока миниатюра
         return self.thumbs.get(path, float(round(o.in_s + local)), 360)
+
+    def _ensure_mask(self, o) -> None:
+        """Убрать фон: скачать нейросеть (один раз) и посчитать маску для файла камеры (один раз)."""
+        from glimpsy.editor import bgremove
+        from glimpsy.editor.subtitles_dialog import Downloader
+
+        if bgremove.mask_ready(self.project.dir, o.src) or o.src in self.__dict__.setdefault("_mask_jobs", set()):
+            return
+        status = self.overlay_panel.set_bg_status
+        if not bgremove.runtime_ready():
+            status("В этой сборке нет модуля нейросети — обновите программу.")
+            return
+        if not bgremove.model_ready():
+            status(f"Скачиваю нейросеть для фона (≈{bgremove.MODEL_MB} МБ)…")
+            dl = self._bg_dl = Downloader(self)
+            dl.progress.connect(lambda got, total: status(
+                f"Скачиваю нейросеть для фона: {got >> 20} из {(total or bgremove.MODEL_MB << 20) >> 20} МБ…"))
+
+            def downloaded(err: str) -> None:
+                self._bg_dl = None
+                if err:
+                    status("Нейросеть не скачалась. Проверьте интернет и выберите «Убрать фон» ещё раз.")
+                else:
+                    self._ensure_mask(o)
+
+            dl.finished.connect(downloaded)
+            dl.start([(bgremove.MODEL_URL, bgremove.model_path())])
+            return
+        self._mask_jobs.add(o.src)
+        bridge = _ExportBridge(self)
+        cancel = threading.Event()
+        src_path = self.project.dir / o.src
+        stem = bgremove.mask_stem(self.project.dir, o.src)
+        bridge.progress.connect(lambda f, _t: status(f"Отделяю человека от фона… {int(f * 100)} %"))
+
+        def done(_msg: str) -> None:
+            self._mask_jobs.discard(o.src)
+            self.__dict__.setdefault("_masks", {}).pop(o.src, None)
+            status("")
+            self._sync_preview()
+
+        def failed(msg: str) -> None:
+            self._mask_jobs.discard(o.src)
+            status(f"Не получилось убрать фон: {msg}")
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+        dur = o.src_duration or o.duration
+
+        def work() -> None:
+            try:
+                bgremove.make_mask(self.ffmpeg, src_path, stem, o.width, o.height, dur,
+                                   lambda f: bridge.progress.emit(f, ""), cancel)
+                bridge.done.emit("")
+            except Exception as e:                       # noqa: BLE001 — сообщить человеку
+                log.exception("Маска фона не посчиталась")
+                bridge.failed.emit(str(e)[-200:])
+
+        status("Отделяю человека от фона… 0 %")
+        threading.Thread(target=work, daemon=True, name="bg-mask").start()
+
+    def _preview_mask(self, src: str):
+        from glimpsy.editor import bgremove
+
+        cache = self.__dict__.setdefault("_masks", {})
+        if src not in cache and bgremove.mask_ready(self.project.dir, src):
+            try:
+                cache[src] = bgremove.PreviewMask(bgremove.mask_stem(self.project.dir, src))
+            except (OSError, ValueError, KeyError):
+                log.exception("Маска не читается")
+                cache[src] = None
+        return cache.get(src)
 
     def _ripples(self, c: Clip | None) -> list:
         """Круги кликов, которые видны сейчас (в долях исходного кадра)."""
@@ -1990,6 +2069,10 @@ class EditorWindow(QMainWindow):
             o.muted = bool(value)
         elif what in ("opacity", "radius", "shadow"):
             setattr(o, what, value)
+        elif what == "bg":
+            o.bg = str(value or "")
+            if o.bg:
+                self._ensure_mask(o)
         self._layer_changed()
 
     def _on_overlay_pressed(self, oid: str) -> None:
@@ -2612,6 +2695,13 @@ class EditorWindow(QMainWindow):
         self.player.pause()
         self._save()
         aspects = aspects or [self.project.aspect]
+        from glimpsy.editor import bgremove
+
+        if any(getattr(o, "bg", "") and not bgremove.mask_ready(self.project.dir, o.src)
+               for o in self.project.overlays):
+            QMessageBox.information(self, "Экспорт", "Фон за человеком на камере ещё обрабатывается — дождитесь "
+                                    "конца (видно в настройках наложения) и сохраните ролик снова.")
+            return
         pf = PLATFORMS.get(platform, {})
         if pf.get("max_s") and self.project.total > pf["max_s"]:
             ans = QMessageBox.question(
