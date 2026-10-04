@@ -88,3 +88,66 @@ class Toast(QWidget):
     def leaveEvent(self, e) -> None:
         self._timer.start(4000)
         super().leaveEvent(e)
+
+
+class ProgressPopup(QWidget):
+    """Окошко в углу, пока собирается ролик: что сейчас делается и полоса хода (можно скрыть)."""
+
+    def __init__(self, title: str) -> None:
+        from PySide6.QtWidgets import QProgressBar
+
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.hidden_by_user = False
+        box = QFrame(self)
+        box.setObjectName("toast")
+        box.setStyleSheet("QFrame#toast { background: #1C2029; border: 1px solid #3A4152; border-radius: 12px; }")
+        self.title = QLabel(f"<b>{title}</b>")
+        self.title.setStyleSheet("font-size: 14px;")
+        hide = QToolButton()
+        hide.setIcon(theme.icon("minus", theme.MUTED, 16))
+        hide.setToolTip("Скрыть (сборка продолжится; ход — в подсказке значка в трее)")
+        hide.clicked.connect(self._hide)
+        top = QHBoxLayout()
+        top.addWidget(self.title, 1)
+        top.addWidget(hide)
+        self.text = QLabel("Готовлюсь…")
+        self.text.setWordWrap(True)
+        self.text.setStyleSheet("color: #C9CCD6;")
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        self.percent = QLabel("0 %")
+        self.percent.setStyleSheet("color: #8b8d98;")
+        row = QHBoxLayout()
+        row.addWidget(self.bar, 1)
+        row.addWidget(self.percent)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(14, 10, 10, 12)
+        lay.setSpacing(6)
+        lay.addLayout(top)
+        lay.addWidget(self.text)
+        lay.addLayout(row)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(box)
+        self.setFixedWidth(380)
+
+    def set_progress(self, frac: float, text: str) -> None:
+        self.bar.setValue(int(max(0.0, min(1.0, frac)) * 1000))
+        self.percent.setText(f"{int(max(0.0, min(1.0, frac)) * 100)} %")
+        self.text.setText(text)
+        if not self.isVisible() and not self.hidden_by_user:
+            self.adjustSize()
+            screen = QGuiApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                self.move(area.right() - self.width() - 16, area.bottom() - self.height() - 16)
+            self.show()
+            self.raise_()
+
+    def _hide(self) -> None:
+        self.hidden_by_user = True
+        self.hide()

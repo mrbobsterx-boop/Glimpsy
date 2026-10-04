@@ -93,7 +93,8 @@ class TrayController(QObject):
         engine.notify.connect(self.show_message)
         engine.assembly_progress.connect(self._on_progress)
         engine.assembly_done.connect(self._on_done)
-        engine.assembly_failed.connect(lambda msg: self.show_message("Не удалось собрать ролик", msg))
+        engine.assembly_failed.connect(lambda msg: (self._close_progress(),
+                                                    self.show_message("Не удалось собрать ролик", msg)))
         self._on_status(self.status)
         self.bind_hotkeys()
         from glimpsy.ui.update import UpdateManager
@@ -171,8 +172,24 @@ class TrayController(QObject):
             self.tray.setToolTip(tip)
         if self.window:
             self._win_status.setText(tip)
+        self.a_status.setText(f"Собираю ролик: {text} — {int(frac * 100)} %")
+        if frac >= 1.0 or self._quiet():
+            return
+        if getattr(self, "_progress", None) is None:     # окошко с ходом сборки — в углу экрана
+            from glimpsy.ui.toast import ProgressPopup
+
+            self._progress = ProgressPopup("🎬 Собираю ролик")
+        self._progress.set_progress(frac, text)
+
+    def _close_progress(self) -> None:
+        popup = getattr(self, "_progress", None)
+        if popup is not None:
+            popup.close()
+            popup.deleteLater()
+            self._progress = None
 
     def _on_done(self, path: str) -> None:
+        self._close_progress()
         files = [Path(p) for p in path.split("\n") if p]
         if not files:
             return

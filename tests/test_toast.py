@@ -30,3 +30,28 @@ def test_project_for_video(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "projects_root", lambda: root)
     assert sessions.project_for_video(video) == d
     assert sessions.project_for_video(tmp_path / "другой.mp4") is None
+
+
+def test_assembly_progress_popup(qt_app):
+    from PySide6.QtGui import QAction
+
+    from glimpsy.recorder.engine import State
+    from glimpsy.ui.tray import TrayController
+
+    class Engine:
+        running = False
+
+    t = TrayController.__new__(TrayController)
+    t.engine, t.tray, t.window, t._muted = Engine(), None, None, []
+    t.status = {"state": State.ASSEMBLING}
+    t.a_status = QAction("")
+    t._progress = None
+    t._on_progress(0.25, "Фрагмент 3 из 12")
+    assert t._progress is not None and t._progress.isVisible()
+    assert t._progress.text.text() == "Фрагмент 3 из 12" and t._progress.percent.text() == "25 %"
+    assert "Фрагмент 3 из 12" in t.a_status.text()
+    t._progress._hide()                                     # скрыли — дальше не всплывает
+    t._on_progress(0.5, "Фрагмент 6 из 12")
+    assert not t._progress.isVisible() and t._progress.text.text() == "Фрагмент 6 из 12"
+    t._close_progress()
+    assert t._progress is None
