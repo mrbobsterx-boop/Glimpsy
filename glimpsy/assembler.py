@@ -404,7 +404,10 @@ class Assembler:
     def _ffmpeg(self, args: list[str]) -> None:
         full = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
         log.debug("ffmpeg %s", " ".join(full))
-        r = subprocess.run(full, capture_output=True, **subprocess_flags())
+        from glimpsy.paths import short_command
+
+        with short_command(full) as cmd:
+            r = subprocess.run(cmd, capture_output=True, **subprocess_flags())
         if r.returncode != 0:
             raise AssemblyError("FFmpeg: " + r.stderr.decode("utf-8", "replace")[-800:])
 

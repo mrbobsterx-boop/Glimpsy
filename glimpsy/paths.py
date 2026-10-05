@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
@@ -100,6 +102,44 @@ def clean_child_environment(env=None) -> None:
         env["LD_LIBRARY_PATH"] = orig
     else:
         env.pop("LD_LIBRARY_PATH", None)
+
+
+# Windows не запускает программу, если строка команды длиннее ~32 тысяч знаков (WinError 206).
+# Граф фильтров FFmpeg с плавным зумом и своим курсором бывает длиннее — его кладём в файл.
+MAX_CMD_CHARS = 8000
+_GRAPH_OPTS = ("-filter_complex", "-lavfi", "-vf", "-af", "-filter:v", "-filter:a")
+
+
+@contextlib.contextmanager
+def short_command(cmd: list[str]):
+    """Команда FFmpeg, которая точно поместится в строку запуска: длинные графы фильтров
+    передаются через файл (-/filter_complex файл). Файлы удаляются после выхода из with."""
+    if len(subprocess.list2cmdline([str(c) for c in cmd])) <= MAX_CMD_CHARS:
+        yield cmd
+        return
+    out, files = [], []
+    folder = temp_root() / "graphs"
+    folder.mkdir(parents=True, exist_ok=True)
+    i = 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c in _GRAPH_OPTS and i + 1 < len(cmd) and len(str(cmd[i + 1])) > 200:
+            f = folder / f"graph_{os.getpid()}_{uuid.uuid4().hex[:10]}.txt"
+            f.write_text(str(cmd[i + 1]), encoding="utf-8")
+            files.append(f)
+            out += ["-/" + c[1:], str(f)]
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    try:
+        yield out
+    finally:
+        for f in files:
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 def subprocess_flags() -> dict:

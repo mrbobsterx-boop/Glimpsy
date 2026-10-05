@@ -622,15 +622,18 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
 
 def _run(cmd: list[str], cancel: threading.Event, cwd: Path | None = None) -> None:
     log.debug("ffmpeg %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=cwd, **subprocess_flags())
-    while True:
-        try:
-            _, err = proc.communicate(timeout=0.3)
-            break
-        except subprocess.TimeoutExpired:
-            if cancel.is_set():
-                proc.kill()
-                proc.communicate()
-                raise ExportCancelled()
+    from glimpsy.paths import short_command
+
+    with short_command(cmd) as cmd:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=cwd, **subprocess_flags())
+        while True:
+            try:
+                _, err = proc.communicate(timeout=0.3)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel.is_set():
+                    proc.kill()
+                    proc.communicate()
+                    raise ExportCancelled()
     if proc.returncode != 0:
         raise ExportError("FFmpeg: " + err.decode("utf-8", "replace")[-800:])
