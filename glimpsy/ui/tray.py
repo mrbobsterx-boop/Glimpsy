@@ -93,8 +93,7 @@ class TrayController(QObject):
         engine.notify.connect(self.show_message)
         engine.assembly_progress.connect(self._on_progress)
         engine.assembly_done.connect(self._on_done)
-        engine.assembly_failed.connect(lambda msg: (self._close_progress(),
-                                                    self.show_message("Не удалось собрать ролик", msg)))
+        engine.assembly_failed.connect(self._on_failed)
         self._on_status(self.status)
         self.bind_hotkeys()
         from glimpsy.ui.update import UpdateManager
@@ -205,6 +204,32 @@ class TrayController(QObject):
         self._toast = Toast(title, text, [("Открыть в редакторе", lambda: self._edit_video(files[0])),
                                           ("Показать папку", self._open_last_video)])
         self._toast.popup()
+
+    def _on_failed(self, msg: str) -> None:
+        """Сборка не удалась: причина и кнопки «Собрать ещё раз» / «Открыть журнал» (черновики целы)."""
+        self._close_progress()
+        log.error("Сборка не удалась: %s", msg)
+        if self._quiet():
+            self.show_message("Не удалось собрать ролик", msg)
+            return
+        from glimpsy.recorder.engine import find_unfinished_sessions
+        from glimpsy.ui.toast import Toast
+
+        short = msg if len(msg) <= 300 else "…" + msg[-300:]
+        actions = []
+        if find_unfinished_sessions():
+            actions.append(("Собрать ещё раз", self._retry_assembly))
+        actions.append(("Открыть журнал", lambda: paths.open_in_file_manager(paths.log_dir())))
+        self._toast = Toast("Не удалось собрать ролик", short + "\n\nЗаписанное не пропало.", actions)
+        self._toast._timer.setInterval(60000)
+        self._toast.popup()
+
+    def _retry_assembly(self) -> None:
+        from glimpsy.recorder.engine import find_unfinished_sessions
+
+        sessions = find_unfinished_sessions()
+        if sessions:
+            self.engine.assemble_existing(sessions[-1])
 
     def _edit_video(self, video: Path) -> None:
         from glimpsy.editor.sessions import project_for_video

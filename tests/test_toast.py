@@ -55,3 +55,28 @@ def test_assembly_progress_popup(qt_app):
     assert not t._progress.isVisible() and t._progress.text.text() == "Фрагмент 6 из 12"
     t._close_progress()
     assert t._progress is None
+
+
+def test_failed_assembly_offers_retry_and_log(qt_app, monkeypatch):
+    from PySide6.QtGui import QAction
+
+    from glimpsy.recorder import engine as eng
+    from glimpsy.recorder.engine import State
+    from glimpsy.ui.tray import TrayController
+
+    class Engine:
+        running = False
+        retried = []
+
+        def assemble_existing(self, d):
+            self.retried.append(d)
+
+    t = TrayController.__new__(TrayController)
+    t.engine, t.tray, t.window, t._muted, t._progress = Engine(), None, None, [], None
+    t.status = {"state": State.STOPPED}
+    t.a_status = QAction("")
+    monkeypatch.setattr(eng, "find_unfinished_sessions", lambda: ["/tmp/session_1"])
+    t._on_failed("FFmpeg: что-то сломалось")
+    assert [b.text() for b in t._toast.buttons] == ["Собрать ещё раз", "Открыть журнал"]
+    t._toast.buttons[0].click()
+    assert Engine.retried == ["/tmp/session_1"]
