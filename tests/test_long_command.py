@@ -32,7 +32,8 @@ def test_long_graph_goes_to_file():
 
 @pytest.mark.skipif(not FFMPEG, reason="нужен FFmpeg")
 def test_huge_graph_runs(tmp_path):
-    graph = "[0:v]" + ",".join(["null"] * 8000) + ",scale=32:18[v]"   # ≈40 КБ — больше предела Windows
+    # ≈40 КБ — больше предела Windows (длинное значение, как у выражений плавного зума)
+    graph = "[0:v]metadata=mode=add:key=k:value=" + "a" * 40000 + ",scale=32:18[v]"
     out = tmp_path / "o.mp4"
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x36:d=0.2",
            "-filter_complex", graph, "-map", "[v]", "-pix_fmt", "yuv420p", str(out)]
