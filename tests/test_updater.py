@@ -49,7 +49,9 @@ def test_exe_renamed_then_replaced(tmp_path):
     new.write_text("new")
     cmd = updater.install("exe", new, exe, 7)
     assert exe.read_text() == "new" and (tmp_path / "Glimpsy.exe.old").read_text() == "old"
-    assert cmd[1:] == ["--after-update", "7"]
+    assert cmd[:2] == ["cmd", "/c"]
+    bat = open(cmd[2], encoding="utf-8").read()
+    assert "PID eq 7" in bat and f'start "" "{exe}" --after-update 7' in bat
 
 
 def test_scripts_wait_and_restart(tmp_path):

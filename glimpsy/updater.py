@@ -190,7 +190,10 @@ def install(kind: str, downloaded: Path, target: Path, pid: int) -> list[str]:
         except OSError:
             os.replace(old, target)
             raise
-        return [str(target), "--after-update", str(pid)]
+        # новую копию запускает отдельный маленький сценарий — только когда старая закрылась целиком
+        script = downloaded.with_name("Glimpsy-update.bat")
+        script.write_text(exe_restart_script(pid, target), encoding="utf-8")
+        return ["cmd", "/c", str(script)]
     work = downloaded.parent / "new"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
@@ -214,6 +217,18 @@ def install(kind: str, downloaded: Path, target: Path, pid: int) -> list[str]:
     script = downloaded.parent / "update.sh"
     script.write_text(mac_script(pid, app, target), encoding="utf-8")
     return ["/bin/sh", str(script)]
+
+
+def exe_restart_script(pid: int, exe: Path) -> str:
+    """Дождаться, пока старая копия закроется, и запустить новую (Windows, программа одним файлом)."""
+    return (
+        "@echo off\r\n"
+        ":wait\r\n"
+        f'tasklist /FI "PID eq {pid}" | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n'
+        "timeout /t 2 /nobreak >nul\r\n"
+        f'start "" "{exe}" --after-update {pid}\r\n'
+        '(goto) 2>nul & del "%~f0"\r\n'
+    )
 
 
 def windows_script(pid: int, new_dir: Path, target: Path) -> str:
