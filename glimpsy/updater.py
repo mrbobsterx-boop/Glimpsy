@@ -237,10 +237,23 @@ def mac_script(pid: int, new_app: Path, target: Path) -> str:
     )
 
 
-def launch(cmd: list[str]) -> None:
-    """Запустить команду отдельно от этой копии программы — она переживёт её выход."""
+def child_environment() -> dict:
+    """Окружение для новой копии программы. Собранная программа (PyInstaller) кладёт в окружение
+    свои служебные переменные; новая копия, получив их, решила бы, что она — часть старой, и
+    стала бы брать файлы старой версии из её временной папки (ошибка «cannot import name … numpy»).
+    Говорим ей: ты самостоятельная программа."""
     env = dict(os.environ)
     paths.clean_child_environment(env)
+    for k in list(env):
+        if k.startswith("_PYI_") or k in ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR"):
+            env.pop(k, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
+def launch(cmd: list[str]) -> None:
+    """Запустить команду отдельно от этой копии программы — она переживёт её выход."""
+    env = child_environment()
     if sys.platform == "win32":
         flags = 0x00000008 | 0x00000200 | 0x08000000   # DETACHED | NEW_PROCESS_GROUP | NO_WINDOW
         subprocess.Popen(cmd, env=env, creationflags=flags, close_fds=True)

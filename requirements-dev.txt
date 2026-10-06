@@ -1,4 +1,4 @@
 -r requirements.txt
 pytest>=8
-pyinstaller>=6.6
+pyinstaller>=6.10   # 6.10+: PYINSTALLER_RESET_ENVIRONMENT для перезапуска после обновления
 pillow>=10   # PyInstaller конвертирует PNG-иконку в .ico/.icns

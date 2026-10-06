@@ -160,3 +160,13 @@ def test_full_update_flow(qt_app, tmp_path, monkeypatch):
     assert tray.quits == [True]
     assert app.read_bytes() == b"NEW" * 1000
     assert launched == [[str(app), "--after-update", str(os.getpid())]]
+
+
+def test_new_copy_gets_clean_environment(monkeypatch):
+    """Новая копия после обновления не должна считать себя частью старой (общая папка _MEI…)."""
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", "C:/Temp/_MEI000078e02")
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
+    monkeypatch.setenv("_MEIPASS2", "C:/Temp/_MEI000078e02")
+    env = updater.child_environment()
+    assert not any(k.startswith("_PYI_") for k in env) and "_MEIPASS2" not in env
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
