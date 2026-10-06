@@ -266,6 +266,9 @@ class EditorWindow(QMainWindow):
         export_menu.addAction(theme.icon("list", size=16), "Главы для YouTube…", self.show_chapters)
         export_menu.addAction(theme.icon("image", size=16), "Обложка…", self.show_cover)
         export_menu.addSeparator()
+        export_menu.addAction(theme.icon("folder", size=16), "Сохранить проект в файл (для другого компьютера)…",
+                              self.save_package)
+        export_menu.addSeparator()
         self.a_smart = export_menu.addAction("Быстрое сохранение (без пересчёта видео, где можно)")
         self.a_smart.setCheckable(True)
         self.a_smart.setChecked(QSettings("Glimpsy", "editor").value("export/smart", True, type=bool))
@@ -1248,6 +1251,68 @@ class EditorWindow(QMainWindow):
             self.history.push(self.project.to_dict())
             self.project.cuts["chapters"] = dlg.items
             self._save_timer.start()
+
+    def save_package(self) -> None:
+        """Весь проект — одним zip-файлом: продолжить монтаж на другом компьютере (Windows ↔ Linux ↔ Mac)."""
+        from PySide6.QtWidgets import QFileDialog
+
+        from glimpsy.editor import package
+
+        self.player.pause()
+        self._save()
+        start = Path.home() / "Desktop"
+        start = start if start.is_dir() else Path.home()
+        safe = "".join(ch if ch.isalnum() or ch in " _-." else "_" for ch in self.project.name).strip() or "проект"
+        f, _ = QFileDialog.getSaveFileName(self, "Сохранить проект в файл", str(start / f"{safe}.glimpsy.zip"),
+                                           "Проект Glimpsy (*.zip)")
+        if not f:
+            return
+        out = Path(f)
+        if not out.name.lower().endswith(".zip"):
+            out = out.with_name(out.name + ".glimpsy.zip")
+        dlg = QProgressDialog("Упаковываю проект…", "Отмена", 0, 1000, self)
+        dlg.setWindowTitle("Проект в файл")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        bridge = _ExportBridge(self)
+        cancel = threading.Event()
+        dlg.canceled.connect(cancel.set)
+        bridge.progress.connect(lambda f_, t: (dlg.setValue(int(f_ * 1000)), dlg.setLabelText(t)))
+
+        def done(path: str) -> None:
+            dlg.close()
+            size = Path(path).stat().st_size / (1 << 20)
+            box = QMessageBox(self)
+            box.setWindowTitle("Проект сохранён")
+            box.setText(f"Проект сохранён в файл ({size:.0f} МБ):\n{path}\n\nПеренесите его на другой компьютер "
+                        "и откройте там: «Мои сессии» → «Открыть проект из файла…».")
+            b_open = box.addButton("Показать файл", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+            box.exec()
+            if box.clickedButton() == b_open:
+                paths.open_in_file_manager(Path(path).parent)
+
+        def failed(msg: str) -> None:
+            dlg.close()
+            if msg != "cancelled":
+                QMessageBox.warning(self, "Проект в файл", f"Не удалось сохранить проект: {msg}")
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+        project_dir = self.project.dir
+
+        def work() -> None:
+            try:
+                package.export_zip(project_dir, out, lambda f_, t: bridge.progress.emit(f_, t), cancel)
+                bridge.done.emit(str(out))
+            except Exception as e:                                # noqa: BLE001 — показать человеку
+                if str(e) != "cancelled":
+                    log.exception("Проект не упаковался")
+                bridge.failed.emit(str(e))
+
+        threading.Thread(target=work, daemon=True, name="package").start()
+        dlg.show()
 
     def show_cover(self) -> None:
         from glimpsy.editor.cover_dialog import CoverDialog

@@ -161,6 +161,9 @@ class SessionsDialog(QDialog):
         self.b_video.setToolTip("Своё видео (можно несколько, любой длины): расшифровка речи, монтаж по тексту, "
                                 "вырезание пауз. Исходные файлы не меняются и не копируются.")
         self.b_video.clicked.connect(self._new_from_videos)
+        self.b_import = QPushButton(theme.icon("folder-open", size=16), "  Открыть проект из файла…")
+        self.b_import.setToolTip("Проект, сохранённый на другом компьютере («Экспорт» → «Сохранить проект в файл»)")
+        self.b_import.clicked.connect(self._import_package)
         self.ffmpeg = ffmpeg
         self.b_delete = theme.mark(QPushButton(theme.icon("trash-2", theme.DANGER, 16), "  Удалить…"), "danger")
         self.b_delete.clicked.connect(self._delete)
@@ -170,6 +173,7 @@ class SessionsDialog(QDialog):
         buttons.addWidget(self.b_delete)
         buttons.addWidget(self.b_folder)
         buttons.addWidget(self.b_video)
+        buttons.addWidget(self.b_import)
         buttons.addStretch(1)
         buttons.addWidget(close)
         buttons.addWidget(self.b_open)
@@ -305,6 +309,57 @@ class SessionsDialog(QDialog):
         d = self._current_dir()
         if d:
             paths.open_in_file_manager(d)
+
+    def _import_package(self) -> None:
+        """Проект с другого компьютера (.glimpsy.zip) → в список и сразу открыть."""
+        import threading
+
+        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+
+        from glimpsy.editor import package
+
+        f, _ = QFileDialog.getOpenFileName(self, "Открыть проект из файла", str(Path.home()),
+                                           "Проект Glimpsy (*.zip)")
+        if not f:
+            return
+
+        class Bridge(QObject):
+            progress = Signal(float, str)
+            done = Signal(str)
+            failed = Signal(str)
+
+        bridge = Bridge(self)
+        dlg = QProgressDialog("Открываю проект…", None, 0, 1000, self)
+        dlg.setWindowTitle("Проект из файла")
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        bridge.progress.connect(lambda x, t: (dlg.setValue(int(x * 1000)), dlg.setLabelText(t)))
+
+        def done(path: str) -> None:
+            dlg.close()
+            self.reload()
+            self.open_project(Path(path))
+
+        def failed(msg: str) -> None:
+            dlg.close()
+            QMessageBox.warning(self, "Проект из файла", msg)
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+
+        def work() -> None:
+            try:
+                d = package.import_zip(Path(f), projects_root(), lambda x, t: bridge.progress.emit(x, t))
+                bridge.done.emit(str(d))
+            except package.PackageError as e:
+                bridge.failed.emit(str(e))
+            except Exception as e:                                # noqa: BLE001
+                log.exception("Проект не открылся")
+                bridge.failed.emit(f"Не удалось открыть проект: {e}")
+
+        threading.Thread(target=work, daemon=True, name="unpackage").start()
+        dlg.show()
 
     def _new_from_videos(self) -> None:
         """Новый проект «монтаж по тексту» из своих видео."""
