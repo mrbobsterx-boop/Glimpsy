@@ -217,13 +217,13 @@ class PreviewWidget(QWidget):
         return QRectF(c.x() + x, c.y() + y, w, h)
 
     def _paint_overlays(self, p: QPainter) -> None:
+        """Картинки и видео наложений (размытие — отдельно, см. paintEvent)."""
         canvas = self.canvas_rect()
         p.save()
         p.setClipRect(canvas)
         for item, src in self.overlays:
             r = self._ov_rect(item)
             if item.kind == "blur":
-                self._paint_blur(p, item, r, canvas)
                 continue
             w, h = max(2, int(r.width())), max(2, int(r.height()))
             key = f"{item.id}|{src.cacheKey() if src is not None else 0}|{w}|{h}|{item.radius}|{item.shadow}|{item.opacity}"
@@ -236,6 +236,8 @@ class PreviewWidget(QWidget):
             pad = shadow_pad(w, h)
             p.drawImage(QPointF(r.x() - pad, r.y() - pad), img)
         p.restore()
+
+    def _paint_overlay_handles(self, p: QPainter) -> None:
         for item, _src in self.overlays:
             if item.id == self.selected_overlay:
                 r = self._ov_rect(item)
@@ -248,16 +250,22 @@ class PreviewWidget(QWidget):
                 for c in points:
                     p.drawRect(QRectF(c.x() - HANDLE / 2, c.y() - HANDLE / 2, HANDLE, HANDLE))
 
-    def _paint_blur(self, p: QPainter, item, r: QRectF, canvas: QRectF) -> None:
-        """Размыть то, что уже нарисовано под прямоугольником (рисуем в картинку — см. paintEvent)."""
-        dev = p.device()
-        rr = r.intersected(canvas)
-        if not isinstance(dev, QImage) or rr.width() < 2 or rr.height() < 2:
-            return
-        dpr = dev.devicePixelRatio()
-        part = dev.copy(QRect(int(rr.x() * dpr), int(rr.y() * dpr), max(1, int(rr.width() * dpr)),
-                              max(1, int(rr.height() * dpr))))
-        p.drawImage(rr, blur_image(part, item.strength, item.mosaic, canvas.width() * dpr))
+    def _paint_blurs(self, p: QPainter, under: QImage) -> None:
+        """Размытые куски поверх: under — готовая картинка того, что под ними (без текстов)."""
+        canvas = self.canvas_rect()
+        dpr = under.devicePixelRatio()
+        p.save()
+        p.setClipRect(canvas)
+        for item, _src in self.overlays:
+            if item.kind != "blur":
+                continue
+            rr = self._ov_rect(item).intersected(canvas)
+            if rr.width() < 2 or rr.height() < 2:
+                continue
+            part = under.copy(QRect(int(rr.x() * dpr), int(rr.y() * dpr), max(1, int(rr.width() * dpr)),
+                                    max(1, int(rr.height() * dpr))))
+            p.drawImage(rr, blur_image(part, item.strength, item.mosaic, canvas.width() * dpr))
+        p.restore()
 
     def _hit_overlay(self, pos: QPointF):
         """(наложение, режим) или (None, ""). Режим: «scale» — за уголок выбранного, «move» — двигать,
@@ -352,23 +360,34 @@ class PreviewWidget(QWidget):
 
     def paintEvent(self, _event) -> None:
         if any(item.kind == "blur" for item, _src in self.overlays):
-            # размытию нужно видеть, что под ним, — сначала рисуем всё в картинку
+            # размытию нужно видеть, что под ним: сначала кадр и наложения — в картинку,
+            # потом поверх неё размытые куски, тексты и рамки
             dpr = self.devicePixelRatioF()
             buf = QImage(max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr)),
                          QImage.Format.Format_ARGB32_Premultiplied)
             buf.setDevicePixelRatio(dpr)
+            buf.fill(Qt.GlobalColor.black)
             p = QPainter(buf)
-            self._paint(p)
+            self._paint_base(p)
+            p.end()
+            under = buf.copy()
+            p = QPainter(buf)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._paint_blurs(p, under)
+            self._paint_top(p)
             p.end()
             w = QPainter(self)
-            w.drawImage(QPointF(0, 0), buf)
+            w.drawImage(QRectF(0, 0, self.width(), self.height()), buf)
             w.end()
             return
         p = QPainter(self)
-        self._paint(p)
+        self._paint_base(p)
+        self._paint_top(p)
         p.end()
 
-    def _paint(self, p: QPainter) -> None:
+    def _paint_base(self, p: QPainter) -> None:
+        """Кадр, курсор, клики и наложения."""
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), self.palette().window())
@@ -379,7 +398,6 @@ class PreviewWidget(QWidget):
             p.setPen(QColor("#777"))
             p.drawText(canvas, Qt.AlignmentFlag.AlignCenter, "Нет кадра")
             self._paint_overlays(p)
-            self._paint_texts(p)
             return
         fr = self._frame_rect()
         if not fr.contains(canvas.adjusted(1, 1, -1, -1)):
@@ -405,7 +423,15 @@ class PreviewWidget(QWidget):
             self._paint_cursor(p, fr)
         p.restore()
         self._paint_overlays(p)
+
+    def _paint_top(self, p: QPainter) -> None:
+        """Тексты, рамки выбранного, направляющие, выбор области — поверх всего."""
+        canvas = self.canvas_rect()
+        self._paint_overlay_handles(p)
         self._paint_texts(p)
+        if self.image.isNull():
+            return
+        fr = self._frame_rect()
         if self.editable and self.selected_text is None and self.selected_overlay is None:
             # рамка и уголки выбранного фрагмента (за пределами экрана видны пунктиром)
             p.setPen(QPen(QColor("#ffffff"), 1, Qt.PenStyle.DashLine))
