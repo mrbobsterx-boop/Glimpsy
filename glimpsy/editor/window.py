@@ -269,6 +269,8 @@ class EditorWindow(QMainWindow):
         export_menu.addSeparator()
         export_menu.addAction(theme.icon("layout-grid", size=16), "Фрагменты по отдельности (с описаниями)…",
                               self.export_fragments)
+        export_menu.addAction(theme.icon("folder-open", size=16), "Открыть папку с фрагментами этой записи",
+                              lambda: (self._save(), paths.open_in_file_manager(self.project.dir)))
         export_menu.addAction(theme.icon("folder", size=16), "Сохранить проект в файл (для другого компьютера)…",
                               self.save_package)
         export_menu.addSeparator()
@@ -2996,7 +2998,8 @@ class EditorWindow(QMainWindow):
             box = QMessageBox(self)
             box.setWindowTitle("Фрагменты по отдельности")
             box.setText(f"Сохранить фрагментов: {count} — каждый отдельным файлом, со списком описаний "
-                        f"(fragments.md) — в папку:\n\n{last}")
+                        f"(fragments.md) — в папку:\n\n{last}\n\nДля этого ролика там будет своя папка "
+                        f"«{self.project.name}».")
             b_save = box.addButton("Сохранить", QMessageBox.ButtonRole.AcceptRole)
             b_other = box.addButton("Другая папка…", QMessageBox.ButtonRole.ActionRole)
             box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
@@ -3023,9 +3026,10 @@ class EditorWindow(QMainWindow):
         clips = sel if len(sel) > 1 else [c for c in self.project.clips if c.duration > 0.05]
         if not clips:
             return
-        folder = self._fragments_folder(len(clips))
-        if folder is None:
+        base = self._fragments_folder(len(clips))
+        if base is None:
             return
+        folder = fr.folder_for(base, self.project)          # у каждого ролика — своя папка
         rows = fr.entries(self.project, clips)
         dlg = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
         dlg.setWindowTitle("Фрагменты по отдельности")

@@ -148,3 +148,27 @@ def test_name_and_note_in_inspector(tmp_path, qt_app):
     finally:
         w.player.shutdown()
         w.close()
+
+
+def test_list_written_into_recording_folder(tmp_path):
+    from glimpsy.editor.project import Project
+
+    proj = tmp_path / "project_20260925_101010"
+    proj.mkdir()
+    for n in ("piece_0000.mp4", "piece_0001.mp4"):
+        (proj / n).write_bytes(b"x")
+    (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "Glimpsy_2026.mp4"), "clips": [
+        {"file": "piece_0000.mp4", "duration": 5.0, "app": "Chrome", "title": "Story Map — Google Chrome",
+         "recorded_at": 1790000000},
+        {"file": "piece_0001.mp4", "duration": 8.0}]}))
+    p = Project.load(proj)
+    fr.write_project_list(p)
+    md = (proj / fr.MANIFEST_MD).read_text(encoding="utf-8")
+    assert md.startswith("# Фрагменты: Glimpsy_2026")
+    assert "| `piece_0000.mp4` | 5 с | Story Map | Chrome: «Story Map». 5 с |" in md
+    p.clips[1].name, p.clips[1].note = "V03-steamdeck", "Запуск игры"
+    p.save()                                                    # сохранение в редакторе обновляет список
+    md = (proj / fr.MANIFEST_MD).read_text(encoding="utf-8")
+    assert "| `piece_0001.mp4` | 8 с | V03-steamdeck | Запуск игры |" in md
+    assert fr.load_manifest(proj) == []              # это список записи, не папки выгрузки
+    assert fr.folder_for(tmp_path / "drive", p) == tmp_path / "drive" / "Glimpsy_2026"

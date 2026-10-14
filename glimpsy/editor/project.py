@@ -407,6 +407,9 @@ class Project:
         tmp = self.dir / "edit.json.tmp"
         tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.dir / "edit.json")
+        from glimpsy.editor.fragments import write_project_list
+
+        write_project_list(self)                 # описание фрагментов — рядом с ними, всегда свежее
 
     @property
     def text_edit(self) -> bool:

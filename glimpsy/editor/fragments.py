@@ -46,6 +46,7 @@ class Entry:
     title: str = ""
     speech: str = ""
     project: str = ""
+    part: str = ""              # какой отрезок файла («0–12 с»), если в ролике не весь файл
 
 
 def clean_title(title: str, app: str = "") -> str:
@@ -194,20 +195,20 @@ def _cell(s: str) -> str:
     return (s or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def render_md(items: list[Entry]) -> str:
+def render_md(items: list[Entry], title: str = "Фрагменты") -> str:
+    parts = any(e.part for e in items)
     lines = [
-        "# Фрагменты",
+        f"# {title}",
         "",
-        "Видео в этой папке и что на каждом — для сценария и монтажа. Список ведёт Glimpsy: при каждом "
-        "сохранении фрагментов он дополняется. Название и описание фрагмента меняются в редакторе Glimpsy "
-        "(справа, когда фрагмент выбран).",
+        "Видео в этой папке и что на каждом — для сценария и монтажа. Список ведёт Glimpsy и обновляет сам. "
+        "Название и описание фрагмента меняются в редакторе Glimpsy (справа, когда фрагмент выбран).",
         "",
-        "| Файл | Длительность | Название | Что на нём | Записано |",
-        "|---|---|---|---|---|",
+        "| Файл | " + ("Отрезок | " if parts else "") + "Длительность | Название | Что на нём | Записано |",
+        "|---|" + ("---|" if parts else "") + "---|---|---|---|",
     ]
     for e in items:
-        lines.append(f"| `{_cell(e.file)}` | {e.duration:.0f} с | {_cell(e.name)} | {_cell(e.note)} | "
-                     f"{_cell(e.recorded)} |")
+        lines.append(f"| `{_cell(e.file)}` | " + (f"{_cell(e.part)} | " if parts else "")
+                     + f"{e.duration:.0f} с | {_cell(e.name)} | {_cell(e.note)} | {_cell(e.recorded)} |")
     talk = [e for e in items if e.speech]
     if talk:
         lines += ["", "## Что говорится", ""]
@@ -226,7 +227,7 @@ def load_manifest(folder: Path) -> list[Entry]:
         return []
     known = set(Entry.__dataclass_fields__)
     out = []
-    for d in data.get("fragments", []) if isinstance(data, dict) else []:
+    for d in data.get("fragments", []) if isinstance(data, dict) and not data.get("project_list") else []:
         try:
             out.append(Entry(**{k: v for k, v in d.items() if k in known}))
         except TypeError:
@@ -246,3 +247,39 @@ def write_manifest(folder: Path, new: list[Entry]) -> list[Entry]:
                                                    indent=1), encoding="utf-8")
     (folder / MANIFEST_MD).write_text(render_md(items), encoding="utf-8")
     return items
+
+
+def project_entries(project: Project, store=None) -> list[Entry]:
+    """Список для папки самой записи: фрагменты лежат там под своими именами (piece_0000.mp4…)."""
+    out = []
+    for c in project.clips:
+        if c.duration <= 0.05:
+            continue
+        speech = speech_text(project, c, store)
+        whole = c.kind != "video" or (c.in_s < 0.05 and c.out_s > c.src_duration - 0.05)
+        out.append(Entry(Path(c.src).name, c.name.strip() or suggest_name(c), c.note.strip() or suggest_note(c, speech),
+                         round(c.duration, 2), recorded_text(c), c.app, clean_title(c.title, c.app), speech,
+                         project.name, "" if whole else f"{c.in_s:.1f}–{c.out_s:.1f} с"))
+    return out
+
+
+def write_project_list(project: Project) -> None:
+    """Описание фрагментов — в папку записи, рядом с самими фрагментами. Пишется само: после
+    записи и при каждом сохранении в редакторе."""
+    items = project_entries(project)
+    d = Path(project.dir)
+    js = json.dumps({"project_list": True, "project": project.name, "fragments": [asdict(e) for e in items]},
+                    ensure_ascii=False, indent=1)
+    md = render_md(items, f"Фрагменты: {project.name}")
+    for name, text in ((MANIFEST_JSON, js), (MANIFEST_MD, md)):
+        f = d / name
+        try:
+            if not f.exists() or f.read_text(encoding="utf-8") != text:
+                f.write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def folder_for(base: Path, project: Project) -> Path:
+    """Каждый ролик — в свою папку внутри выбранной: base/<название ролика>/."""
+    return Path(base) / (safe_file_name(project.name) or "Glimpsy")

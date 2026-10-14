@@ -451,6 +451,13 @@ class Assembler:
         if name:
             meta["stream"] = name
         (project_dir / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        try:                                       # описание фрагментов — сразу, рядом с ними
+            from glimpsy.editor.fragments import write_project_list
+            from glimpsy.editor.project import Project
+
+            write_project_list(Project.load(project_dir))
+        except Exception:
+            log.exception("Не удалось записать описание фрагментов")
 
 
 def safe_name(name: str) -> str:
