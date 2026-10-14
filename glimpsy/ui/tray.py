@@ -187,9 +187,29 @@ class TrayController(QObject):
             popup.deleteLater()
             self._progress = None
 
+    def _continue_recording(self, project_dir: Path) -> bool:
+        """Из редактора: записывать дальше — новые фрагменты допишутся в этот проект."""
+        if self.engine.running:
+            QMessageBox.information(None, "Glimpsy", "Сейчас уже идёт запись. Сначала завершите её — "
+                                    "потом можно продолжить этот проект.")
+            return False
+        self._continued = project_dir
+        self.engine.start_session(continue_into=project_dir)
+        self.show_message("Запись продолжается", "Когда закончите, новые фрагменты встанут в конец ленты "
+                          "этого проекта.")
+        return True
+
     def _on_done(self, path: str) -> None:
         self._close_progress()
         files = [Path(p) for p in path.split("\n") if p]
+        cont = getattr(self, "_continued", None)
+        self._continued = None
+        if cont is not None:
+            # редактор этого проекта открыт (открыли, пока шла запись) — открыть заново, с новыми фрагментами
+            for w in list(self._editors):
+                if w.isVisible() and w.project.dir == cont:
+                    w.close()
+                    QTimer.singleShot(0, lambda d=cont: self._open_project(d))
         if not files:
             return
         self._last_video = files[0]
@@ -505,7 +525,8 @@ class TrayController(QObject):
         self._editors = [w for w in self._editors if w.isVisible()]
         try:
             w = EditorWindow(project_dir, self.engine.ffmpeg, self._encoder_for_export, Path(self.s.output_dir),
-                             on_sessions=self.open_editor, on_open=self._open_project)
+                             on_sessions=self.open_editor, on_open=self._open_project,
+                             on_continue=self._continue_recording)
         except Exception as e:
             log.exception("Редактор не открылся")
             QMessageBox.warning(None, "Glimpsy", f"Не удалось открыть проект:\n{e}")

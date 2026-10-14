@@ -414,11 +414,20 @@ class Assembler:
     def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path,
                       cams: list[CamPlacement] | None = None, cam_dir: Path | None = None,
                       name: str = "") -> None:
-        """Сохраняем готовые фрагменты и данные для будущего редактора (этап 2)."""
+        """Сохраняем готовые фрагменты и данные для будущего редактора (этап 2).
+        Если проект уже есть («Продолжить запись»), новые фрагменты дописываются в его конец."""
         project_dir.mkdir(parents=True, exist_ok=True)
+        old_meta = None
+        if (project_dir / "project.json").exists():
+            try:
+                old_meta = json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                log.exception("project.json не читается — продолжение запишется как новый проект")
         items = []
         for p, r in zip(pieces, rendered):
             dest = project_dir / r.name
+            if old_meta is not None:                   # имена уже заняты прошлой записью — следующие свободные
+                dest = _free_name(project_dir, "piece_{:04d}.mp4")
             shutil.copy2(r, dest)
             c = p.cand
             cursor = [[round((t - p.offset) / p.speed, 3), x, y] for t, x, y in c.cursor
@@ -442,14 +451,23 @@ class Assembler:
         for i, c in enumerate(cams or []):
             if cam_dir is None:
                 break
-            name = f"camera_{i:03d}.mp4"
-            shutil.copy2(cam_dir / c.clip.file, project_dir / name)
-            camera.append({"file": name, "start": c.start, "duration": c.duration, "src_duration": c.clip.duration,
+            cam_name = f"camera_{i:03d}.mp4" if old_meta is None else _free_name(project_dir, "camera_{:03d}.mp4").name
+            shutil.copy2(cam_dir / c.clip.file, project_dir / cam_name)
+            camera.append({"file": cam_name, "start": c.start, "duration": c.duration, "src_duration": c.clip.duration,
                            "width": c.clip.width, "height": c.clip.height, "recorded_at": c.clip.start})
         meta = {"version": 1, "output": str(final), "width": self.s.output_width,
                 "height": self.s.output_height, "fps": self.s.fps, "clips": items, "camera": camera}
         if name:
             meta["stream"] = name
+        if old_meta is not None:
+            # продолжение: старое остаётся как было, новое — в конце (и в смонтированной ленте тоже)
+            before = sum(float(c.get("duration", 0)) for c in old_meta.get("clips", []))
+            meta = dict(old_meta)
+            meta["clips"] = old_meta.get("clips", []) + items
+            meta["camera"] = old_meta.get("camera", []) + [{**c, "start": round(c["start"] + before, 3)}
+                                                           for c in camera]
+            meta["parts"] = old_meta.get("parts", []) + [str(final)]
+            # смонтированная лента (edit.json) подхватит новое сама при открытии — Project.load
         (project_dir / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
         try:                                       # описание фрагментов — сразу, рядом с ними
             from glimpsy.editor.fragments import write_project_list
@@ -458,6 +476,14 @@ class Assembler:
             write_project_list(Project.load(project_dir))
         except Exception:
             log.exception("Не удалось записать описание фрагментов")
+
+
+def _free_name(folder: Path, pattern: str) -> Path:
+    """Первое свободное имя по образцу («piece_{:04d}.mp4» → piece_0012.mp4)."""
+    n = 0
+    while (folder / pattern.format(n)).exists():
+        n += 1
+    return folder / pattern.format(n)
 
 
 def safe_name(name: str) -> str:

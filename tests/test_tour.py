@@ -27,7 +27,7 @@ def test_tour_walks_all_parts(tmp_path, qt_app):
                     "-t", "2", "-pix_fmt", "yuv420p", str(proj / "piece_0000.mp4")], check=True)
     (proj / "project.json").write_text(json.dumps({"output": str(tmp_path / "W.mp4"),
                                                    "clips": [{"file": "piece_0000.mp4", "duration": 2.0}]}))
-    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path, on_sessions=lambda: None)
+    w = EditorWindow(proj, FFMPEG, software_encoder, tmp_path, on_sessions=lambda: None, on_continue=lambda d: False)
     try:
         w.resize(1400, 900)
         w.show()

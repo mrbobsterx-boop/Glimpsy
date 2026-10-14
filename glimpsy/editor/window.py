@@ -101,8 +101,10 @@ QScrollArea {{ background: transparent; }}
 class EditorWindow(QMainWindow):
     def __init__(self, project_dir: Path, ffmpeg: str, encoder_getter: Callable[[], Encoder],
                  fallback_output: Path, on_sessions: Callable[[], None] | None = None,
-                 on_open: Callable[[Path], None] | None = None) -> None:
+                 on_open: Callable[[Path], None] | None = None,
+                 on_continue: Callable[[Path], bool] | None = None) -> None:
         super().__init__()
+        self.on_continue = on_continue      # «Продолжить запись»: True — запись началась
         self.on_sessions = on_sessions      # «Все записи»: вернуться к списку сессий
         self.on_open = on_open              # открыть другой проект (вариант автомонтажа) в своём окне
         self.ffmpeg = ffmpeg
@@ -304,6 +306,14 @@ class EditorWindow(QMainWindow):
         tl.addWidget(theme.mark(QLabel("·"), "muted"))
         tl.addWidget(name)
         tl.addStretch(1)
+        if self.on_continue is not None and (self.project.dir / "project.json").exists() \
+                and not self.project.text_edit:
+            cont = theme.mark(QPushButton(theme.icon("circle", theme.DANGER, 14), "  Продолжить запись"), "ghost")
+            cont.setToolTip("Сохранить монтаж, закрыть редактор и записывать дальше. Новые фрагменты лягут "
+                            "в этот же проект — в конец ленты, ваш порядок фрагментов останется.")
+            cont.clicked.connect(self.continue_recording)
+            self._tour_targets["continue"] = cont
+            tl.addWidget(cont)
         tl.addWidget(self.montage_btn)
         tl.addSpacing(6)
         tl.addWidget(seg)
@@ -3128,6 +3138,15 @@ class EditorWindow(QMainWindow):
         self.exporting = True
         threading.Thread(target=work, daemon=True, name="fragments").start()
         dlg.show()
+
+    def continue_recording(self) -> None:
+        """Сохранить, закрыть редактор и продолжить запись в этот же проект."""
+        if self.exporting:
+            QMessageBox.information(self, "Glimpsy", "Дождитесь конца сохранения ролика.")
+            return
+        self._save()
+        if self.on_continue is not None and self.on_continue(self.project.dir):
+            self.close()
 
     def back_to_sessions(self) -> None:
         """«Все записи»: сохранить, закрыть редактор и показать список сессий."""

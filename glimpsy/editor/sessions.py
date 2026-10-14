@@ -98,7 +98,9 @@ def project_for_video(video: Path) -> Path | None:
         for name, key in (("project.json", "output"), ("edit.json", "source_video")):
             f = d / name
             try:
-                if f.exists() and json.loads(f.read_text(encoding="utf-8")).get(key) == target:
+                data = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+                # продолжение записи — свой ролик, но проект тот же
+                if data.get(key) == target or target in data.get("parts", []):
                     return d
             except (OSError, ValueError):
                 continue

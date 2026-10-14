@@ -124,6 +124,7 @@ class RecorderEngine(QObject):
 
     def _reset_session_fields(self) -> None:
         self.session_dir: Path | None = None
+        self.continue_into: Path | None = None    # «Продолжить запись»: проект, куда дописать фрагменты
         self.session_start = 0.0
         self.pool: CandidatePool | None = None
         self.activity: ActivityTracker | None = None
@@ -179,10 +180,12 @@ class RecorderEngine(QObject):
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start_session(self, existing_dir: Path | None = None) -> None:
+    def start_session(self, existing_dir: Path | None = None, continue_into: Path | None = None) -> None:
+        """continue_into — папка проекта: новые фрагменты допишутся в его конец («Продолжить запись»)."""
         if self.running:
             return
         self._reset_session_fields()
+        self.continue_into = continue_into
         self.plan = make_plan(self.s)
         self._cmds = queue.Queue()   # старые команды (нажатые, пока запись стояла) не нужны
         self._thread = threading.Thread(target=self._main, args=(existing_dir,), daemon=True, name="engine")
@@ -197,7 +200,9 @@ class RecorderEngine(QObject):
         def work() -> None:
             self._reset_session_fields()
             self.session_dir = session_dir
-            self.session_start = float(_read_json(session_dir / "session.json").get("start", time.time()))
+            meta = _read_json(session_dir / "session.json")
+            self.session_start = float(meta.get("start", time.time()))
+            self.continue_into = Path(meta["continue_into"]) if meta.get("continue_into") else None
             self._load_pools(session_dir)
             self._assemble()
 
@@ -287,11 +292,16 @@ class RecorderEngine(QObject):
             self.session_dir = existing_dir
             meta = _read_json(existing_dir / "session.json")
             self.session_start = float(meta.get("start", existing_dir.stat().st_mtime))
+            if meta.get("continue_into"):
+                self.continue_into = Path(meta["continue_into"])
         else:
             self.session_start = time.time()
             self.session_dir = paths.temp_root() / time.strftime("session_%Y%m%d_%H%M%S")
             self.session_dir.mkdir(parents=True, exist_ok=True)
-            (self.session_dir / "session.json").write_text(json.dumps({"start": self.session_start}))
+            meta = {"start": self.session_start}
+            if self.continue_into is not None:      # после сбоя продолжение не потеряется
+                meta["continue_into"] = str(self.continue_into)
+            (self.session_dir / "session.json").write_text(json.dumps(meta))
         shutil.rmtree(self.session_dir / "buffer", ignore_errors=True)  # старый буфер не нужен
         self._load_pools(self.session_dir)
         self._set_streams(self.streams)
@@ -1117,6 +1127,8 @@ class RecorderEngine(QObject):
             project_dir = None
             if self.s.keep_project_for_editor:
                 project_dir = paths.data_dir() / "projects" / (base + (f"_{sid}" if sid else ""))
+            if n == 0 and self.continue_into is not None and (self.continue_into / "project.json").exists():
+                project_dir = self.continue_into          # продолжение: в тот же проект, в конец ленты
             prefix = f"«{name}» ({n + 1} из {len(pools)}): " if len(pools) > 1 else ""
 
             def progress(f: float, t: str, n=n, prefix=prefix) -> None:

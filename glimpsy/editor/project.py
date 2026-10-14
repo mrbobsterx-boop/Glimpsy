@@ -455,6 +455,8 @@ class Project:
             p = cls(directory, data.get("name", directory.name), fps=int(data.get("fps", 30)),
                     source_video=data.get("source_video", ""), created=float(data.get("created", 0)))
             p.restore(data)
+            if p._merge_recording():
+                p.save()
             return p
         return cls._from_recording(directory)
 
@@ -462,25 +464,7 @@ class Project:
     def _from_recording(cls, directory: Path) -> "Project":
         """Первое открытие: берём фрагменты, которые автоматически собрал этап 1."""
         meta = json.loads((directory / "project.json").read_text(encoding="utf-8"))
-        clips = []
-        for c in meta.get("clips", []):
-            when = c.get("recorded_at")
-            label = time.strftime("%H:%M:%S", time.localtime(when)) if when else c["file"]
-            if c.get("monitor"):
-                label += f" · монитор {c['monitor']}"
-            if c.get("voice"):
-                label += " · речь"
-            w, h = (c.get("source_size") or [0, 0])[:2]
-            dur = float(c.get("duration", 0))
-            # Фрагменты уже ускорены при автосборке, поэтому здесь их скорость — ×1
-            clips.append(Clip(new_id(), "video", c["file"], dur, 0.0, dur, width=w, height=h,
-                              label=label, priority=bool(c.get("priority")), recorded_at=when,
-                              cursor=c.get("cursor", []), clicks=c.get("clicks", []),
-                              has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
-                              motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
-                              zoom_strength=float(c.get("zoom_strength", 1.8)),
-                              score=float(c.get("score", -1)), own_cursor=bool(c.get("own_cursor")),
-                              app=str(c.get("app") or ""), title=str(c.get("title") or "")))
+        clips = [clip_from_meta(c) for c in meta.get("clips", [])]
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
             # у потоков к имени добавлен номер: project_ГГГГММДД_ЧЧММСС_1
@@ -490,16 +474,78 @@ class Project:
         name = Path(output).stem if output else directory.name
         project = cls(directory, name, clips, fps=int(meta.get("fps", 30)), source_video=output, created=created)
         # окошки с веб-камеры, которые автосборка поставила в ролик, — как обычные наложения
-        from glimpsy.editor.overlay import camera_item
-        for c in meta.get("camera", []):
-            when = c.get("recorded_at")
-            label = "Камера " + time.strftime("%H:%M:%S", time.localtime(when)) if when else "Веб-камера"
-            item = camera_item(new_id(), c["file"], float(c["start"]), float(c["duration"]),
-                               int(c.get("width", 0)), int(c.get("height", 0)), label)
-            item.src_duration = float(c.get("src_duration", c["duration"]))
-            project.overlays.append(item)
+        project.overlays.extend(camera_from_meta(c) for c in meta.get("camera", []))
         project.normalize_tracks()
+        project.cuts["rec_clips"] = len(meta.get("clips", []))
+        project.cuts["rec_cams"] = len(meta.get("camera", []))
         return project
+
+    def _merge_recording(self) -> bool:
+        """Запись продолжили («Продолжить запись»): в project.json появились новые фрагменты —
+        добавляем их в конец смонтированной ленты. True — что-то добавили."""
+        f = self.dir / "project.json"
+        if not f.exists() or self.text_edit:
+            return False
+        try:
+            meta = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        clips, cams = meta.get("clips", []), meta.get("camera", [])
+        n, m = self.cuts.get("rec_clips"), self.cuts.get("rec_cams")
+        if n is None:                           # проект из старой версии: всё, что есть, уже на ленте
+            self.cuts["rec_clips"], self.cuts["rec_cams"] = len(clips), len(cams)
+            return False
+        if len(clips) <= n:
+            return False
+        # время камеры в project.json — от начала всех записей; нам нужно от начала новой
+        before = sum(float(c.get("duration", 0)) for c in clips[:n])
+        self.append_recording(clips[n:], [{**c, "start": float(c["start"]) - before} for c in cams[m or 0:]])
+        self.cuts["rec_clips"], self.cuts["rec_cams"] = len(clips), len(cams)
+        return True
+
+    def append_recording(self, items: list[dict], camera: list[dict]) -> None:
+        """«Продолжить запись»: новые фрагменты — в конец ленты, после всего, что уже смонтировано.
+        camera — окошки с камеры; их время — от начала новой записи."""
+        offset = self.total
+        self.clips.extend(clip_from_meta(c) for c in items)
+        for c in camera:
+            o = camera_from_meta(c, offset)
+            o.track = self.track_for("camera").id
+            self.overlays.append(o)
+        self.normalize_tracks()
+
+
+def clip_from_meta(c: dict) -> Clip:
+    """Фрагмент из project.json (как его сохранила автосборка)."""
+    when = c.get("recorded_at")
+    label = time.strftime("%H:%M:%S", time.localtime(when)) if when else c["file"]
+    if c.get("monitor"):
+        label += f" · монитор {c['monitor']}"
+    if c.get("voice"):
+        label += " · речь"
+    w, h = (c.get("source_size") or [0, 0])[:2]
+    dur = float(c.get("duration", 0))
+    # Фрагменты уже ускорены при автосборке, поэтому здесь их скорость — ×1
+    return Clip(new_id(), "video", c["file"], dur, 0.0, dur, width=w, height=h,
+                label=label, priority=bool(c.get("priority")), recorded_at=when,
+                cursor=c.get("cursor", []), clicks=c.get("clicks", []),
+                has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
+                motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
+                zoom_strength=float(c.get("zoom_strength", 1.8)),
+                score=float(c.get("score", -1)), own_cursor=bool(c.get("own_cursor")),
+                app=str(c.get("app") or ""), title=str(c.get("title") or ""))
+
+
+def camera_from_meta(c: dict, offset: float = 0.0):
+    """Окошко с веб-камеры из project.json; offset — сдвиг по времени ролика."""
+    from glimpsy.editor.overlay import camera_item
+
+    when = c.get("recorded_at")
+    label = "Камера " + time.strftime("%H:%M:%S", time.localtime(when)) if when else "Веб-камера"
+    item = camera_item(new_id(), c["file"], float(c["start"]) + offset, float(c["duration"]),
+                       int(c.get("width", 0)), int(c.get("height", 0)), label)
+    item.src_duration = float(c.get("src_duration", c["duration"]))
+    return item
 
 
 class History:
