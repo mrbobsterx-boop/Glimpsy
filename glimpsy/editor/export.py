@@ -228,7 +228,9 @@ def render_overlay_layers(project: Project, out_dir: Path) -> list[OverlayLayer]
         pad = shadow_pad(w, h)
         path = project.dir / ov.src
         layer = OverlayLayer(ov, round(x), round(y), w, h, pad)
-        if ov.kind == "image":
+        if ov.kind == "blur":                     # размытие — только фильтр, файлов не нужно
+            pass
+        elif ov.kind == "image":
             png = out_dir / f"overlay_{i:03d}.png"
             styled_image(QImage(str(path)), w, h, ov.radius, ov.shadow, ov.opacity).save(str(png))
             layer.png = png
@@ -516,7 +518,7 @@ def _try_smart(ffmpeg: str, project: Project, clips: list[Clip], out: Path, work
 def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: list[TextLayer],
                     overlays: list["OverlayLayer"], enc: Encoder, cancel: threading.Event) -> None:
     """Один проход FFmpeg: сначала наложения (картинки/видео), сверху — тексты."""
-    from glimpsy.editor.overlay import video_alpha_filter
+    from glimpsy.editor.overlay import blur_box, blur_filter, video_alpha_filter
     from glimpsy.editor.text import ffmpeg_overlay
 
     W, H = ASPECTS[project.aspect]
@@ -543,6 +545,17 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
         it = ov.item
         S, E = it.start, min(it.end, total)
         if S >= total:
+            continue
+        if it.kind == "blur":                                  # размыть часть того, что уже в кадре
+            box = blur_box(it, project.aspect, W, H)
+            if box is None:
+                continue
+            bx, by, bw, bh = box
+            i = len(parts)
+            parts.append(f"[{prev}]split[bz{i}a][bz{i}b];[bz{i}b]crop={bw}:{bh}:{bx}:{by},"
+                         f"{blur_filter(it, bw, bh, W)}[bz{i}c]")
+            prev = f"bz{i}a"
+            put(f"bz{i}c", bx, by, S, E)
             continue
         if it.kind == "image":
             k = still(ov.png)

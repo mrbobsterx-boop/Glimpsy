@@ -239,7 +239,8 @@ class TimelineWidget(QWidget):
             p.setBrush(TRACK_COLORS[tr.kind])
             p.drawRoundedRect(r, 6, 6)
             label = (t.text.strip().splitlines() or [""])[0] if kind == "text" else t.label
-            chip = "text" if kind == "text" else {"image": "overlay", "audio": "voice"}.get(t.kind, "video")
+            chip = "text" if kind == "text" else {"image": "overlay", "audio": "voice", "blur": "blur"}.get(t.kind,
+                                                                                                         "video")
             self._chip_text(p, r, chip, label)
         # название дорожки — маленькой меткой у левого края
         name_w = p.fontMetrics().horizontalAdvance(tr.name) + 10
@@ -278,7 +279,8 @@ class TimelineWidget(QWidget):
 
     def _chip_text(self, p: QPainter, r: QRectF, kind: str, text: str) -> None:
         """Иконка и подпись внутри элемента дорожки."""
-        ic = {"text": "type", "overlay": "image-plus", "video": "film", "music": "music", "voice": "mic"}[kind]
+        ic = {"text": "type", "overlay": "image-plus", "video": "film", "music": "music", "voice": "mic",
+              "blur": "eye-off"}[kind]
         p.save()
         p.setClipRect(r.adjusted(2, 0, -2, 0))
         p.drawPixmap(QPointF(r.left() + 6, r.center().y() - 6), theme.pixmap(ic, "#FFFFFF", 12))
@@ -349,7 +351,7 @@ class TimelineWidget(QWidget):
             badges += {"pushin": "наезд · ", "cursor_zoom": "к стрелке · ", "region": "область · "}.get(
                 mode, "прокрутка · " if mode.startswith("scroll") else
                 "за курсором · " if mode.startswith("follow") else "зум · ")
-        top = badges + (c.label or "")
+        top = badges + (c.name or c.label or "")
         for text, right in ((top, False), (f"{c.duration:.1f} с", True)):
             w = min(r.width() - 8, fm.horizontalAdvance(text) + 12)
             if w < 20:

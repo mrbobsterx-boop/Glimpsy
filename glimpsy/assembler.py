@@ -432,6 +432,7 @@ class Assembler:
                 "cursor": cursor, "clicks": clicks,
                 "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id, "voice": c.voice_id,
                 "own_cursor": c.own_cursor,
+                "app": getattr(c, "app", ""), "title": getattr(c, "title", ""),
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
                 "motion": "autozoom" if self.s.fx_zoom and (cursor or clicks) else "none",
                 "click_fx": bool(self.s.fx_clicks),

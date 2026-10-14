@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from glimpsy.editor.motion import is_follow, needs_cursor
@@ -32,6 +32,17 @@ class Inspector(QWidget):
         self.info = QLabel()
         self.info.setWordWrap(True)
         self.info.setProperty("role", "muted")
+
+        # --- название и описание (для сохранения фрагментов по отдельности) ---
+        self.name = QLineEdit()
+        self.name.setToolTip("Имя файла, если сохранять фрагменты по отдельности (Экспорт → «Фрагменты "
+                             "по отдельности…»). Например, V02-chat-big-task — как в списке съёмок.")
+        self.name.textEdited.connect(lambda t: self._emit("name", t))
+        self.note = QPlainTextEdit()
+        self.note.setToolTip("Коротко: что на этом фрагменте. Попадёт в список fragments.md рядом с видео.")
+        self.note.setFixedHeight(self.note.fontMetrics().lineSpacing() * 3 + 14)
+        self.note.setTabChangesFocus(True)
+        self.note.textChanged.connect(lambda: self._emit("note", self.note.toPlainText()))
 
         self.speed = QDoubleSpinBox(minimum=MIN_SPEED, maximum=MAX_SPEED, singleStep=0.25, decimals=2, suffix=" ×")
         self.speed.valueChanged.connect(lambda v: self._emit("speed", v))
@@ -172,6 +183,8 @@ class Inspector(QWidget):
         self.frame_hint.setProperty("role", "hint")
 
         self.form = QFormLayout()
+        self.form.addRow("Название", self.name)
+        self.form.addRow("Описание", self.note)
         self.form.addRow("Скорость", self.speed)
         self.form.addRow(self.presets)
         self.form.addRow(self.sound)
@@ -219,7 +232,7 @@ class Inspector(QWidget):
         """Показать свойства фрагмента. count > 1 — выбрано несколько: правки идут во все."""
         self.clip, self.aspect, self.count = clip, aspect, count
         self._loading = True
-        all_rows = [self.speed, self.presets, self.sound, self.in_s, self.out_s, self.photo_dur] + \
+        all_rows = [self.name, self.note, self.speed, self.presets, self.sound, self.in_s, self.out_s, self.photo_dur] + \
                    [getattr(self, n) for n in self.FRAME_ROWS + self.MOTION_ROWS + self.CURSOR_ROWS]
         if clip is None:
             self.title.setText("Выберите фрагмент на ленте")
@@ -302,6 +315,17 @@ class Inspector(QWidget):
         self.pos_x.setValue(x * 100)
         self.pos_y.setValue(y * 100)
         single = count == 1
+        self._set_row_visible(self.name, single)
+        self._set_row_visible(self.note, single)
+        if single:
+            from glimpsy.editor.fragments import suggest_name, suggest_note
+
+            if self.name.text() != clip.name:          # не сбивать курсор, пока печатают
+                self.name.setText(clip.name)
+            if self.note.toPlainText() != clip.note:
+                self.note.setPlainText(clip.note)
+            self.name.setPlaceholderText(suggest_name(clip))
+            self.note.setPlaceholderText(suggest_note(clip))
         self._set_row_visible(self.in_s, is_video and single)
         self._set_row_visible(self.out_s, is_video and single)
         self._set_row_visible(self.photo_dur, not is_video)

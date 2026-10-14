@@ -78,6 +78,10 @@ class Clip:
     region: list = field(default_factory=list)   # «зум на область»: [x, y, ширина, высота] в долях кадра
     own_cursor: bool = False      # записано без курсора — курсор рисует Glimpsy (вид и размер — у проекта)
     hidden: bool = False          # картинка убрана (чёрный кадр), звук идёт — монтаж по тексту
+    name: str = ""                # своё название фрагмента (для сохранения по отдельности: «V02-chat-big-task»)
+    note: str = ""                # короткое описание: что на нём (для сценария и монтажа)
+    app: str = ""                 # программа, которая была на экране при записи
+    title: str = ""               # заголовок её окна
 
     def clicks_shown(self) -> list:
         return self.clicks if self.click_fx and self.kind == "video" else []
@@ -472,7 +476,8 @@ class Project:
                               has_audio=bool(c.get("has_audio")), muted=bool(c.get("muted")),
                               motion=c.get("motion", "none"), click_fx=bool(c.get("click_fx", True)),
                               zoom_strength=float(c.get("zoom_strength", 1.8)),
-                              score=float(c.get("score", -1)), own_cursor=bool(c.get("own_cursor"))))
+                              score=float(c.get("score", -1)), own_cursor=bool(c.get("own_cursor")),
+                              app=str(c.get("app") or ""), title=str(c.get("title") or "")))
         output = meta.get("output", "")
         try:   # время записи — из имени папки project_ГГГГММДД_ЧЧММСС
             # у потоков к имени добавлен номер: project_ГГГГММДД_ЧЧММСС_1

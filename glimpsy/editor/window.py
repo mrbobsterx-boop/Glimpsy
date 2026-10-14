@@ -173,6 +173,7 @@ class EditorWindow(QMainWindow):
         self.preview.overlay_pressed.connect(self._on_overlay_pressed)
         self.preview.overlay_changed.connect(self._on_overlay_changed)
         self.preview.overlay_wheel.connect(self._on_overlay_wheel)
+        self.preview.overlay_box.connect(self._on_overlay_box)
         self.preview.region_picked.connect(self._on_region_picked)
         self.timeline.music_selected.connect(self._on_music_select)
         self.music_panel.edited.connect(self._on_music_edit)
@@ -266,6 +267,8 @@ class EditorWindow(QMainWindow):
         export_menu.addAction(theme.icon("list", size=16), "Главы для YouTube…", self.show_chapters)
         export_menu.addAction(theme.icon("image", size=16), "Обложка…", self.show_cover)
         export_menu.addSeparator()
+        export_menu.addAction(theme.icon("layout-grid", size=16), "Фрагменты по отдельности (с описаниями)…",
+                              self.export_fragments)
         export_menu.addAction(theme.icon("folder", size=16), "Сохранить проект в файл (для другого компьютера)…",
                               self.save_package)
         export_menu.addSeparator()
@@ -377,6 +380,8 @@ class EditorWindow(QMainWindow):
         left("subtitles", "captions", "Субтитры", "Все субтитры списком: распознать речь, исправить, удалить",
              self.subs_panel)
         left("overlay", "layers", "Наложение", "Картинка или видео поверх ролика", self.overlay_lib)
+        tool("eye-off", "Размыть", "Размыть часть кадра — лицо, номер, пароль: обведите её мышью в просмотре (B). "
+             "Потом прямоугольник двигается и тянется за края", self.add_blur)
         left("music", "music", "Музыка", "Фоновая музыка на весь ролик", self.music_lib)
         from glimpsy.editor.enhance_panel import EnhancePanel
 
@@ -524,7 +529,16 @@ class EditorWindow(QMainWindow):
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 8, 8)
         body.setSpacing(6)
-        body.addWidget(rail)
+        # на низком экране (Steam Deck) кнопки инструментов прокручиваются колёсиком
+        rail_scroll = QScrollArea()
+        rail_scroll.setWidget(rail)
+        rail_scroll.setWidgetResizable(True)
+        rail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        rail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rail_scroll.setFixedWidth(rail.sizeHint().width())
+        rail_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        body.addWidget(rail_scroll)
         for _b, panel in self._left.values():
             body.addWidget(panel)
         body.addWidget(self.shortcuts)
@@ -1485,6 +1499,8 @@ class EditorWindow(QMainWindow):
 
     def _overlay_frame(self, o, t: float):
         """Картинка для показа наложения в просмотре (для видео — кадр в нужный момент)."""
+        if o.kind == "blur":
+            return None                               # размытие рисуется по тому, что под ним
         path = self.project.dir / o.src
         if o.kind == "image":
             img = self._ov_images.get(str(path))
@@ -1596,10 +1612,20 @@ class EditorWindow(QMainWindow):
         if not start <= self.player.t < start + self.project.clips[idx].duration:
             self.player.seek(start + min(0.2, self.project.clips[idx].duration / 2))
         self._region_target = clip_id
+        self._blur_pick = None
         self.preview.start_region_pick()
         self.statusBar().showMessage("Обведите мышью в просмотре область, к которой приблизить камеру (Esc — отмена)")
 
     def _on_region_picked(self, region) -> None:
+        if getattr(self, "_blur_pick", None) is not None:
+            start = self._blur_pick
+            self._blur_pick = None
+            self.statusBar().clearMessage()
+            if region is not None:
+                self._add_blur_box(start, region)
+            else:
+                self._sync_preview()
+            return
         cid = getattr(self, "_region_target", None)
         self._region_target = None
         self.statusBar().clearMessage()
@@ -1713,6 +1739,15 @@ class EditorWindow(QMainWindow):
             return
         if what == "region_pick":
             self._pick_region(clip_id)
+            return
+        if what in ("name", "note"):
+            # название и описание — только у этого фрагмента, без пересчёта просмотра
+            c = next((c for c in self.project.clips if c.id == clip_id), None)
+            if c is not None and getattr(c, what) != str(value):
+                self.history.push(self.project.to_dict(), key=f"{what}:{clip_id}")
+                setattr(c, what, str(value))
+                self.timeline.update()
+                self._save_timer.start()
             return
         if what in ("cursor_style", "cursor_size", "cursor_show"):
             # вид курсора — один на весь ролик
@@ -2171,7 +2206,7 @@ class EditorWindow(QMainWindow):
             o.set_layout(aspect, 0.5, 0.5, max(1.0, (H / W) / ar))   # закрыть весь кадр
         elif what == "muted":
             o.muted = bool(value)
-        elif what in ("opacity", "radius", "shadow"):
+        elif what in ("opacity", "radius", "shadow", "strength", "mosaic"):
             setattr(o, what, value)
         elif what == "bg":
             o.bg = str(value or "")
@@ -2198,8 +2233,45 @@ class EditorWindow(QMainWindow):
             return
         self.history.push(self.project.to_dict(), key=f"ov-wheel:{oid}")
         cx, cy, sc = o.layout_for(self.project.aspect)
-        o.set_layout(self.project.aspect, cx, cy, sc * factor)
+        h = o.height_for(self.project.aspect)
+        o.set_layout(self.project.aspect, cx, cy, sc * factor, h * factor if h is not None else None)
         self._layer_changed()
+
+    def _on_overlay_box(self, oid: str, cx: float, cy: float, w: float, h: float) -> None:
+        """Прямоугольник размытия потянули за край или угол."""
+        o = self.project.overlay_by_id(oid)
+        if o is not None:
+            o.set_layout(self.project.aspect, cx, cy, w, h)
+            self._sync_preview()
+            self._save_timer.start()
+
+    # ---------- размытие части кадра ----------
+
+    BLUR_SECONDS = 5.0
+
+    def add_blur(self) -> None:
+        """Размыть часть кадра: обвести мышью в просмотре прямоугольник (с места курсора)."""
+        if self.project.total <= 0:
+            return
+        self.player.pause()
+        self._region_target = None
+        self._blur_pick = self.player.t
+        self.preview.start_region_pick("Обведите мышью то, что размыть · Esc — отмена", canvas=True)
+        self.statusBar().showMessage("Обведите мышью в просмотре то, что нужно размыть (Esc — отмена)")
+
+    def _add_blur_box(self, start: float, box) -> None:
+        from glimpsy.editor.overlay import blur_item
+
+        total = self.project.total
+        start = max(0.0, min(float(start), max(0.0, total - 0.5)))
+        self.history.push(self.project.to_dict())
+        o = blur_item(new_id(), start, max(0.5, min(self.BLUR_SECONDS, total - start)), self.project.aspect,
+                      list(box), self.project.track_for("overlay").id)
+        self.project.overlays.append(o)
+        self.timeline.select_overlay(o.id)
+        self._layer_changed()
+        self.statusBar().showMessage("Размытие добавлено на 5 секунд. Длину меняйте на ленте (тяните за края), "
+                                     "прямоугольник — мышью в просмотре.", 8000)
 
     # ---------- музыка ----------
 
@@ -2766,7 +2838,7 @@ class EditorWindow(QMainWindow):
                 not ev.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
             action = {"z": self.toggle_autozoom, "c": self.toggle_click_fx, "t": self.add_text,
                       "f": lambda: self._frame_key("frame_fit"), "g": lambda: self._frame_key("frame_fill"),
-                      "m": lambda: self.toggle_left("media"), "s": self.split}.get(letter or "")
+                      "m": lambda: self.toggle_left("media"), "s": self.split, "b": self.add_blur}.get(letter or "")
             if action is not None and not keys.has_shift(ev):
                 action()
                 return True
@@ -2914,6 +2986,110 @@ class EditorWindow(QMainWindow):
 
         self.exporting = True
         threading.Thread(target=work, daemon=True, name="export").start()
+        dlg.show()
+
+    def _fragments_folder(self, count: int) -> Path | None:
+        """Куда сохранить фрагменты: в прошлую папку (одним нажатием) или выбрать другую."""
+        store = QSettings("Glimpsy", "editor")
+        last = store.value("fragments/dir", "", type=str)
+        if last and Path(last).is_dir():
+            box = QMessageBox(self)
+            box.setWindowTitle("Фрагменты по отдельности")
+            box.setText(f"Сохранить фрагментов: {count} — каждый отдельным файлом, со списком описаний "
+                        f"(fragments.md) — в папку:\n\n{last}")
+            b_save = box.addButton("Сохранить", QMessageBox.ButtonRole.AcceptRole)
+            b_other = box.addButton("Другая папка…", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_save:
+                return Path(last)
+            if box.clickedButton() is not b_other:
+                return None
+        folder = QFileDialog.getExistingDirectory(
+            self, "Куда сохранить фрагменты (можно папку Google Диска на компьютере)", last or str(Path.home()))
+        if not folder:
+            return None
+        store.setValue("fragments/dir", folder)
+        return Path(folder)
+
+    def export_fragments(self) -> None:
+        """Каждый фрагмент — отдельным видео с понятным именем, плюс fragments.md с описаниями.
+        Выбрано несколько фрагментов — сохраняются только они."""
+        from glimpsy.editor import fragments as fr
+
+        self.player.pause()
+        self._save()
+        sel = self._selected_clips()
+        clips = sel if len(sel) > 1 else [c for c in self.project.clips if c.duration > 0.05]
+        if not clips:
+            return
+        folder = self._fragments_folder(len(clips))
+        if folder is None:
+            return
+        rows = fr.entries(self.project, clips)
+        dlg = QProgressDialog("Подготовка…", "Отмена", 0, 1000, self)
+        dlg.setWindowTitle("Фрагменты по отдельности")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        bridge = _ExportBridge(self)
+        cancel = threading.Event()
+        dlg.canceled.connect(cancel.set)
+        bridge.progress.connect(lambda f, t: (dlg.setValue(int(f * 1000)), dlg.setLabelText(t)))
+        layers_dir = paths.temp_root() / f"fragments_{int(time.time())}"
+        jobs = []
+        for i, (c, row) in enumerate(zip(clips, rows)):
+            snap = fr.clip_project(self.project, c)
+            jobs.append((snap, folder / row.file, render_overlay_layers(snap, layers_dir / str(i))))
+        smart = self.a_smart.isChecked()
+
+        def finished(_msg: str) -> None:
+            self.exporting = False
+            dlg.close()
+            box = QMessageBox(self)
+            box.setWindowTitle("Готово")
+            box.setText(f"Фрагментов сохранено: {len(jobs)}.\nПапка: {folder}\n\nОписания — в файле "
+                        f"{fr.MANIFEST_MD} там же.")
+            b_open = box.addButton("Открыть папку", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+            box.exec()
+            if box.clickedButton() == b_open:
+                paths.open_in_file_manager(folder)
+
+        def failed(msg: str) -> None:
+            self.exporting = False
+            dlg.close()
+            if msg:
+                QMessageBox.warning(self, "Фрагменты не сохранились", msg)
+
+        bridge.done.connect(finished)
+        bridge.failed.connect(failed)
+
+        def work() -> None:
+            done: list = []
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                enc = self.encoder_getter()
+                for n, (snap, out, layers) in enumerate(jobs):
+                    def prog(f: float, t: str, n=n, out=out) -> None:
+                        bridge.progress.emit((n + f) / len(jobs), f"{n + 1} из {len(jobs)}: {out.name} — {t}")
+
+                    export_project(self.ffmpeg, snap, out, enc, overlay_layers=layers, progress=prog, cancel=cancel,
+                                   smart=smart)
+                    done.append(rows[n])
+                    fr.write_manifest(folder, done)          # список — после каждого файла (вдруг отмена)
+                bridge.done.emit("")
+            except ExportCancelled:
+                bridge.failed.emit("")
+            except Exception as e:
+                log.exception("Фрагменты не сохранились")
+                bridge.failed.emit(str(e) + (f"\n\nУже сохранено: {len(done)}" if done else ""))
+            finally:
+                shutil.rmtree(layers_dir, ignore_errors=True)
+
+        self.exporting = True
+        threading.Thread(target=work, daemon=True, name="fragments").start()
         dlg.show()
 
     def back_to_sessions(self) -> None:

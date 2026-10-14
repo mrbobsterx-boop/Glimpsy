@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 import json
 
 from glimpsy.editor.project import ASPECTS, DEFAULT_FRAME, frame_rect
-from glimpsy.editor.overlay import overlay_rect, shadow_pad, styled_image
+from glimpsy.editor.overlay import blur_image, overlay_rect, shadow_pad, styled_image
 from glimpsy.editor.text import anim_state, placement, render_text
 
 HANDLE = 10        # размер уголка, пикс.
@@ -34,6 +34,7 @@ class PreviewWidget(QWidget):
     overlay_pressed = Signal(str)
     overlay_changed = Signal(str, float, float, float)   # id, центр X, центр Y, ширина (доли кадра)
     overlay_wheel = Signal(str, float)
+    overlay_box = Signal(str, float, float, float, float)   # id, центр X, центр Y, ширина, высота (доли кадра)
     region_picked = Signal(object)               # выбранная область [x, y, w, h] (доли кадра) или None — отмена
 
     def __init__(self) -> None:
@@ -60,9 +61,12 @@ class PreviewWidget(QWidget):
         self.selected_overlay: str | None = None
         self._ov_cache: dict[str, QImage] = {}
         self._ov_drag: tuple | None = None   # (id, режим, cx, cy, ширина)
+        self._ov_box = (0.0, 0.0, 1.0, 1.0)  # прямоугольник размытия в начале жеста: x0, y0, x1, y1 (доли)
         self._pick = False                   # сейчас обводим область для «зума на область»
         self._pick_from: QPointF | None = None
         self._pick_to: QPointF | None = None
+        self._pick_canvas = False            # область — в долях всего кадра ролика (для размытия)
+        self._pick_hint = ""
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(320, 220)
         self.setMouseTracking(True)
@@ -83,11 +87,15 @@ class PreviewWidget(QWidget):
 
     # ---------- выбор области ----------
 
-    def start_region_pick(self) -> None:
-        """Обвести мышью область кадра (для «зума на область»). Esc — отмена."""
+    def start_region_pick(self, hint: str = "", canvas: bool = False) -> None:
+        """Обвести мышью область кадра. canvas=False — область исходной записи (для «зума на область»),
+        True — область готового ролика (для размытия). Esc — отмена."""
         self._pick = True
+        self._pick_canvas = canvas
+        self._pick_hint = hint
         self._pick_from = self._pick_to = None
-        self.src_crop = (0.0, 0.0, 1.0, 1.0)          # пока выбираем — показываем кадр целиком
+        if not canvas:
+            self.src_crop = (0.0, 0.0, 1.0, 1.0)      # пока выбираем — показываем кадр целиком
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocus()
         self.update()
@@ -100,12 +108,12 @@ class PreviewWidget(QWidget):
         self.region_picked.emit(region)
 
     def _pick_fraction(self, pos: QPointF) -> QPointF:
-        fr = self._frame_rect()
+        fr = self.canvas_rect() if self._pick_canvas else self._frame_rect()
         return QPointF(min(1.0, max(0.0, (pos.x() - fr.x()) / max(1.0, fr.width()))),
                        min(1.0, max(0.0, (pos.y() - fr.y()) / max(1.0, fr.height()))))
 
     def _paint_pick(self, p: QPainter) -> None:
-        fr = self._frame_rect()
+        fr = self.canvas_rect() if self._pick_canvas else self._frame_rect()
         p.save()
         if self._pick_from is not None and self._pick_to is not None:
             a, b = self._pick_from, self._pick_to
@@ -123,7 +131,7 @@ class PreviewWidget(QWidget):
             p.drawRect(r)
         else:
             p.fillRect(fr, QColor(0, 0, 0, 60))
-        text = "Обведите мышью область, к которой приблизить камеру · Esc — отмена"
+        text = self._pick_hint or "Обведите мышью область, к которой приблизить камеру · Esc — отмена"
         fm = p.fontMetrics()
         w = fm.horizontalAdvance(text) + 24
         box = QRectF(fr.center().x() - w / 2, fr.top() + 12, w, fm.height() + 12)
@@ -214,6 +222,9 @@ class PreviewWidget(QWidget):
         p.setClipRect(canvas)
         for item, src in self.overlays:
             r = self._ov_rect(item)
+            if item.kind == "blur":
+                self._paint_blur(p, item, r, canvas)
+                continue
             w, h = max(2, int(r.width())), max(2, int(r.height()))
             key = f"{item.id}|{src.cacheKey() if src is not None else 0}|{w}|{h}|{item.radius}|{item.shadow}|{item.opacity}"
             img = self._ov_cache.get(key)
@@ -233,14 +244,31 @@ class PreviewWidget(QWidget):
                 p.drawRect(r)
                 p.setPen(QPen(QColor("#7d5fb2"), 1))
                 p.setBrush(QColor("#ffffff"))
-                for c in self._corners(r):
+                points = _handles(r).values() if item.kind == "blur" else self._corners(r)
+                for c in points:
                     p.drawRect(QRectF(c.x() - HANDLE / 2, c.y() - HANDLE / 2, HANDLE, HANDLE))
 
+    def _paint_blur(self, p: QPainter, item, r: QRectF, canvas: QRectF) -> None:
+        """Размыть то, что уже нарисовано под прямоугольником (рисуем в картинку — см. paintEvent)."""
+        dev = p.device()
+        rr = r.intersected(canvas)
+        if not isinstance(dev, QImage) or rr.width() < 2 or rr.height() < 2:
+            return
+        dpr = dev.devicePixelRatio()
+        part = dev.copy(QRect(int(rr.x() * dpr), int(rr.y() * dpr), max(1, int(rr.width() * dpr)),
+                              max(1, int(rr.height() * dpr))))
+        p.drawImage(rr, blur_image(part, item.strength, item.mosaic, canvas.width() * dpr))
+
     def _hit_overlay(self, pos: QPointF):
-        """(наложение, «scale» если за уголок выбранного, иначе «move») или (None, "")."""
+        """(наложение, режим) или (None, ""). Режим: «scale» — за уголок выбранного, «move» — двигать,
+        у размытия — «edge:<стороны>» (l, r, t, b, tl…): тянуть за край или угол."""
         for item, _src in reversed(self.overlays):
             r = self._ov_rect(item)
-            if item.id == self.selected_overlay and any(
+            if item.id == self.selected_overlay and item.kind == "blur":
+                side = _edge_at(r, pos)
+                if side:
+                    return item, "edge:" + side
+            elif item.id == self.selected_overlay and any(
                     abs(pos.x() - c.x()) <= HANDLE and abs(pos.y() - c.y()) <= HANDLE for c in self._corners(r)):
                 return item, "scale"
             if r.contains(pos):
@@ -323,7 +351,24 @@ class PreviewWidget(QWidget):
     # ---------- рисование ----------
 
     def paintEvent(self, _event) -> None:
+        if any(item.kind == "blur" for item, _src in self.overlays):
+            # размытию нужно видеть, что под ним, — сначала рисуем всё в картинку
+            dpr = self.devicePixelRatioF()
+            buf = QImage(max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr)),
+                         QImage.Format.Format_ARGB32_Premultiplied)
+            buf.setDevicePixelRatio(dpr)
+            p = QPainter(buf)
+            self._paint(p)
+            p.end()
+            w = QPainter(self)
+            w.drawImage(QPointF(0, 0), buf)
+            w.end()
+            return
         p = QPainter(self)
+        self._paint(p)
+        p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), self.palette().window())
@@ -409,6 +454,11 @@ class PreviewWidget(QWidget):
             self.overlay_pressed.emit(ov.id)
             self._press = pos
             self._ov_drag = (ov.id, mode, *ov.layout_for(self.aspect), self._ov_rect(ov).center())
+            if ov.kind == "blur":
+                c = self.canvas_rect()
+                r = self._ov_rect(ov)
+                self._ov_box = ((r.left() - c.x()) / c.width(), (r.top() - c.y()) / c.height(),
+                                (r.right() - c.x()) / c.width(), (r.bottom() - c.y()) / c.height())
             return
         if self.image.isNull():
             return
@@ -438,7 +488,12 @@ class PreviewWidget(QWidget):
         if self._ov_drag is not None:
             oid, mode, cx, cy, sc, center = self._ov_drag
             c = self.canvas_rect()
-            if mode == "move":
+            if mode.startswith("edge:"):
+                dx = (pos.x() - self._press.x()) / c.width()
+                dy = (pos.y() - self._press.y()) / c.height()
+                x0, y0, x1, y1 = _drag_edges(self._ov_box, mode[5:], dx, dy)
+                self.overlay_box.emit(oid, (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0)
+            elif mode == "move":
                 nx = cx + (pos.x() - self._press.x()) / c.width()
                 ny = cy + (pos.y() - self._press.y()) / c.height()
                 snap_x, snap_y = abs(nx - 0.5) < SNAP, abs(ny - 0.5) < SNAP
@@ -455,7 +510,9 @@ class PreviewWidget(QWidget):
                 return
             ov, mode = self._hit_overlay(pos)
             if ov is not None:
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor if mode == "scale" else Qt.CursorShape.SizeAllCursor)
+                self.setCursor(EDGE_CURSORS.get(mode[5:], Qt.CursorShape.SizeAllCursor) if mode.startswith("edge:")
+                               else Qt.CursorShape.SizeFDiagCursor if mode == "scale"
+                               else Qt.CursorShape.SizeAllCursor)
                 return
             self.setCursor(Qt.CursorShape.SizeFDiagCursor if self.editable and self._hit_corner(pos)
                            else Qt.CursorShape.OpenHandCursor if self.canvas_rect().contains(pos)
@@ -517,6 +574,55 @@ class PreviewWidget(QWidget):
             return
         if not self.image.isNull():
             self.wheel_zoom.emit(1.06 ** steps)
+
+
+EDGE_CURSORS = {"l": Qt.CursorShape.SizeHorCursor, "r": Qt.CursorShape.SizeHorCursor,
+                "t": Qt.CursorShape.SizeVerCursor, "b": Qt.CursorShape.SizeVerCursor,
+                "tl": Qt.CursorShape.SizeFDiagCursor, "br": Qt.CursorShape.SizeFDiagCursor,
+                "tr": Qt.CursorShape.SizeBDiagCursor, "bl": Qt.CursorShape.SizeBDiagCursor}
+MIN_BOX = 0.02     # самый маленький прямоугольник размытия (доля кадра)
+
+
+def _handles(r: QRectF) -> dict[str, QPointF]:
+    """Уголки и середины сторон прямоугольника — за них его тянут."""
+    cx, cy = r.center().x(), r.center().y()
+    return {"tl": r.topLeft(), "tr": r.topRight(), "bl": r.bottomLeft(), "br": r.bottomRight(),
+            "t": QPointF(cx, r.top()), "b": QPointF(cx, r.bottom()),
+            "l": QPointF(r.left(), cy), "r": QPointF(r.right(), cy)}
+
+
+def _edge_at(r: QRectF, pos: QPointF) -> str:
+    """За какой край или угол прямоугольника взялись ("" — ни за какой)."""
+    for side in ("tl", "tr", "bl", "br"):
+        c = _handles(r)[side]
+        if abs(pos.x() - c.x()) <= HANDLE and abs(pos.y() - c.y()) <= HANDLE:
+            return side
+    near = HANDLE * 0.7
+    inside_x = r.left() - near <= pos.x() <= r.right() + near
+    inside_y = r.top() - near <= pos.y() <= r.bottom() + near
+    if inside_y and abs(pos.x() - r.left()) <= near:
+        return "l"
+    if inside_y and abs(pos.x() - r.right()) <= near:
+        return "r"
+    if inside_x and abs(pos.y() - r.top()) <= near:
+        return "t"
+    if inside_x and abs(pos.y() - r.bottom()) <= near:
+        return "b"
+    return ""
+
+
+def _drag_edges(box: tuple[float, float, float, float], sides: str, dx: float, dy: float):
+    """Новый прямоугольник (x0, y0, x1, y1), когда край или угол sides сдвинули на dx, dy."""
+    x0, y0, x1, y1 = box
+    if "l" in sides:
+        x0 = min(x0 + dx, x1 - MIN_BOX)
+    if "r" in sides:
+        x1 = max(x1 + dx, x0 + MIN_BOX)
+    if "t" in sides:
+        y0 = min(y0 + dy, y1 - MIN_BOX)
+    if "b" in sides:
+        y1 = max(y1 + dy, y0 + MIN_BOX)
+    return x0, y0, x1, y1
 
 
 def _cover(w: int, h: int, box: QRectF) -> QRectF:

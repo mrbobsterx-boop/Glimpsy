@@ -32,7 +32,7 @@ from glimpsy.config import Settings
 from glimpsy.platform.base import Monitor, PlatformServices
 from glimpsy.platform.common import monitor_at
 from glimpsy.recorder.activity import ActivityTracker
-from glimpsy.recorder.candidates import Candidate, CandidatePool
+from glimpsy.recorder.candidates import Candidate, CandidatePool, dominant_window
 from glimpsy.recorder.encoder import Encoder, pick_encoder, software_encoder
 from glimpsy.recorder.pacing import Plan, make_plan, save_probability
 from glimpsy.recorder.ring_buffer import BufferRun
@@ -156,6 +156,7 @@ class RecorderEngine(QObject):
         self._voice_count = 0
         self._stats_saved = 0.0
         self._cur_app = ""
+        self._win_log: list[tuple[float, str, str]] = []   # (время, программа, заголовок) — для описаний
         self._cam_next = 0.0
         self._cam_seconds = 0.0
         # потоки: у каждого свой набор кандидатов и свои счётчики
@@ -390,6 +391,7 @@ class RecorderEngine(QObject):
             win = self.services.active_window.active()
             hit = win.matched(self.s.blacklist) if win else None
             self._cur_app = "" if win is None else ("Приватное приложение" if hit else _app_name(win.app))
+            self._note_window(now, self._cur_app, "" if win is None or hit else (win.title or ""))
             self._check_stream(win, now)
             private = hit is not None
             if private != self._private:
@@ -546,6 +548,14 @@ class RecorderEngine(QObject):
             self._waiting = False
             self._switch_stream(0)
         self._privacy_at = 0.0          # сразу проверить, какое окно впереди
+
+    def _note_window(self, now: float, app: str, title: str) -> None:
+        """Запомнить окно впереди (только смену окна) — из этого потом описание фрагмента."""
+        log_ = self._win_log
+        if not log_ or log_[-1][1:] != (app, title):
+            log_.append((now, app, title[:200]))
+        if len(log_) > 64 and log_[0][0] < now - WINDOW_LOG_S:
+            del log_[: len(log_) // 2]
 
     def _check_stream(self, win, now: float) -> None:
         """Какой поток сейчас впереди. Нет подходящего окна — запись ждёт."""
@@ -738,7 +748,7 @@ class RecorderEngine(QObject):
             cursor=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, m, x, y in act.cursor_between(ws, we)
                     if m == mi],
             clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, x, y in act.clicks_between(ws, we, mi)],
-            own_cursor=run.own_cursor,
+            own_cursor=run.own_cursor, app=self._stream_names.get(bg.sid, ""),
         ))
         removed = pool.prune(self.plan.pool_size)
         pool.save()
@@ -945,6 +955,7 @@ class RecorderEngine(QObject):
             clicks=clicks, crop=crop or [], own_cursor=run.own_cursor,
             audio=audio_name, voice_id=voice[0] if voice else 0, voice_part=voice[1] if voice else 0,
         )
+        cand.app, cand.title = dominant_window(self._win_log, ws, we)
         pool.add(cand)
         removed = pool.prune(self.plan.pool_size)
         pool.save()
@@ -1193,6 +1204,9 @@ class RecorderEngine(QObject):
         if st != self._last_status or force:
             self._last_status = st
             self.status_changed.emit(st)
+
+
+WINDOW_LOG_S = 3 * 3600          # сколько помнить, какие окна были впереди
 
 
 def _app_name(app: str) -> str:

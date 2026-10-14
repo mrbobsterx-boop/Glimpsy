@@ -37,6 +37,8 @@ class Candidate:
     voice_part: int = 0           # номер куска внутри одной речи
     crop: list[float] = field(default_factory=list)   # поток «только окно»: где окно, доли [x, y, w, h]
     own_cursor: bool = False      # снято без курсора — курсор рисует Glimpsy (плавный)
+    app: str = ""                 # какая программа была на экране (больше всего времени) — для описания
+    title: str = ""               # и заголовок её окна
 
     @property
     def size(self) -> tuple[int, int]:
@@ -48,6 +50,20 @@ class Candidate:
     @property
     def duration(self) -> float:
         return self.wall_end - self.wall_start
+
+
+def dominant_window(log: list[tuple[float, str, str]], t0: float, t1: float) -> tuple[str, str]:
+    """Какое окно (программа, заголовок) было впереди дольше всего с t0 до t1.
+    log — [(время, программа, заголовок)] по порядку: окно держится до следующей записи."""
+    spent: dict[tuple[str, str], float] = {}
+    for i, (t, app, title) in enumerate(log):
+        end = log[i + 1][0] if i + 1 < len(log) else max(t, t1)
+        overlap = min(end, t1) - max(t, t0)
+        if overlap > 0 and app:
+            spent[(app, title)] = spent.get((app, title), 0.0) + overlap
+    if not spent:
+        return "", ""
+    return max(spent.items(), key=lambda kv: kv[1])[0]
 
 
 class CandidatePool:
@@ -68,7 +84,9 @@ class CandidatePool:
             return
         try:
             data = json.loads(self.index_path.read_text(encoding="utf-8"))
-            self.items = [Candidate(**c) for c in data.get("items", []) if (self.dir / c["file"]).exists()]
+            known = set(Candidate.__dataclass_fields__)
+            self.items = [Candidate(**{k: v for k, v in c.items() if k in known}) for c in data.get("items", [])
+                          if (self.dir / c["file"]).exists()]
             self.next_id = int(data.get("next_id", len(self.items) + 1))
         except Exception:
             log.exception("Не удалось прочитать список кандидатов")

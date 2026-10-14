@@ -52,6 +52,13 @@ class OverlayPanel(QWidget):
         self.bg_status.setWordWrap(True)
         self.bg_status.setProperty("role", "hint")
         self.bg_status.setVisible(False)
+        self.strength = QSlider(Qt.Orientation.Horizontal, minimum=0, maximum=100)
+        self.strength.setToolTip("Насколько сильно размыть")
+        self.strength.valueChanged.connect(lambda v: self._emit("strength", v / 100))
+        self.mosaic = QComboBox()
+        self.mosaic.addItem("Мягкое размытие", False)
+        self.mosaic.addItem("Квадратики (пиксели)", True)
+        self.mosaic.currentIndexChanged.connect(lambda _i: self._emit("mosaic", bool(self.mosaic.currentData())))
         self.sound = QCheckBox("Звук видео")
         self.sound.toggled.connect(lambda on: self._emit("muted", not on))
 
@@ -62,13 +69,15 @@ class OverlayPanel(QWidget):
             b.setToolTip("Поставить сюда")
             b.clicked.connect(lambda _=False, x=x, y=y: self._emit("place", (x, y)))
             grid.addWidget(b, i // 3, i % 3)
-        full = QPushButton("На весь кадр")
+        full = self._full = QPushButton("На весь кадр")
         full.clicked.connect(lambda: self._emit("fill", None))
 
         form = self.form = QFormLayout()
         form.addRow("Появляется", self.start)
         form.addRow("Длительность", self.dur)
         form.addRow("Размер", self.size)
+        form.addRow("Вид", self.mosaic)
+        form.addRow("Сила", self.strength)
         form.addRow("Прозрачность", self.opacity)
         form.addRow("Скругление", self.radius)
         form.addRow(self.shadow)
@@ -98,16 +107,28 @@ class OverlayPanel(QWidget):
             return
         self._loading = True
         audio = item.kind == "audio"
+        blur = item.kind == "blur"
         kind = {"image": "Картинка", "audio": "Голос"}.get(item.kind, "Видео")
-        self.title.setText(f"Голос: {item.label}" if audio else f"{kind} поверх ролика: {item.label}")
+        self.title.setText(f"Голос: {item.label}" if audio else "Размытие части кадра" if blur
+                           else f"{kind} поверх ролика: {item.label}")
         for row in self._visual_rows:              # у голоса нет картинки — только время и звук
             self.form.setRowVisible(row, not audio)
-        self.delete_btn.setText("Удалить запись голоса" if audio else "Удалить наложение")
+        for row in (self.size, self.opacity, self.radius, self.shadow, self._full):
+            if blur:                               # у размытия — свой прямоугольник, оформления нет
+                self.form.setRowVisible(row, False)
+        self.form.setRowVisible(self.strength, blur)
+        self.form.setRowVisible(self.mosaic, blur)
+        self.delete_btn.setText("Удалить запись голоса" if audio else "Удалить размытие" if blur
+                                else "Удалить наложение")
         self.hint.setText("На ленте голос можно двигать по времени и обрезать за края." if audio else
+                          "В просмотре прямоугольник двигается мышью и тянется за края и углы. На ленте — "
+                          "сколько секунд размыто: двигайте и тяните за края." if blur else
                           "В просмотре наложение перетаскивается мышью, размер — уголки или колёсико. "
                           "На ленте его можно двигать по времени и тянуть за края.")
+        self.strength.setValue(int(round(item.strength * 100)))
+        self.mosaic.setCurrentIndex(1 if item.mosaic else 0)
         self.start.setValue(item.start)
-        self.dur.setMaximum(max(0.2, item.src_duration - item.in_s) if item.kind != "image" and item.src_duration
+        self.dur.setMaximum(max(0.2, item.src_duration - item.in_s) if item.kind in ("video", "audio") and item.src_duration
                             else 36000)
         self.dur.setValue(item.duration)
         self.size.setValue(int(round(item.layout_for(aspect)[2] * 100)))
@@ -116,7 +137,7 @@ class OverlayPanel(QWidget):
         self.shadow.setChecked(item.shadow)
         self.form.setRowVisible(self.bg, item.kind == "video")
         self.bg.setCurrentIndex(max(0, self.bg.findData(getattr(item, "bg", ""))))
-        self.sound.setVisible(item.kind != "image")
+        self.sound.setVisible(item.kind not in ("image", "blur"))
         self.sound.setEnabled(item.has_audio)
         self.sound.setChecked(item.has_audio and not item.muted)
         self.sound.setText(("Звук включён" if audio else "Звук видео") if item.has_audio else "Звук (в файле его нет)")
