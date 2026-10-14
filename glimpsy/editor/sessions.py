@@ -167,6 +167,10 @@ class SessionsDialog(QDialog):
         self.b_import.setToolTip("Проект, сохранённый на другом компьютере («Экспорт» → «Сохранить проект в файл»)")
         self.b_import.clicked.connect(self._import_package)
         self.ffmpeg = ffmpeg
+        self.b_describe = QPushButton(theme.icon("list", size=16), "  Описать все…")
+        self.b_describe.setToolTip("Для всех записей: кадр-картинка, речь и описание каждого фрагмента "
+                                   "(в файл fragments.md в папке записи)")
+        self.b_describe.clicked.connect(self._describe_all)
         self.b_delete = theme.mark(QPushButton(theme.icon("trash-2", theme.DANGER, 16), "  Удалить…"), "danger")
         self.b_delete.clicked.connect(self._delete)
         close = theme.mark(QPushButton("Закрыть"), "ghost")
@@ -176,6 +180,7 @@ class SessionsDialog(QDialog):
         buttons.addWidget(self.b_folder)
         buttons.addWidget(self.b_video)
         buttons.addWidget(self.b_import)
+        buttons.addWidget(self.b_describe)
         buttons.addStretch(1)
         buttons.addWidget(close)
         buttons.addWidget(self.b_open)
@@ -311,6 +316,15 @@ class SessionsDialog(QDialog):
         d = self._current_dir()
         if d:
             paths.open_in_file_manager(d)
+
+    def _describe_all(self) -> None:
+        from glimpsy.editor.describe_dialog import DescribeDialog
+
+        dirs = list_projects(projects_root())
+        if not dirs:
+            return
+        DescribeDialog(self.ffmpeg, dirs, self).exec()
+        self.reload()
 
     def _import_package(self) -> None:
         """Проект с другого компьютера (.glimpsy.zip) → в список и сразу открыть."""

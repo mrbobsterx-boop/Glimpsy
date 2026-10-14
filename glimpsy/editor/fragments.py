@@ -47,6 +47,7 @@ class Entry:
     speech: str = ""
     project: str = ""
     part: str = ""              # какой отрезок файла («0–12 с»), если в ролике не весь файл
+    frame: str = ""             # картинка-кадр из середины (путь относительно папки списка)
 
 
 def clean_title(title: str, app: str = "") -> str:
@@ -117,7 +118,9 @@ def suggest_note(clip: Clip, speech: str = "") -> str:
     """Описание по умолчанию — из того, что известно о записи."""
     parts = []
     t = clean_title(clip.title, clip.app)
-    if clip.app and t and t.lower() != clip.app.lower():
+    if clip.ai_note:                            # описание кадра от Claude — точнее всего остального
+        parts.append(clip.ai_note)
+    elif clip.app and t and t.lower() != clip.app.lower():
         parts.append(f"{clip.app}: «{t}»")
     elif clip.app or t:
         parts.append(clip.app or f"«{t}»")
@@ -197,18 +200,21 @@ def _cell(s: str) -> str:
 
 def render_md(items: list[Entry], title: str = "Фрагменты") -> str:
     parts = any(e.part for e in items)
+    frames = any(e.frame for e in items)
     lines = [
         f"# {title}",
         "",
         "Видео в этой папке и что на каждом — для сценария и монтажа. Список ведёт Glimpsy и обновляет сам. "
         "Название и описание фрагмента меняются в редакторе Glimpsy (справа, когда фрагмент выбран).",
         "",
-        "| Файл | " + ("Отрезок | " if parts else "") + "Длительность | Название | Что на нём | Записано |",
-        "|---|" + ("---|" if parts else "") + "---|---|---|---|",
+        "| Файл | " + ("Отрезок | " if parts else "") + "Длительность | Название | Что на нём | Записано |"
+        + (" Кадр |" if frames else ""),
+        "|---|" + ("---|" if parts else "") + "---|---|---|---|" + ("---|" if frames else ""),
     ]
     for e in items:
         lines.append(f"| `{_cell(e.file)}` | " + (f"{_cell(e.part)} | " if parts else "")
-                     + f"{e.duration:.0f} с | {_cell(e.name)} | {_cell(e.note)} | {_cell(e.recorded)} |")
+                     + f"{e.duration:.0f} с | {_cell(e.name)} | {_cell(e.note)} | {_cell(e.recorded)} |"
+                     + ((f" ![кадр]({e.frame}) |" if e.frame else " |") if frames else ""))
     talk = [e for e in items if e.speech]
     if talk:
         lines += ["", "## Что говорится", ""]
@@ -259,8 +265,30 @@ def project_entries(project: Project, store=None) -> list[Entry]:
         whole = c.kind != "video" or (c.in_s < 0.05 and c.out_s > c.src_duration - 0.05)
         out.append(Entry(Path(c.src).name, c.name.strip() or suggest_name(c), c.note.strip() or suggest_note(c, speech),
                          round(c.duration, 2), recorded_text(c), c.app, clean_title(c.title, c.app), speech,
-                         project.name, "" if whole else f"{c.in_s:.1f}–{c.out_s:.1f} с"))
+                         project.name, "" if whole else f"{c.in_s:.1f}–{c.out_s:.1f} с", _frame_of(project, c)))
     return out
+
+
+def _frame_of(project: Project, clip: Clip) -> str:
+    from glimpsy.editor.describe import frame_rel
+
+    rel = frame_rel(clip)
+    return rel if (Path(project.dir) / rel).exists() else ""
+
+
+def copy_frame(project: Project, clip: Clip, folder: Path, file: str) -> str:
+    """Кадр фрагмента — рядом с выгруженным видео («V02-chat.jpg»). Возвращает имя или ""."""
+    import shutil
+
+    rel = _frame_of(project, clip)
+    if not rel:
+        return ""
+    name = Path(file).with_suffix(".jpg").name
+    try:
+        shutil.copy2(Path(project.dir) / rel, Path(folder) / name)
+    except OSError:
+        return ""
+    return name
 
 
 def write_project_list(project: Project) -> None:

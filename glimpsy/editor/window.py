@@ -271,6 +271,8 @@ class EditorWindow(QMainWindow):
         export_menu.addSeparator()
         export_menu.addAction(theme.icon("layout-grid", size=16), "Фрагменты по отдельности (с описаниями)…",
                               self.export_fragments)
+        export_menu.addAction(theme.icon("list", size=16), "Описать фрагменты (кадры, речь, Claude)…",
+                              self.describe_fragments)
         export_menu.addAction(theme.icon("folder-open", size=16), "Открыть папку с фрагментами этой записи",
                               lambda: (self._save(), paths.open_in_file_manager(self.project.dir)))
         export_menu.addAction(theme.icon("folder", size=16), "Сохранить проект в файл (для другого компьютера)…",
@@ -3124,6 +3126,7 @@ class EditorWindow(QMainWindow):
 
                     export_project(self.ffmpeg, snap, out, enc, overlay_layers=layers, progress=prog, cancel=cancel,
                                    smart=smart)
+                    rows[n].frame = fr.copy_frame(self.project, clips[n], folder, out.name)
                     done.append(rows[n])
                     fr.write_manifest(folder, done)          # список — после каждого файла (вдруг отмена)
                 bridge.done.emit("")
@@ -3138,6 +3141,29 @@ class EditorWindow(QMainWindow):
         self.exporting = True
         threading.Thread(target=work, daemon=True, name="fragments").start()
         dlg.show()
+
+    def describe_fragments(self) -> None:
+        """Кадр, речь и описание каждого фрагмента — для названий, описаний и fragments.md."""
+        from glimpsy.editor.describe_dialog import DescribeDialog
+
+        self.player.pause()
+        self._save()
+        dlg = DescribeDialog(self.ffmpeg, [self.project.dir], self)
+        dlg.finished_ok.connect(self._take_descriptions)
+        dlg.exec()
+
+    def _take_descriptions(self) -> None:
+        """Описания от Claude записаны в проект на диске — перенести их в открытый проект."""
+        try:
+            fresh = {c.id: c for c in Project.load(self.project.dir).clips}
+        except (OSError, ValueError):
+            return
+        for c in self.project.clips:
+            f = fresh.get(c.id)
+            if f is not None and f.ai_note and not c.ai_note:
+                c.ai_note = f.ai_note
+        self._refresh_inspector()
+        self._save()
 
     def continue_recording(self) -> None:
         """Сохранить, закрыть редактор и продолжить запись в этот же проект."""

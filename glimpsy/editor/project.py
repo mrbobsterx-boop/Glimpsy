@@ -82,6 +82,7 @@ class Clip:
     note: str = ""                # короткое описание: что на нём (для сценария и монтажа)
     app: str = ""                 # программа, которая была на экране при записи
     title: str = ""               # заголовок её окна
+    ai_note: str = ""             # описание кадра от Claude («Описать фрагменты»); своё note важнее
 
     def clicks_shown(self) -> list:
         return self.clicks if self.click_fx and self.kind == "video" else []

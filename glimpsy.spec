@@ -43,6 +43,8 @@ hidden += ["ctranslate2", "sentencepiece"]
 binaries += collect_dynamic_libs("ctranslate2")
 # убрать фон за человеком на камере (ONNX Runtime + модель MODNet, она скачивается сама)
 hidden += ["onnxruntime"]
+# описание кадров через Claude (по желанию, со своим ключом API)
+hidden += ["anthropic"]
 binaries += collect_dynamic_libs("onnxruntime")
 
 a = Analysis(
