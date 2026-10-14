@@ -221,7 +221,7 @@ class EditorWindow(QMainWindow):
         self.a_redo = QAction(theme.icon("redo-2"), "Повторить", self, triggered=self.redo,
                               toolTip="Повторить (Ctrl+Shift+Z / Ctrl+Y)")
         self.a_split = QAction(theme.icon("scissors"), "Разрезать", self, triggered=self.split,
-                               toolTip="Разрезать по курсору (S)")
+                               toolTip="Разрезать по курсору (X или Ctrl+B)")
         self.a_delete = QAction(theme.icon("trash-2"), "Удалить", self, triggered=self.delete_selected,
                                 toolTip="Удалить выбранное (Delete)")
 
@@ -2767,6 +2767,36 @@ class EditorWindow(QMainWindow):
             focus.clearFocus()
             self.timeline.setFocus(Qt.FocusReason.MouseFocusReason)
 
+    def _current_clip(self) -> int | None:
+        """Текущий фрагмент: под курсором ленты (выбранный, если курсор в нём)."""
+        if not self.project.clips:
+            return None
+        idx, _ = self.project.locate(self.player.t)
+        return idx
+
+    def goto_clip(self, direction: int) -> None:
+        """A / D (Ф / В): к середине предыдущего / следующего фрагмента и выбрать его."""
+        idx = self._current_clip()
+        if idx is None:
+            return
+        target = max(0, min(len(self.project.clips) - 1, idx + direction))
+        self.player.pause()
+        c = self.project.clips[target]
+        self.player.seek(self.project.start_of(target) + c.duration / 2)
+        self.timeline.select(c.id)
+
+    def clip_edge(self, end: bool) -> None:
+        """W / S (Ц / Ы): к началу / концу текущего фрагмента (последний кадр — ещё этот фрагмент)."""
+        idx = self._current_clip()
+        if idx is None:
+            return
+        self.player.pause()
+        c = self.project.clips[idx]
+        start = self.project.start_of(idx)
+        frame = 1.0 / (self.project.fps or 30)
+        self.player.seek(start + max(0.0, c.duration - frame) if end else start)
+        self.timeline.select(c.id)
+
     def jump_cut(self, direction: int) -> None:
         """Ctrl+← / Ctrl+→: к предыдущей / следующей склейке (началу фрагмента)."""
         cuts, t = [0.0], 0.0
@@ -2840,7 +2870,10 @@ class EditorWindow(QMainWindow):
                 not ev.modifiers() & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier):
             action = {"z": self.toggle_autozoom, "c": self.toggle_click_fx, "t": self.add_text,
                       "f": lambda: self._frame_key("frame_fit"), "g": lambda: self._frame_key("frame_fill"),
-                      "m": lambda: self.toggle_left("media"), "s": self.split, "b": self.add_blur}.get(letter or "")
+                      "m": lambda: self.toggle_left("media"), "x": self.split, "b": self.add_blur,
+                      # быстро по фрагментам: A/D (Ф/В) — соседний, W/S (Ц/Ы) — начало/конец текущего
+                      "a": lambda: self.goto_clip(-1), "d": lambda: self.goto_clip(1),
+                      "w": lambda: self.clip_edge(False), "s": lambda: self.clip_edge(True)}.get(letter or "")
             if action is not None and not keys.has_shift(ev):
                 action()
                 return True

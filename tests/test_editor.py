@@ -390,8 +390,18 @@ def test_editor_single_key_shortcuts(tmp_path, qt_app):
         press(Qt.Key.Key_F, "f")
         assert c.frame_for(w.project.aspect) == (1.0, 0.0, 0.0)
         w.player.seek(1.5)
-        press(0x44B, "ы")                   # S в русской раскладке — разрезать
+        press(0x447, "ч")                   # X в русской раскладке — разрезать
         assert len(w.project.clips) == 2
+        a, b = w.project.clips
+        press(0x444, "ф")                   # Ф (A) — к середине предыдущего фрагмента
+        assert w.player.t == pytest.approx(a.duration / 2, abs=0.05) and w.timeline.selected == a.id
+        press(0x432, "в")                   # В (D) — к середине следующего
+        assert w.player.t == pytest.approx(a.duration + b.duration / 2, abs=0.05) and w.timeline.selected == b.id
+        press(0x446, "ц")                   # Ц (W) — начало текущего
+        assert w.player.t == pytest.approx(a.duration, abs=0.05)
+        press(0x44B, "ы")                   # Ы (S) — конец текущего (последний его кадр)
+        assert w.player.t == pytest.approx(a.duration + b.duration, abs=0.06)
+        assert w.project.locate(w.player.t)[0] == 1
         press(Qt.Key.Key_Backspace, "")
         assert len(w.project.clips) == 1
     finally:
