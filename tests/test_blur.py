@@ -54,11 +54,14 @@ def test_preview_blurs_what_is_under(qt_app):
 
     from glimpsy.editor.preview import PreviewWidget
 
+    from PySide6.QtGui import QPainter
+
     img = QImage(320, 180, QImage.Format.Format_RGB32)
     img.fill(QColor("#000000"))
-    for x in range(0, 320, 2):                              # мелкие полоски: после размытия — серое
-        for y in range(180):
-            img.setPixelColor(x, y, QColor("#FFFFFF"))
+    painter = QPainter(img)                                 # мелкие полоски: после размытия — серое
+    for x in range(0, 320, 2):                              # (не setPixelColor: в PySide6 6.12 он
+        painter.fillRect(x, 0, 1, 180, QColor("#FFFFFF"))   #  портит счётчик None и роняет Python)
+    painter.end()
     w = PreviewWidget()
     w.resize(344, 204)
     w.set_image(img)
