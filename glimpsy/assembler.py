@@ -305,7 +305,8 @@ class Assembler:
                                    cursor=False)
             files.append(out)
         cams = place_camera(pieces, load_clips(shared_dir))
-        stem = time.strftime("Запись %Y-%m-%d %H-%M", time.localtime(session_start))
+        # русские буквы — не в формате: strftime на Windows их не принимает
+        stem = "Запись " + time.strftime("%Y-%m-%d %H-%M", time.localtime(session_start))
         self._save_project(project_dir, pieces, files, None, cams, shared_dir / "camera",
                            name, title=stem + (f" · {name}" if name else ""), move=True)
         stats = shared_dir / "stats.json"
