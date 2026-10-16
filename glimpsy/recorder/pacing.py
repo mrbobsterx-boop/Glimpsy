@@ -32,6 +32,7 @@ class Plan:
     clip_min_s: float = 2.0  # длина фрагмента в ролике: от…
     clip_max_s: float = 5.0  # …до (в непрерывном режиме обе — continuous_s)
     continuous: bool = False
+    record_all: bool = False  # всё подряд: куски идут один за другим, ничего не выбрасывается
 
     def save_interval(self, active_seconds: float) -> float:
         """Средний интервал между сохранениями.
@@ -44,6 +45,11 @@ class Plan:
 
 
 def make_plan(s: Settings) -> Plan:
+    if s.record_all:
+        from glimpsy.config import RECORD_ALL_CHUNK_S as n
+
+        return Plan(speed=1.0, length_bias=0.5, clip_out_s=n, clips_needed=1, pool_size=10 ** 9,
+                    candidate_s=n, min_gap_s=0.0, clip_min_s=1.0, clip_max_s=n, record_all=True)
     if s.continuous:
         # непрерывные фрагменты: каждый — ровно continuous_s секунд подряд, без ускорения,
         # кандидат с небольшим запасом по краям, чтобы выбрать самое живое окно

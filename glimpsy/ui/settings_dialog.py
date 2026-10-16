@@ -160,14 +160,25 @@ class SettingsDialog(QDialog):
             widget.valueChanged.connect(self._update_plan_hint)
         self.pace.currentIndexChanged.connect(self._update_plan_hint)
 
-        def continuous_changed(on: bool) -> None:
+        self.record_all = QCheckBox("Записывать всё подряд — без автосборки ролика")
+        self.record_all.setChecked(self.s.record_all)
+
+        def continuous_changed(_on: bool = False) -> None:
+            everything = self.record_all.isChecked()
+            on = self.continuous.isChecked()
             for wd in (self.clip_min, self.clip_max, self.pace):
-                wd.setEnabled(not on)
-            self.continuous_s.setEnabled(on)
+                wd.setEnabled(not on and not everything)
+            self.continuous_s.setEnabled(on and not everything)
+            self.continuous.setEnabled(not everything)
+            self.target.setEnabled(not everything)
             self._update_plan_hint()
 
         self.continuous.toggled.connect(continuous_changed)
+        self.record_all.toggled.connect(continuous_changed)
 
+        f.addRow("", self.record_all)
+        f.addRow("", _hint("Запись идёт без пропусков, кусками по 20 секунд. Когда нажмёте «Завершить», "
+                           "ролик не собирается: все куски сразу открываются в редакторе, ролик собираете там."))
         f.addRow("Длина ролика", self.target)
         f.addRow("", self.continuous)
         f.addRow("Длина куска", self.continuous_s)
@@ -507,6 +518,9 @@ class SettingsDialog(QDialog):
         s.clip_min_s, s.clip_max_s = self.clip_min.value(), max(self.clip_min.value(), self.clip_max.value())
         s.pace = self.pace.currentData()
         s.continuous, s.continuous_s = self.continuous.isChecked(), self.continuous_s.value()
+        if self.record_all.isChecked():
+            self.plan_hint.setText("Сохраняется всё, что записано (кроме пауз и приватных окон).")
+            return
         plan = make_plan(s.validate())
         self.plan_hint.setText(f"≈ {plan.clips_needed} фрагментов в ролике, программа хранит до "
                                f"{plan.pool_size} кандидатов и сама решает, как часто сохранять.")
@@ -531,6 +545,7 @@ class SettingsDialog(QDialog):
         s.clip_max_s = max(self.clip_min.value(), self.clip_max.value())
         s.pace = self.pace.currentData()
         s.continuous, s.continuous_s = self.continuous.isChecked(), self.continuous_s.value()
+        s.record_all = self.record_all.isChecked()
         s.output_width, s.output_height = self.resolution.currentData()
         s.fx_zoom = self.fx_zoom.isChecked()
         s.fx_zoom_strength = self.fx_strength.value()

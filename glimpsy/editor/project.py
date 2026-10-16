@@ -472,7 +472,7 @@ class Project:
             created = time.mktime(time.strptime("_".join(directory.name.split("_")[1:3]), "%Y%m%d_%H%M%S"))
         except (IndexError, ValueError):
             created = directory.stat().st_mtime
-        name = Path(output).stem if output else directory.name
+        name = Path(output).stem if output else (meta.get("title") or directory.name)
         project = cls(directory, name, clips, fps=int(meta.get("fps", 30)), source_video=output, created=created)
         # окошки с веб-камеры, которые автосборка поставила в ролик, — как обычные наложения
         project.overlays.extend(camera_from_meta(c) for c in meta.get("camera", []))

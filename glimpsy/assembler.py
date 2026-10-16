@@ -194,6 +194,10 @@ class Assembler:
         если кандидаты в подпапке потока; name — название потока (добавляется к имени ролика)."""
         progress = progress or (lambda f, t: None)
         shared_dir = shared_dir or session_dir
+        if self.plan.record_all:
+            if project_dir is None:
+                raise AssemblyError("Для записи «всё подряд» нужен проект редактора.")
+            return self.run_all(session_dir, cands, session_start, progress, project_dir, name, shared_dir)
         pieces = select_pieces(cands, self.plan, self.s)
         if not pieces:
             raise AssemblyError("Нет подходящих фрагментов: запись была слишком короткой "
@@ -253,6 +257,48 @@ class Assembler:
                 shutil.copy2(stats, project_dir / "stats.json")
         progress(1.0, "Готово")
         return final
+
+    def run_all(self, session_dir: Path, cands: list[Candidate], session_start: float, progress: Progress,
+                project_dir: Path, name: str = "", shared_dir: Path | None = None) -> Path:
+        """«Всё подряд»: ролик не собирается. Все куски по порядку — в проект редактора, как есть
+        (видео не пересчитывается, звук подклеивается). Возвращает папку проекта."""
+        shared_dir = shared_dir or session_dir
+        pieces = [Piece(c, 0.0, c.duration, 1.0) for c in sorted(cands, key=lambda c: c.wall_start)
+                  if c.duration > 0.3]
+        if not pieces:
+            raise AssemblyError("Запись была слишком короткой или всё время стояла на паузе.")
+        work = session_dir / "render"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        self._session_dir = session_dir
+        files: list[Path] = []
+        for i, p in enumerate(pieces):
+            progress(i / (len(pieces) + 1), f"Фрагмент {i + 1} из {len(pieces)}")
+            out = work / f"piece_{i:04d}.mp4"
+            src = session_dir / p.cand.file
+            if p.cand.crop:                      # окно из экрана — его нужно вырезать, тут без пересчёта никак
+                self._render_piece(src, p, out, "", effects=False, audio="all", cursor=False)
+            else:
+                self._remux(src, session_dir / p.cand.audio if p.cand.audio else None, out)
+            files.append(out)
+        cams = place_camera(pieces, load_clips(shared_dir))
+        stem = time.strftime("Запись %Y-%m-%d %H-%M", time.localtime(session_start))
+        self._save_project(project_dir, pieces, files, None, cams, shared_dir / "camera",
+                           name, title=stem + (f" · {name}" if name else ""), move=True)
+        stats = shared_dir / "stats.json"
+        if stats.exists():
+            shutil.copy2(stats, project_dir / "stats.json")
+        progress(1.0, "Готово")
+        return project_dir
+
+    def _remux(self, src: Path, wav: Path | None, out: Path) -> None:
+        """Кусок буфера → mp4 без пересчёта видео (и со звуком, если он записан)."""
+        args = ["-i", str(src)]
+        if wav is not None and wav.exists():
+            args += ["-i", str(wav), "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "160k", "-shortest"]
+        else:
+            args += ["-map", "0:v:0", "-an"]
+        self._ffmpeg([*args, "-c:v", "copy", "-movflags", "+faststart", str(out)])
 
     def _effects_graph(self, p: Piece, W: int, H: int, fps: int, effects: bool = True,
                        cursor_idx: int | None = None) -> tuple[str, str]:
@@ -411,9 +457,9 @@ class Assembler:
         if r.returncode != 0:
             raise AssemblyError("FFmpeg: " + r.stderr.decode("utf-8", "replace")[-800:])
 
-    def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path,
+    def _save_project(self, project_dir: Path, pieces: list[Piece], rendered: list[Path], final: Path | None,
                       cams: list[CamPlacement] | None = None, cam_dir: Path | None = None,
-                      name: str = "") -> None:
+                      name: str = "", title: str = "", move: bool = False) -> None:
         """Сохраняем готовые фрагменты и данные для будущего редактора (этап 2).
         Если проект уже есть («Продолжить запись»), новые фрагменты дописываются в его конец."""
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -428,7 +474,10 @@ class Assembler:
             dest = project_dir / r.name
             if old_meta is not None:                   # имена уже заняты прошлой записью — следующие свободные
                 dest = _free_name(project_dir, "piece_{:04d}.mp4")
-            shutil.copy2(r, dest)
+            if move:                                   # большие куски «всё подряд» не копируем дважды
+                shutil.move(str(r), dest)
+            else:
+                shutil.copy2(r, dest)
             c = p.cand
             cursor = [[round((t - p.offset) / p.speed, 3), x, y] for t, x, y in c.cursor
                       if p.offset <= t <= p.offset + p.source_s]
@@ -439,7 +488,7 @@ class Assembler:
                 "recorded_at": c.wall_start + p.offset, "monitor": c.monitor,
                 "source_size": list(c.size), "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor, "clicks": clicks,
-                "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id, "voice": c.voice_id,
+                "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id and not self.plan.record_all, "voice": c.voice_id,
                 "own_cursor": c.own_cursor,
                 "app": getattr(c, "app", ""), "title": getattr(c, "title", ""),
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента
@@ -455,10 +504,12 @@ class Assembler:
             shutil.copy2(cam_dir / c.clip.file, project_dir / cam_name)
             camera.append({"file": cam_name, "start": c.start, "duration": c.duration, "src_duration": c.clip.duration,
                            "width": c.clip.width, "height": c.clip.height, "recorded_at": c.clip.start})
-        meta = {"version": 1, "output": str(final), "width": self.s.output_width,
+        meta = {"version": 1, "output": str(final) if final else "", "width": self.s.output_width,
                 "height": self.s.output_height, "fps": self.s.fps, "clips": items, "camera": camera}
         if name:
             meta["stream"] = name
+        if title:
+            meta["title"] = title
         if old_meta is not None:
             # продолжение: старое остаётся как было, новое — в конце (и в смонтированной ленте тоже)
             before = sum(float(c.get("duration", 0)) for c in old_meta.get("clips", []))
@@ -466,7 +517,7 @@ class Assembler:
             meta["clips"] = old_meta.get("clips", []) + items
             meta["camera"] = old_meta.get("camera", []) + [{**c, "start": round(c["start"] + before, 3)}
                                                            for c in camera]
-            meta["parts"] = old_meta.get("parts", []) + [str(final)]
+            meta["parts"] = old_meta.get("parts", []) + ([str(final)] if final else [])
             # смонтированная лента (edit.json) подхватит новое сама при открытии — Project.load
         (project_dir / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
         try:                                       # описание фрагментов — сразу, рядом с ними

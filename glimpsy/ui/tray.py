@@ -59,6 +59,13 @@ class TrayController(QObject):
         self.a_finish = self.menu.addAction(ic("film", theme.ACCENT_HOVER, 16), "Завершить и собрать ролик",
                                             self._finish)
         self.a_start = self.menu.addAction(ic("circle", theme.DANGER, 16), "Начать запись", self.engine.start_session)
+        self.a_all = self.menu.addAction("Записывать всё подряд (без автосборки)")
+        self.a_all.setCheckable(True)
+        self.a_all.setChecked(self.s.record_all)
+        self.a_all.setToolTip("Запись идёт без пропусков. После «Завершить» ролик не собирается — все куски "
+                              "сразу открываются в редакторе, ролик собираете там.")
+        self.a_all.toggled.connect(self._set_record_all)
+        self._sync_mode()
         self.menu.addSeparator()
         self.streams_menu = self.menu.addMenu(ic("app-window", size=16), "Что записывать")
         self.streams_menu.aboutToShow.connect(self._fill_streams_menu)
@@ -199,9 +206,33 @@ class TrayController(QObject):
                           "этого проекта.")
         return True
 
+    def _sync_mode(self) -> None:
+        """Пункты меню под режим записи («всё подряд» или ролик из лучших моментов)."""
+        self.a_all.blockSignals(True)
+        self.a_all.setChecked(self.s.record_all)
+        self.a_all.blockSignals(False)
+        self.a_finish.setText("Завершить запись" if self.s.record_all else "Завершить и собрать ролик")
+
+    def _set_record_all(self, on: bool) -> None:
+        import copy
+
+        if on == self.s.record_all:
+            return
+        if self.engine.running:
+            # режим меняется между записями: у идущей записи свой план
+            self.show_message("Glimpsy", "Режим поменяется со следующей записи.")
+        s = copy.deepcopy(self.s)
+        s.record_all = on
+        self._apply(s)
+
     def _on_done(self, path: str) -> None:
         self._close_progress()
         files = [Path(p) for p in path.split("\n") if p]
+        projects = [f for f in files if f.is_dir()]          # «всё подряд»: ролика нет, есть проект
+        if projects:
+            self._on_recorded(projects, getattr(self, "_continued", None))
+            self._continued = None
+            return
         cont = getattr(self, "_continued", None)
         self._continued = None
         if cont is not None:
@@ -223,6 +254,27 @@ class TrayController(QObject):
 
         self._toast = Toast(title, text, [("Открыть в редакторе", lambda: self._edit_video(files[0])),
                                           ("Показать папку", self._open_last_video)])
+        self._toast.popup()
+
+    def _on_recorded(self, projects: list[Path], cont: Path | None) -> None:
+        """Запись «всё подряд» сохранена: открыть её в редакторе (там и собирается ролик)."""
+        for w in list(self._editors):
+            if cont is not None and w.isVisible() and w.project.dir == cont:
+                w.close()
+        if self._quiet():
+            self.show_message("Запись сохранена", "Открыть: меню значка → «Редактор роликов».")
+            return
+        from glimpsy.editor.project import Project
+        from glimpsy.ui.toast import Toast
+
+        try:
+            n = sum(len(Project.load(d).clips) for d in projects)
+        except Exception:
+            n = 0
+        title = "⏺ Запись сохранена" if len(projects) == 1 else f"⏺ Сохранено записей: {len(projects)}"
+        text = (f"Фрагментов: {n}. " if n else "") + "Ролик собирается в редакторе: «Экспорт»."
+        self._toast = Toast(title, text, [("Открыть в редакторе", lambda: self._open_project(projects[0])),
+                                          ("Показать папку", lambda: paths.open_in_file_manager(projects[0]))])
         self._toast.popup()
 
     def _on_failed(self, msg: str) -> None:
@@ -604,6 +656,7 @@ class TrayController(QObject):
         save_settings(self.s)
         self.engine.apply_settings(self.s)
         self.updates.set_enabled(self.s.check_updates)
+        self._sync_mode()
         if hotkeys_changed:
             self.bind_hotkeys()
 

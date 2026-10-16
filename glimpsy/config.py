@@ -26,6 +26,9 @@ DEFAULT_BLACKLIST = [
 ]
 
 
+
+RECORD_ALL_CHUNK_S = 20.0          # «всё подряд»: запись режется на куски по столько секунд
+
 @dataclass
 class Settings:
     # --- Итоговый ролик ---
@@ -36,6 +39,7 @@ class Settings:
     pace: str = "medium"               # calm / medium / dynamic
     continuous: bool = False           # непрерывные фрагменты: ровно continuous_s секунд, без ускорения и склеек
     continuous_s: float = 6.0          # длина непрерывного фрагмента
+    record_all: bool = False           # записывать всё подряд, без автосборки ролика (монтаж — в редакторе)
     output_width: int = 1920
     output_height: int = 1080
     oversample: float = 2.5            # во сколько раз больше кандидатов хранить, чем нужно
@@ -112,7 +116,8 @@ class Settings:
         # Буфер должен вмещать «важный момент» и самый длинный фрагмент с запасом
         self.continuous_s = max(3.0, min(float(self.continuous_s), 30.0))
         need = max(self.important_before_s + self.important_after_s, self.clip_max_s * 2,
-                   self.continuous_s + 4 if self.continuous else 0) + 3
+                   self.continuous_s + 4 if self.continuous else 0,
+                   RECORD_ALL_CHUNK_S + 6 if self.record_all else 0) + 3
         self.buffer_s = max(int(need), min(int(self.buffer_s), 300))
         self.idle_pause_s = max(10, min(int(self.idle_pause_s), 3600))
         self.oversample = max(1.5, min(float(self.oversample), 4.0))

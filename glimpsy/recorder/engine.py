@@ -125,6 +125,7 @@ class RecorderEngine(QObject):
     def _reset_session_fields(self) -> None:
         self.session_dir: Path | None = None
         self.continue_into: Path | None = None    # «Продолжить запись»: проект, куда дописать фрагменты
+        self._marks: list[float] = []             # «всё подряд»: когда нажали «важный момент»
         self.session_start = 0.0
         self.pool: CandidatePool | None = None
         self.activity: ActivityTracker | None = None
@@ -184,6 +185,7 @@ class RecorderEngine(QObject):
         """continue_into — папка проекта: новые фрагменты допишутся в его конец («Продолжить запись»)."""
         if self.running:
             return
+        self._restore_settings()
         self._reset_session_fields()
         self.continue_into = continue_into
         self.plan = make_plan(self.s)
@@ -198,16 +200,32 @@ class RecorderEngine(QObject):
             return
 
         def work() -> None:
+            self._restore_settings()
             self._reset_session_fields()
             self.session_dir = session_dir
             meta = _read_json(session_dir / "session.json")
             self.session_start = float(meta.get("start", time.time()))
             self.continue_into = Path(meta["continue_into"]) if meta.get("continue_into") else None
+            self._session_mode(meta)
             self._load_pools(session_dir)
             self._assemble()
 
         self._thread = threading.Thread(target=work, daemon=True, name="assemble")
         self._thread.start()
+
+    def _restore_settings(self) -> None:
+        saved = getattr(self, "_saved_s", None)
+        if saved is not None:
+            self._saved_s = None
+            self.s, self.plan = saved, make_plan(saved)
+
+    def _session_mode(self, meta: dict) -> None:
+        """Сессия с прошлого запуска собирается в том режиме, в котором записывалась."""
+        if "record_all" in meta and bool(meta["record_all"]) != self.s.record_all:
+            self._saved_s = self.s                 # после этой сессии — снова ваши настройки
+            s = copy.deepcopy(self.s)
+            s.record_all = bool(meta["record_all"])
+            self.s, self.plan = s, make_plan(s)
 
     def _send(self, *cmd) -> None:
         if self.running and self.state != State.ASSEMBLING:
@@ -294,11 +312,12 @@ class RecorderEngine(QObject):
             self.session_start = float(meta.get("start", existing_dir.stat().st_mtime))
             if meta.get("continue_into"):
                 self.continue_into = Path(meta["continue_into"])
+            self._session_mode(meta)
         else:
             self.session_start = time.time()
             self.session_dir = paths.temp_root() / time.strftime("session_%Y%m%d_%H%M%S")
             self.session_dir.mkdir(parents=True, exist_ok=True)
-            meta = {"start": self.session_start}
+            meta = {"start": self.session_start, "record_all": self.s.record_all}
             if self.continue_into is not None:      # после сбоя продолжение не потеряется
                 meta["continue_into"] = str(self.continue_into)
             (self.session_dir / "session.json").write_text(json.dumps(meta))
@@ -494,6 +513,8 @@ class RecorderEngine(QObject):
                 self._cam_seconds += 1
                 self._maybe_save(now)
                 self._maybe_camera()
+        if self.plan.record_all:
+            self._save_continuous(now)
         self._bg_tick(now)
         self._emit_status(now)
 
@@ -665,8 +686,18 @@ class RecorderEngine(QObject):
 
     def _bg_stop_all(self) -> None:
         for bg in self._bg.values():
+            self._bg_flush(bg)
             bg.stop()
         self._bg.clear()
+
+    def _bg_flush(self, bg: _Background) -> None:
+        """«Всё подряд»: фоновая запись заканчивается — сохранить её хвост."""
+        run = bg.run
+        if not self.plan.record_all or run.available_from is None:
+            return
+        t0, end = max(bg.last_save_end, run.available_from), time.time()
+        if end - t0 > 1.0:
+            self._bg_save(bg, t0, end)
 
     def _bg_tick(self, now: float) -> None:
         """Все потоки-экраны, кроме главного, пишутся в фоне; раз в секунду — может, сохранить момент."""
@@ -674,7 +705,9 @@ class RecorderEngine(QObject):
         main = self._stream if self.run is not None else None
         want = {sp.id: mons.get(sp.monitor) for sp in self._specs() if sp.is_screen and sp.id != main}
         for sid in [s for s in self._bg if s not in want or want[s] is None or want[s] != self._bg[s].run.monitor]:
-            self._bg.pop(sid).stop()
+            bg = self._bg.pop(sid)
+            self._bg_flush(bg)
+            bg.stop()
         for sid, mon in want.items():
             if mon is None:
                 continue
@@ -726,6 +759,12 @@ class RecorderEngine(QObject):
 
     def _bg_maybe_save(self, bg: _Background, now: float) -> None:
         run, L = bg.run, self.plan.candidate_s
+        if self.plan.record_all:
+            if run.available_from is not None:
+                t0 = max(bg.last_save_end, run.available_from)
+                if now - t0 >= L + 1.0:
+                    self._bg_save(bg, t0, t0 + L)
+            return
         if run.available_from is None or now - run.available_from < L * 0.6 or now - bg.last_save_end < L:
             return
         recent = bg.tracker.score(now - L, now)
@@ -813,6 +852,11 @@ class RecorderEngine(QObject):
 
     def _flush_run(self, run: BufferRun, end: float) -> None:
         """Главная запись заканчивается (или уходит в фон): сохранить «важные моменты» и речь."""
+        if self.plan.record_all and run.available_from is not None:
+            # всё подряд: дописать хвост — от конца прошлого куска до последней секунды
+            t0 = max(self._last_save_end, run.available_from)
+            if end - t0 > 1.0:
+                self._save_from(run, t0, end, self._marked(t0, end))
         for d in list(self._deferred):
             self._deferred.remove(d)
             self._save_from(run, d.t0, min(d.t1, end), d.priority, d.voice)
@@ -902,7 +946,7 @@ class RecorderEngine(QObject):
 
     def _maybe_save(self, now: float) -> None:
         run, act = self.run, self.activity
-        if run is None or act is None:
+        if run is None or act is None or self.plan.record_all:
             return
         L = self.plan.candidate_s
         if run.available_from is None or now - run.available_from < L * 0.6:
@@ -915,6 +959,19 @@ class RecorderEngine(QObject):
         p = save_probability(self.plan, self._active_seconds, recent, self._avg_score)
         if self._rng.random() < p:
             self._save(now - L, now, priority=False)
+
+    def _save_continuous(self, now: float) -> None:
+        """«Всё подряд»: как только в буфере набрался следующий кусок — сохранить его, без пропусков."""
+        run = self.run
+        if run is None or run.available_from is None:
+            return
+        chunk = self.plan.candidate_s
+        t0 = max(self._last_save_end, run.available_from)
+        if now - t0 >= chunk + 1.0:
+            self._save(t0, t0 + chunk, priority=self._marked(t0, t0 + chunk))
+
+    def _marked(self, t0: float, t1: float) -> bool:
+        return any(t0 <= t <= t1 for t in self._marks)
 
     def _save(self, t0: float, t1: float, priority: bool, voice: tuple[int, int] | None = None):
         if self.run is not None:
@@ -989,6 +1046,12 @@ class RecorderEngine(QObject):
             return
         if self.activity:
             self.activity.last_input_time = t   # пользователь точно активен
+        if self.plan.record_all:
+            # всё и так записывается — просто помечаем кусок звёздочкой
+            self._marks.append(t)
+            self.stats["important"] += 1
+            self.notify.emit("Glimpsy", "⭐ Важный момент отмечен")
+            return
         before, after = self.s.important_before_s, self.s.important_after_s
         self._deferred.append(Deferred(due=t + after + 1.2, t0=t - before, t1=t + after, priority=True))
         self.stats["important"] += 1
@@ -1022,8 +1085,8 @@ class RecorderEngine(QObject):
     def _voice_tick(self, now: float) -> None:
         """Голосовой режим: пока вы говорите — запись идёт целиком, кусками по 15 с."""
         a = self.audio
-        if a is None or not self.s.voice_mode or a.mic_ring is None or self.run is None:
-            return
+        if a is None or not self.s.voice_mode or a.mic_ring is None or self.run is None or self.plan.record_all:
+            return                  # «всё подряд»: речь и так в записи, со звуком
         st = a.voice.speaking()
         if st.speaking and self._voice is None:
             self._voice_count += 1
@@ -1125,7 +1188,7 @@ class RecorderEngine(QObject):
             # у каждого потока — свой ролик и свой проект в редакторе
             name = self._stream_names.get(sid, f"Поток {sid}") if sid else ("весь экран" if len(pools) > 1 else "")
             project_dir = None
-            if self.s.keep_project_for_editor:
+            if self.s.keep_project_for_editor or self.plan.record_all:
                 project_dir = paths.data_dir() / "projects" / (base + (f"_{sid}" if sid else ""))
             if n == 0 and self.continue_into is not None and (self.continue_into / "project.json").exists():
                 project_dir = self.continue_into          # продолжение: в тот же проект, в конец ленты
@@ -1162,6 +1225,7 @@ class RecorderEngine(QObject):
 
     def _apply_settings(self, s: Settings) -> None:
         old = self.s
+        s.record_all = old.record_all          # режим записи у идущей сессии не меняется
         restart = (s.fps != self.s.fps or s.encoder != self.s.encoder or
                    s.record_max_height != self.s.record_max_height or
                    s.monitor_mode != self.s.monitor_mode or s.manual_monitor != self.s.manual_monitor or
