@@ -40,6 +40,8 @@ class Settings:
     continuous: bool = False           # непрерывные фрагменты: ровно continuous_s секунд, без ускорения и склеек
     continuous_s: float = 6.0          # длина непрерывного фрагмента
     record_all: bool = False           # записывать всё подряд, без автосборки ролика (монтаж — в редакторе)
+    auto_video: bool = False           # собирать готовый ролик сразу после записи (иначе — только в редакторе)
+    hotkey_continuous: str = "Ctrl+Alt+R"  # непрерывная запись: вкл / выкл
     output_width: int = 1920
     output_height: int = 1080
     oversample: float = 2.5            # во сколько раз больше кандидатов хранить, чем нужно

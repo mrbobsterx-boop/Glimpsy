@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 class TrayController(QObject):
     _prompter_cmd = Signal(str)          # горячие клавиши суфлёра (из потока клавиатуры) → поток интерфейса
+    _continuous_cmd = Signal()           # горячая клавиша непрерывной записи → поток интерфейса
 
     def __init__(self, app: QApplication, settings: Settings, services: PlatformServices,
                  engine: RecorderEngine) -> None:
@@ -42,6 +43,7 @@ class TrayController(QObject):
         self._stream_next = 1
         self._prompter = None
         self._prompter_cmd.connect(self._prompter_run)
+        self._continuous_cmd.connect(self.engine.toggle_continuous)
 
         self.menu = QMenu()
         ic = theme.icon
@@ -59,12 +61,10 @@ class TrayController(QObject):
         self.a_finish = self.menu.addAction(ic("film", theme.ACCENT_HOVER, 16), "Завершить и собрать ролик",
                                             self._finish)
         self.a_start = self.menu.addAction(ic("circle", theme.DANGER, 16), "Начать запись", self.engine.start_session)
-        self.a_all = self.menu.addAction("Записывать всё подряд (без автосборки)")
+        self.a_all = self.menu.addAction(ic("circle", theme.DANGER, 16), "Непрерывная запись")
         self.a_all.setCheckable(True)
-        self.a_all.setChecked(self.s.record_all)
-        self.a_all.setToolTip("Запись идёт без пропусков. После «Завершить» ролик не собирается — все куски "
-                              "сразу открываются в редакторе, ролик собираете там.")
-        self.a_all.toggled.connect(self._set_record_all)
+        self.a_all.setToolTip("Вкл — пишется всё подряд, без пропусков. Выкл — дальше снова кусками.")
+        self.a_all.triggered.connect(lambda _on: self.engine.toggle_continuous())
         self._sync_mode()
         self.menu.addSeparator()
         self.streams_menu = self.menu.addMenu(ic("app-window", size=16), "Что записывать")
@@ -115,6 +115,7 @@ class TrayController(QObject):
             "important": (self.s.hotkey_important, self.engine.mark_important),
             "pause": (self.s.hotkey_pause, self.engine.toggle_pause),
             "finish": (self.s.hotkey_finish, self.engine.finish),
+            "continuous": (self.s.hotkey_continuous, self._continuous_cmd.emit),
             # суфлёр: горячие клавиши приходят из другого потока — выполняем в потоке интерфейса
             **{k: (getattr(self.s, f"hotkey_prompter_{k[3:]}"), self._prompter_call(k[3:]))
                for k in ("pr_show", "pr_play", "pr_slower", "pr_faster", "pr_back", "pr_lock", "pr_top")},
@@ -132,7 +133,10 @@ class TrayController(QObject):
             label += f" — «{st['stream']}»"
         elif st.get("monitor") and state == State.RECORDING:
             label += f" — {st['monitor']}"
+        if st.get("continuous") and state in (State.RECORDING, State.IDLE):
+            label = "⏺ Непрерывная запись · " + label
         self.a_status.setText(label)
+        self._sync_mode(bool(st.get("continuous")))
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
         self.a_counts.setText(f"Фрагментов: {n} (нужно ~{need})" + (f", важных: {imp}" if imp else ""))
         active = state not in (State.STOPPED, State.ASSEMBLING)
@@ -206,24 +210,15 @@ class TrayController(QObject):
                           "этого проекта.")
         return True
 
-    def _sync_mode(self) -> None:
-        """Пункты меню под режим записи («всё подряд» или ролик из лучших моментов)."""
+    def _sync_mode(self, continuous: bool | None = None) -> None:
+        """Пункты меню: идёт ли непрерывная запись; собирается ли ролик сразу или только в редакторе."""
+        on = bool(self.status.get("continuous")) if continuous is None and hasattr(self, "status") \
+            else bool(continuous)
         self.a_all.blockSignals(True)
-        self.a_all.setChecked(self.s.record_all)
+        self.a_all.setChecked(on)
         self.a_all.blockSignals(False)
-        self.a_finish.setText("Завершить запись" if self.s.record_all else "Завершить и собрать ролик")
-
-    def _set_record_all(self, on: bool) -> None:
-        import copy
-
-        if on == self.s.record_all:
-            return
-        if self.engine.running:
-            # режим меняется между записями: у идущей записи свой план
-            self.show_message("Glimpsy", "Режим поменяется со следующей записи.")
-        s = copy.deepcopy(self.s)
-        s.record_all = on
-        self._apply(s)
+        self.a_all.setText(f"Непрерывная запись  ({self.s.hotkey_continuous})")
+        self.a_finish.setText("Завершить и собрать ролик" if self.s.auto_video else "Завершить запись")
 
     def _on_done(self, path: str) -> None:
         self._close_progress()
@@ -360,7 +355,8 @@ class TrayController(QObject):
         keys.setVerticalSpacing(8)
         for i, (combo, text) in enumerate(((self.s.hotkey_important, "важный момент — точно попадёт в ролик"),
                                            (self.s.hotkey_pause, "пауза / продолжить"),
-                                           (self.s.hotkey_finish, "завершить и собрать ролик"))):
+                                           (self.s.hotkey_continuous, "непрерывная запись: вкл / выкл"),
+                                           (self.s.hotkey_finish, "завершить запись"))):
             keys.addWidget(theme.mark(QLabel(combo), "kbd"), i, 0)
             keys.addWidget(QLabel(text), i, 1)
         keys.setColumnStretch(1, 1)
@@ -643,8 +639,8 @@ class TrayController(QObject):
             self._settings_open = False
 
     def _apply(self, new: Settings) -> None:
-        hotkeys_changed = (new.hotkey_important, new.hotkey_pause, new.hotkey_finish) != (
-            self.s.hotkey_important, self.s.hotkey_pause, self.s.hotkey_finish)
+        hotkeys_changed = (new.hotkey_important, new.hotkey_pause, new.hotkey_finish, new.hotkey_continuous) != (
+            self.s.hotkey_important, self.s.hotkey_pause, self.s.hotkey_finish, self.s.hotkey_continuous)
         from glimpsy import autostart
 
         if new.launch_at_login != autostart.is_enabled():

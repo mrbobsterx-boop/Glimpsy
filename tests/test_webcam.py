@@ -128,7 +128,7 @@ def test_assemble_with_camera(tmp_path):
                     "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(p)], check=True)
     store.add(CamClip(p.name, now + 61, 3.0, 640, 480), keep=5)
 
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=10, clip_min_s=3, clip_max_s=4,
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=10, clip_min_s=3, clip_max_s=4,
                  pace="calm", output_width=640, output_height=360).validate()
     out = Assembler(FFMPEG, software_encoder(), s, make_plan(s)).run(sess, cands, now, project_dir=tmp_path / "project_1")
 

@@ -84,7 +84,7 @@ def test_assembly_crops_window(tmp_path):
     c = Candidate(id=1, file="c.ts", wall_start=now, wall_end=now + 4, want_start=now, want_end=now + 4, monitor=1,
                   width=640, height=180, score=0.5, activity=[0.5] * 4, crop=[0.5, 0.0, 0.5, 1.0],
                   cursor=[[1.0, 0.5, 0.5]], clicks=[[1.5, 0.5, 0.5]])
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
                  output_width=320, output_height=180).validate()
     out = Assembler(FFMPEG, software_encoder(), s, make_plan(s)).run(
         sess, [c], now, project_dir=tmp_path / "p", name="Проект: А", shared_dir=tmp_path / "session")

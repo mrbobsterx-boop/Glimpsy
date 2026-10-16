@@ -54,7 +54,7 @@ def test_buffer_clip_and_assemble(tmp_path):
     run.cleanup()
     assert not (tmp_path / "run").exists()
 
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=10, clip_min_s=1, clip_max_s=2,
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=10, clip_min_s=1, clip_max_s=2,
                  output_width=640, output_height=360).validate()
     c = Candidate(id=1, file="cand_00001.ts", wall_start=got[0], wall_end=got[1], want_start=got[0],
                   want_end=got[1], monitor=1, width=mon.width, height=mon.height, score=0.5,

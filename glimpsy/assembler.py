@@ -90,7 +90,10 @@ def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.R
     def overlaps_voice(c: Candidate) -> bool:
         return any(c.wall_start < b and a < c.wall_end for a, b in spoken)
 
-    usable = [c for c in cands if not c.voice_id and c.duration >= plan.clip_min_s * plan.speed * 0.8
+    # непрерывная запись (горячая клавиша) — целиком, как есть
+    whole = [c for c in cands if c.whole and not c.voice_id]
+    spoken += [(c.wall_start, c.wall_end) for c in whole]
+    usable = [c for c in cands if not c.voice_id and not c.whole and c.duration >= plan.clip_min_s * plan.speed * 0.8
               and not overlaps_voice(c)]
     priority = [c for c in usable if c.priority]
     regular = sorted([c for c in usable if not c.priority], key=lambda c: c.wall_start)
@@ -102,6 +105,8 @@ def select_pieces(cands: list[Candidate], plan: Plan, s: Settings, rng: random.R
         src = min(c.want_end, c.wall_end) - c.wall_start - start
         if src > 0.3:
             pieces.append(Piece(c, start, src, 1.0))
+    for c in whole:
+        pieces.append(Piece(c, 0.0, c.duration, 1.0))
     voice_s = sum(p.out_s for p in pieces)
     for c in priority:
         # важный момент берём целиком (сколько просили до/после нажатия)
@@ -199,6 +204,13 @@ class Assembler:
                 raise AssemblyError("Для записи «всё подряд» нужен проект редактора.")
             return self.run_all(session_dir, cands, session_start, progress, project_dir, name, shared_dir)
         pieces = select_pieces(cands, self.plan, self.s)
+        if not self.s.auto_video and project_dir is not None:
+            # ролик собирается только в редакторе — здесь лишь фрагменты для него
+            if not pieces:
+                raise AssemblyError("Нет подходящих фрагментов: запись была слишком короткой "
+                                    "или почти всё время стояла на паузе.")
+            return self._project_only(session_dir, pieces, session_start, progress, project_dir, name,
+                                      shared_dir)
         if not pieces:
             raise AssemblyError("Нет подходящих фрагментов: запись была слишком короткой "
                                 "или почти всё время стояла на паузе.")
@@ -267,6 +279,15 @@ class Assembler:
                   if c.duration > 0.3]
         if not pieces:
             raise AssemblyError("Запись была слишком короткой или всё время стояла на паузе.")
+        return self._project_only(session_dir, pieces, session_start, progress, project_dir, name, shared_dir)
+
+    def _project_only(self, session_dir: Path, pieces: list[Piece], session_start: float, progress: Progress,
+                      project_dir: Path, name: str = "", shared_dir: Path | None = None) -> Path:
+        """Фрагменты — в проект редактора, ролик не собирается. Куски, которые идут целиком и как есть
+        (непрерывная запись), не пересчитываются; остальные — обрезка и ускорение, без эффектов
+        (зум и клики добавляет редактор). Возвращает папку проекта."""
+        shared_dir = shared_dir or session_dir
+        has_audio = any(p.cand.audio for p in pieces)
         work = session_dir / "render"
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
@@ -276,10 +297,12 @@ class Assembler:
             progress(i / (len(pieces) + 1), f"Фрагмент {i + 1} из {len(pieces)}")
             out = work / f"piece_{i:04d}.mp4"
             src = session_dir / p.cand.file
-            if p.cand.crop:                      # окно из экрана — его нужно вырезать, тут без пересчёта никак
-                self._render_piece(src, p, out, "", effects=False, audio="all", cursor=False)
-            else:
+            as_is = p.offset < 0.05 and abs(p.speed - 1.0) < 1e-6 and p.source_s >= p.cand.duration - 0.05
+            if as_is and not p.cand.crop:
                 self._remux(src, session_dir / p.cand.audio if p.cand.audio else None, out)
+            else:                                # обрезка, ускорение или окно из экрана — пересчитываем
+                self._render_piece(src, p, out, "", effects=False, audio="all" if has_audio else "none",
+                                   cursor=False)
             files.append(out)
         cams = place_camera(pieces, load_clips(shared_dir))
         stem = time.strftime("Запись %Y-%m-%d %H-%M", time.localtime(session_start))
@@ -488,7 +511,7 @@ class Assembler:
                 "recorded_at": c.wall_start + p.offset, "monitor": c.monitor,
                 "source_size": list(c.size), "priority": c.priority, "score": round(c.score, 3),
                 "cursor": cursor, "clicks": clicks,
-                "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id and not self.plan.record_all, "voice": c.voice_id,
+                "has_audio": bool(c.audio), "muted": bool(c.audio) and not c.voice_id and not c.whole and not self.plan.record_all, "voice": c.voice_id,
                 "own_cursor": c.own_cursor,
                 "app": getattr(c, "app", ""), "title": getattr(c, "title", ""),
                 # эффекты, которые были в автосборке, — в редакторе их можно выключить у любого фрагмента

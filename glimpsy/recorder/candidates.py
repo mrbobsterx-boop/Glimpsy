@@ -39,6 +39,7 @@ class Candidate:
     own_cursor: bool = False      # снято без курсора — курсор рисует Glimpsy (плавный)
     app: str = ""                 # какая программа была на экране (больше всего времени) — для описания
     title: str = ""               # и заголовок её окна
+    whole: bool = False           # снято в непрерывной записи: идёт целиком, без ускорения, не выбрасывается
 
     @property
     def size(self) -> tuple[int, int]:
@@ -107,10 +108,10 @@ class CandidatePool:
         self.items.sort(key=lambda x: x.wall_start)
 
     def prune(self, max_size: int) -> list[Candidate]:
-        """Удаляет лишних кандидатов (кроме приоритетных). Возвращает удалённых."""
+        """Удаляет лишних кандидатов (кроме приоритетных и непрерывной записи). Возвращает удалённых."""
         removed: list[Candidate] = []
         while True:
-            regular = [c for c in self.items if not c.priority]
+            regular = [c for c in self.items if not c.priority and not c.whole]
             if len(regular) <= max_size:
                 break
             victim = pick_victim(regular)

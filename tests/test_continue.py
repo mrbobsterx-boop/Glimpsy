@@ -72,7 +72,7 @@ def test_assembler_appends_to_existing_project(tmp_path, qt_app):
     from glimpsy.recorder.encoder import software_encoder
     from glimpsy.recorder.pacing import make_plan
 
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
                  output_width=640, output_height=360, fx_zoom=False, fx_clicks=False).validate()
     proj = tmp_path / "project_20260925_101010"
 

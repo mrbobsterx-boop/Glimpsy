@@ -160,8 +160,10 @@ class SettingsDialog(QDialog):
             widget.valueChanged.connect(self._update_plan_hint)
         self.pace.currentIndexChanged.connect(self._update_plan_hint)
 
-        self.record_all = QCheckBox("Записывать всё подряд — без автосборки ролика")
+        self.record_all = QCheckBox("Записывать всё подряд всегда (а не только по горячей клавише)")
         self.record_all.setChecked(self.s.record_all)
+        self.auto_video = QCheckBox("Собирать ролик сразу после записи (иначе — только в редакторе)")
+        self.auto_video.setChecked(self.s.auto_video)
 
         def continuous_changed(_on: bool = False) -> None:
             everything = self.record_all.isChecked()
@@ -176,9 +178,12 @@ class SettingsDialog(QDialog):
         self.continuous.toggled.connect(continuous_changed)
         self.record_all.toggled.connect(continuous_changed)
 
+        f.addRow("", self.auto_video)
+        f.addRow("", _hint("Выключено: после «Завершить запись» фрагменты сразу открываются в редакторе, "
+                           "ролик собираете там («Экспорт»)."))
         f.addRow("", self.record_all)
-        f.addRow("", _hint("Запись идёт без пропусков, кусками по 20 секунд. Когда нажмёте «Завершить», "
-                           "ролик не собирается: все куски сразу открываются в редакторе, ролик собираете там."))
+        f.addRow("", _hint("Непрерывная запись включается и выключается горячей клавишей (её можно поменять "
+                           "на вкладке клавиш). Эта галочка — чтобы всегда писать всё подряд."))
         f.addRow("Длина ролика", self.target)
         f.addRow("", self.continuous)
         f.addRow("Длина куска", self.continuous_s)
@@ -274,13 +279,15 @@ class SettingsDialog(QDialog):
         self.hk_important = QLineEdit(self.s.hotkey_important)
         self.hk_pause = QLineEdit(self.s.hotkey_pause)
         self.hk_finish = QLineEdit(self.s.hotkey_finish)
+        self.hk_continuous = QLineEdit(self.s.hotkey_continuous)
         self.imp_before = QSpinBox(minimum=1, maximum=60, suffix=" с", value=self.s.important_before_s)
         self.imp_after = QSpinBox(minimum=0, maximum=30, suffix=" с", value=self.s.important_after_s)
         f.addRow("Важный момент", self.hk_important)
         f.addRow("   сохранить до нажатия", self.imp_before)
         f.addRow("   и после нажатия", self.imp_after)
         f.addRow("Пауза / продолжить", self.hk_pause)
-        f.addRow("Собрать ролик", self.hk_finish)
+        f.addRow("Непрерывная запись вкл/выкл", self.hk_continuous)
+        f.addRow("Завершить запись", self.hk_finish)
         head = QLabel("Суфлёр")
         head.setProperty("role", "section")
         f.addRow(head)
@@ -531,12 +538,14 @@ class SettingsDialog(QDialog):
             s.hotkey_important = hotkey_format.normalize(self.hk_important.text())
             s.hotkey_pause = hotkey_format.normalize(self.hk_pause.text())
             s.hotkey_finish = hotkey_format.normalize(self.hk_finish.text())
+            s.hotkey_continuous = hotkey_format.normalize(self.hk_continuous.text())
             for key, edit in self.hk_prompter.items():
                 setattr(s, key, hotkey_format.normalize(edit.text()))
         except hotkey_format.HotkeyError as e:
             self.error.setText(str(e))
             return
-        combos = [s.hotkey_important, s.hotkey_pause, s.hotkey_finish] + [getattr(s, k) for k in self.hk_prompter]
+        combos = [s.hotkey_important, s.hotkey_pause, s.hotkey_finish, s.hotkey_continuous] + \
+            [getattr(s, k) for k in self.hk_prompter]
         if len(set(combos)) < len(combos):
             self.error.setText("Горячие клавиши не должны повторяться.")
             return
@@ -546,6 +555,7 @@ class SettingsDialog(QDialog):
         s.pace = self.pace.currentData()
         s.continuous, s.continuous_s = self.continuous.isChecked(), self.continuous_s.value()
         s.record_all = self.record_all.isChecked()
+        s.auto_video = self.auto_video.isChecked()
         s.output_width, s.output_height = self.resolution.currentData()
         s.fx_zoom = self.fx_zoom.isChecked()
         s.fx_zoom_strength = self.fx_strength.value()

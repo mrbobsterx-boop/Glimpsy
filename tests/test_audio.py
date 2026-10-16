@@ -104,7 +104,7 @@ def test_assembly_voice_audio(tmp_path):
                                want_start=now + 60 * i, want_end=now + 60 * i + dur, monitor=1, width=320,
                                height=180, score=0.5, activity=[0.5] * dur, audio=f"c{i}.wav",
                                priority=bool(voice), voice_id=voice))
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=4, clip_min_s=3, clip_max_s=4, pace="calm",
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=4, clip_min_s=3, clip_max_s=4, pace="calm",
                  output_width=320, output_height=180, fx_zoom=False, fx_clicks=False).validate()
     out = Assembler(FFMPEG, software_encoder(), s, make_plan(s)).run(sess, cands, now, project_dir=tmp_path / "p")
     raw = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(out), "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le",

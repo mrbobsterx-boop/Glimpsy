@@ -28,7 +28,7 @@ from PySide6.QtCore import QObject, Signal
 
 from glimpsy import paths
 from glimpsy.assembler import Assembler
-from glimpsy.config import Settings
+from glimpsy.config import RECORD_ALL_CHUNK_S, Settings
 from glimpsy.platform.base import Monitor, PlatformServices
 from glimpsy.platform.common import monitor_at
 from glimpsy.recorder.activity import ActivityTracker
@@ -126,6 +126,8 @@ class RecorderEngine(QObject):
         self.session_dir: Path | None = None
         self.continue_into: Path | None = None    # «Продолжить запись»: проект, куда дописать фрагменты
         self._marks: list[float] = []             # «всё подряд»: когда нажали «важный момент»
+        self._cont_on = False                     # непрерывная запись включена (горячая клавиша)
+        self._cont_from = 0.0                     # с какого момента она пишется
         self.session_start = 0.0
         self.pool: CandidatePool | None = None
         self.activity: ActivityTracker | None = None
@@ -347,6 +349,8 @@ class RecorderEngine(QObject):
                 self._set_state(State.RECORDING)
         elif kind == "important":
             self._mark_important(cmd[1])
+        elif kind == "continuous":
+            self._toggle_continuous(time.time(), cmd[1])
         elif kind == "settings":
             self._apply_settings(cmd[1])
         elif kind == "streams":
@@ -513,7 +517,7 @@ class RecorderEngine(QObject):
                 self._cam_seconds += 1
                 self._maybe_save(now)
                 self._maybe_camera()
-        if self.plan.record_all:
+        if self._all():
             self._save_continuous(now)
         self._bg_tick(now)
         self._emit_status(now)
@@ -693,9 +697,9 @@ class RecorderEngine(QObject):
     def _bg_flush(self, bg: _Background) -> None:
         """«Всё подряд»: фоновая запись заканчивается — сохранить её хвост."""
         run = bg.run
-        if not self.plan.record_all or run.available_from is None:
+        if not self._all() or run.available_from is None:
             return
-        t0, end = max(bg.last_save_end, run.available_from), time.time()
+        t0, end = max(bg.last_save_end, run.available_from, self._cont_from), time.time()
         if end - t0 > 1.0:
             self._bg_save(bg, t0, end)
 
@@ -759,11 +763,11 @@ class RecorderEngine(QObject):
 
     def _bg_maybe_save(self, bg: _Background, now: float) -> None:
         run, L = bg.run, self.plan.candidate_s
-        if self.plan.record_all:
+        if self._all():
             if run.available_from is not None:
-                t0 = max(bg.last_save_end, run.available_from)
-                if now - t0 >= L + 1.0:
-                    self._bg_save(bg, t0, t0 + L)
+                t0 = max(bg.last_save_end, run.available_from, self._cont_from)
+                if now - t0 >= RECORD_ALL_CHUNK_S + 1.0:
+                    self._bg_save(bg, t0, t0 + RECORD_ALL_CHUNK_S)
             return
         if run.available_from is None or now - run.available_from < L * 0.6 or now - bg.last_save_end < L:
             return
@@ -784,7 +788,8 @@ class RecorderEngine(QObject):
         except OSError:
             log.exception("Не удалось сохранить фоновый фрагмент")
             got = None
-        if got is None or (got[1] - got[0]) < self.plan.clip_min_s * self.plan.speed * 0.8:
+        min_len = 1.0 if self._all() else self.plan.clip_min_s * self.plan.speed
+        if got is None or (got[1] - got[0]) < min_len * 0.8:
             path.unlink(missing_ok=True)
             return
         ws, we = got
@@ -797,7 +802,7 @@ class RecorderEngine(QObject):
             cursor=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, m, x, y in act.cursor_between(ws, we)
                     if m == mi],
             clicks=[[round(t - ws, 2), round(x, 4), round(y, 4)] for t, x, y in act.clicks_between(ws, we, mi)],
-            own_cursor=run.own_cursor, app=self._stream_names.get(bg.sid, ""),
+            own_cursor=run.own_cursor, app=self._stream_names.get(bg.sid, ""), whole=self._all(),
         ))
         removed = pool.prune(self.plan.pool_size)
         pool.save()
@@ -852,11 +857,9 @@ class RecorderEngine(QObject):
 
     def _flush_run(self, run: BufferRun, end: float) -> None:
         """Главная запись заканчивается (или уходит в фон): сохранить «важные моменты» и речь."""
-        if self.plan.record_all and run.available_from is not None:
+        if self._all():
             # всё подряд: дописать хвост — от конца прошлого куска до последней секунды
-            t0 = max(self._last_save_end, run.available_from)
-            if end - t0 > 1.0:
-                self._save_from(run, t0, end, self._marked(t0, end))
+            self._flush_run_tail(run, end)
         for d in list(self._deferred):
             self._deferred.remove(d)
             self._save_from(run, d.t0, min(d.t1, end), d.priority, d.voice)
@@ -946,7 +949,7 @@ class RecorderEngine(QObject):
 
     def _maybe_save(self, now: float) -> None:
         run, act = self.run, self.activity
-        if run is None or act is None or self.plan.record_all:
+        if run is None or act is None or self._all():
             return
         L = self.plan.candidate_s
         if run.available_from is None or now - run.available_from < L * 0.6:
@@ -960,13 +963,55 @@ class RecorderEngine(QObject):
         if self._rng.random() < p:
             self._save(now - L, now, priority=False)
 
+    def _all(self) -> bool:
+        """Пишется всё подряд: режим «всё подряд» или включённая горячей клавишей непрерывная запись."""
+        return self.plan.record_all or self._cont_on
+
+    def toggle_continuous(self) -> None:
+        """Горячая клавиша: непрерывная запись вкл/выкл. Если запись не идёт — начать сразу непрерывной."""
+        if not self.running:
+            self.start_session()
+            self._cmds.put(("continuous", True))
+            return
+        self._send("continuous", None)
+
+    def _toggle_continuous(self, now: float, want: bool | None) -> None:
+        on = (not self._cont_on) if want is None else want
+        if on == self._cont_on or self.plan.record_all:
+            return
+        if on:
+            if self._voice is not None and self.run is not None:
+                # шла речь — сохранить сказанное, дальше всё пишется подряд и так
+                v = self._voice
+                self._save_from(self.run, v["from"], now, True, (v["id"], v["part"]))
+                self._voice = None
+            self._cont_on, self._cont_from = True, now
+            self.notify.emit("Glimpsy", "⏺ Непрерывная запись: пишется всё подряд. Нажмите ещё раз — дальше "
+                                        "снова кусками.")
+        else:
+            if self.run is not None:
+                self._flush_run_tail(self.run, now)
+            for bg in self._bg.values():
+                self._bg_flush(bg)
+            self._cont_on = False
+            self._last_save_end = max(self._last_save_end, now)
+            self.notify.emit("Glimpsy", "Непрерывная запись выключена — дальше, как обычно, кусками.")
+        self._emit_status(now, force=True)
+
+    def _flush_run_tail(self, run: BufferRun, end: float) -> None:
+        if run.available_from is None:
+            return
+        t0 = max(self._last_save_end, run.available_from, self._cont_from)
+        if end - t0 > 1.0:
+            self._save_from(run, t0, end, self._marked(t0, end))
+
     def _save_continuous(self, now: float) -> None:
         """«Всё подряд»: как только в буфере набрался следующий кусок — сохранить его, без пропусков."""
         run = self.run
-        if run is None or run.available_from is None:
+        if run is None or run.available_from is None or not self._all():
             return
-        chunk = self.plan.candidate_s
-        t0 = max(self._last_save_end, run.available_from)
+        chunk = RECORD_ALL_CHUNK_S
+        t0 = max(self._last_save_end, run.available_from, self._cont_from)
         if now - t0 >= chunk + 1.0:
             self._save(t0, t0 + chunk, priority=self._marked(t0, t0 + chunk))
 
@@ -991,7 +1036,7 @@ class RecorderEngine(QObject):
         except OSError:
             log.exception("Не удалось сохранить фрагмент")
             got = None
-        min_len = 0.8 if voice else self.plan.clip_min_s * self.plan.speed
+        min_len = 0.8 if voice else 1.0 if self._all() else self.plan.clip_min_s * self.plan.speed
         if got is None or (got[1] - got[0]) < min_len * 0.8:
             path.unlink(missing_ok=True)
             if priority and not voice:
@@ -1019,7 +1064,7 @@ class RecorderEngine(QObject):
             width=run.capture.width, height=run.capture.height,
             score=act.score(max(t0, ws), min(t1, we)), priority=priority,
             activity=[round(v, 3) for v in act.per_second(ws, we)], cursor=cursor,
-            clicks=clicks, crop=crop or [], own_cursor=run.own_cursor,
+            clicks=clicks, crop=crop or [], own_cursor=run.own_cursor, whole=self._all(),
             audio=audio_name, voice_id=voice[0] if voice else 0, voice_part=voice[1] if voice else 0,
         )
         cand.app, cand.title = dominant_window(self._win_log, ws, we)
@@ -1046,7 +1091,7 @@ class RecorderEngine(QObject):
             return
         if self.activity:
             self.activity.last_input_time = t   # пользователь точно активен
-        if self.plan.record_all:
+        if self._all():
             # всё и так записывается — просто помечаем кусок звёздочкой
             self._marks.append(t)
             self.stats["important"] += 1
@@ -1085,7 +1130,7 @@ class RecorderEngine(QObject):
     def _voice_tick(self, now: float) -> None:
         """Голосовой режим: пока вы говорите — запись идёт целиком, кусками по 15 с."""
         a = self.audio
-        if a is None or not self.s.voice_mode or a.mic_ring is None or self.run is None or self.plan.record_all:
+        if a is None or not self.s.voice_mode or a.mic_ring is None or self.run is None or self._all():
             return                  # «всё подряд»: речь и так в записи, со звуком
         st = a.voice.speaking()
         if st.speaking and self._voice is None:
@@ -1188,7 +1233,7 @@ class RecorderEngine(QObject):
             # у каждого потока — свой ролик и свой проект в редакторе
             name = self._stream_names.get(sid, f"Поток {sid}") if sid else ("весь экран" if len(pools) > 1 else "")
             project_dir = None
-            if self.s.keep_project_for_editor or self.plan.record_all:
+            if self.s.keep_project_for_editor or self.plan.record_all or not self.s.auto_video:
                 project_dir = paths.data_dir() / "projects" / (base + (f"_{sid}" if sid else ""))
             if n == 0 and self.continue_into is not None and (self.continue_into / "project.json").exists():
                 project_dir = self.continue_into          # продолжение: в тот же проект, в конец ленты
@@ -1275,6 +1320,7 @@ class RecorderEngine(QObject):
             "capture": self.services.capture.name,
             "error": self._error if self.state == State.ERROR else "",
             "voice": voice,
+            "continuous": self._all(),
             "parallel": [self._stream_names.get(s, str(s)) for s in sorted(self._bg)],
         }
         if st != self._last_status or force:

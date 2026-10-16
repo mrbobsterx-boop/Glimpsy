@@ -80,7 +80,7 @@ def test_assembly_draws_cursor_but_project_is_clean(tmp_path, qt_app):
     c = Candidate(id=1, file="c.ts", wall_start=now, wall_end=now + 4, want_start=now, want_end=now + 4, monitor=1,
                   width=640, height=360, score=0.5, activity=[0.5] * 4, own_cursor=True,
                   cursor=[[t / 10, 0.5, 0.5] for t in range(41)])
-    s = Settings(output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
+    s = Settings(auto_video=True, output_dir=str(tmp_path / "out"), target_length_s=3, clip_min_s=3, clip_max_s=3, pace="calm",
                  output_width=640, output_height=360, fx_zoom=False, fx_clicks=False).validate()
     out = Assembler(FFMPEG, software_encoder(), s, make_plan(s)).run(sess, [c], now, project_dir=tmp_path / "p")
     assert _probe_frame(out, 1.0, 640, 360).max() > 200                 # в ролике курсор есть
