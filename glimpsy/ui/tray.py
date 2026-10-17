@@ -74,7 +74,7 @@ class TrayController(QObject):
         self.streams_menu.aboutToShow.connect(self._fill_streams_menu)
         self.monitor_menu = self.menu.addMenu(ic("monitor", size=16), "Монитор")
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
-        self.menu.addAction(ic("focus", size=16), "Записывать часть экрана…", self.pick_region)
+        self.a_region = self.menu.addAction(ic("focus", size=16), "Записывать часть экрана…", self.pick_region)
         self.a_whole = self.menu.addAction(ic("maximize-2", size=16), "Записывать весь экран",
                                            lambda: self.set_region(None))
         self.a_whole.setVisible(False)
@@ -152,6 +152,7 @@ class TrayController(QObject):
         self._sync_mode(bool(st.get("continuous")))
         if hasattr(self, "a_whole"):
             self.a_whole.setVisible(bool(st.get("region")))
+            self.a_region.setText("Изменить область записи…" if st.get("region") else "Записывать часть экрана…")
         if getattr(self, "status_window", None) is not None:
             self.status_window.update_status(st)
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
@@ -255,7 +256,7 @@ class TrayController(QObject):
         if not mons:
             self.show_message("Glimpsy", "Не удалось узнать мониторы — область выбрать нельзя.", force=True)
             return
-        picker = self._region_picker = RegionPicker(mons, self)
+        picker = self._region_picker = RegionPicker(mons, self, current=self.engine.region)
         picker.on_too_small = lambda: self.show_message(
             "Glimpsy", "Слишком маленькая область — выделите побольше (или Esc для отмены).", force=True)
 
@@ -266,6 +267,7 @@ class TrayController(QObject):
 
         picker.picked.connect(done)
         picker.cancelled.connect(done)
+        picker.whole.connect(lambda: (done(), self.set_region(None)))
         picker.start()
 
     def set_region(self, region) -> None:

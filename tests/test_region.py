@@ -99,7 +99,7 @@ def test_status_window_region_buttons_and_cropped_preview(qt_app):
     assert not win.b_whole.isVisibleTo(win)
     win.update_status({"state": State.RECORDING, "monitor": "1", "region": "960×540"})
     assert "область 960×540" in win.what.text() and win.b_whole.isVisibleTo(win)
-    assert "Другая" in win.b_region.text() and not win.preview.pixmap().isNull()
+    assert "Изменить" in win.b_region.text() and not win.preview.pixmap().isNull()
     win.b_region.click()
     win.b_whole.click()
     assert calls == ["region", "whole"]
@@ -134,4 +134,42 @@ def test_picker_drag_on_screen(qt_app):
     QTest.mousePress(shade, Qt.MouseButton.LeftButton, pos=QPoint(W // 4, H // 4))
     QTest.mouseMove(shade, QPoint(W * 3 // 4, H * 3 // 4))
     QTest.mouseRelease(shade, Qt.MouseButton.LeftButton, pos=QPoint(W * 3 // 4, H * 3 // 4))
-    assert len(got) == 1 and abs(got[0][2] - 0.5) < 0.01 and not picker.shades
+    assert not got and shade.bar.isVisible()                 # рамка нарисована, ждёт подтверждения
+    # передвинули рамку за середину на 40 px вправо, потом потянули правый край на 20 px влево
+    c = shade.sel.center()
+    QTest.mousePress(shade, Qt.MouseButton.LeftButton, pos=c)
+    QTest.mouseMove(shade, c + QPoint(40, 0))
+    QTest.mouseRelease(shade, Qt.MouseButton.LeftButton, pos=c + QPoint(40, 0))
+    right = QPoint(shade.sel.x() + shade.sel.width(), shade.sel.center().y())
+    QTest.mousePress(shade, Qt.MouseButton.LeftButton, pos=right)
+    QTest.mouseMove(shade, right - QPoint(20, 0))
+    QTest.mouseRelease(shade, Qt.MouseButton.LeftButton, pos=right - QPoint(20, 0))
+    QTest.keyClick(shade, Qt.Key.Key_Down)                    # стрелка — на 10 px вниз
+    assert (shade.sel.x(), shade.sel.y(), shade.sel.width()) == (W // 4 + 40, H // 4 + 10, W // 2 - 20)
+    shade.ok.click()
+    assert len(got) == 1 and abs(got[0][0] - (W // 4 + 40) / W) < 0.002 and not picker.shades
+
+
+def test_picker_opens_with_current_region(qt_app):
+    from glimpsy.ui.region_picker import RegionPicker
+
+    picker = RegionPicker([Monitor(1, 0, 0, 1920, 1080)], current=(1, [0.25, 0.25, 0.5, 0.5]))
+    picker.start()
+    shade = picker.shades[0]
+    assert abs(shade.sel.width() - shade.width() / 2) <= 1 and shade.bar.isVisible()
+    whole = []
+    picker.whole.connect(lambda: whole.append(1))
+    shade.set_selection(shade.rect())                         # растянули на весь экран
+    shade.confirm()
+    assert whole and not picker.shades
+
+
+def test_grip_and_drag_rect():
+    from glimpsy.ui.region_picker import MIN_PX, drag_rect, grip_at
+
+    r = (100, 100, 200, 100)
+    assert grip_at(r, 100, 100) == "tl" and grip_at(r, 300, 150) == "r" and grip_at(r, 200, 200) == "b"
+    assert grip_at(r, 200, 150) == "move" and grip_at(r, 10, 10) == ""
+    assert drag_rect(r, "move", 5000, -500, (1000, 800)) == (800, 0, 200, 100)     # не уезжает за экран
+    assert drag_rect(r, "l", 500, 0, (1000, 800)) == (300 - MIN_PX, 100, MIN_PX, 100)
+    assert drag_rect(r, "br", 50, 20, (1000, 800)) == (100, 100, 250, 120)

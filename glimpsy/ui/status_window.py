@@ -194,7 +194,7 @@ class StatusWindow(QWidget):
         self.b_pause.setIcon(theme.icon("play" if state == State.PAUSED else "pause", size=16))
         self.b_cont.setChecked(bool(st.get("continuous")))
         self.b_whole.setVisible(bool(st.get("region")))
-        self.b_region.setText("  Другая область…" if st.get("region") else "  Выбрать область…")
+        self.b_region.setText("  Изменить область…" if st.get("region") else "  Выбрать область…")
         self._tick()
 
     def _tick(self) -> None:
