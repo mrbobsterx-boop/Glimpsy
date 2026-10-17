@@ -1310,7 +1310,8 @@ class RecorderEngine(QObject):
         pool = self.pool
         st = {
             "state": self.state,
-            "label": STATE_LABELS.get(self.state, self.state),
+            "label": "Сохраняю фрагменты…" if self.state == State.ASSEMBLING and not self.s.auto_video
+            else STATE_LABELS.get(self.state, self.state),
             "monitor": self.run.monitor.label if self.run else "",
             "stream": self._stream_names.get(self._stream, "") if self._stream else "",
             "candidates": pool.count if pool else 0,

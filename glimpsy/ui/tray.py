@@ -177,18 +177,21 @@ class TrayController(QObject):
             self.show_message("Пока шла запись", "\n".join(f"• {t}: {x}" for t, x in items), force=True)
 
     def _on_progress(self, frac: float, text: str) -> None:
-        tip = f"Glimpsy — собираю ролик: {int(frac * 100)}% ({text})"
+        # без автосборки ролика — только сохраняются фрагменты для редактора
+        auto = bool(getattr(getattr(self, "s", None), "auto_video", False))
+        doing = "собираю ролик" if auto else "сохраняю фрагменты"
+        tip = f"Glimpsy — {doing}: {int(frac * 100)}% ({text})"
         if self.tray:
             self.tray.setToolTip(tip)
         if self.window:
             self._win_status.setText(tip)
-        self.a_status.setText(f"Собираю ролик: {text} — {int(frac * 100)} %")
+        self.a_status.setText(f"{doing[:1].upper() + doing[1:]}: {text} — {int(frac * 100)} %")
         if frac >= 1.0 or self._quiet():
             return
         if getattr(self, "_progress", None) is None:     # окошко с ходом сборки — в углу экрана
             from glimpsy.ui.toast import ProgressPopup
 
-            self._progress = ProgressPopup("🎬 Собираю ролик")
+            self._progress = ProgressPopup("🎬 Собираю ролик" if auto else "💾 Сохраняю фрагменты")
         self._progress.set_progress(frac, text)
 
     def _close_progress(self) -> None:
