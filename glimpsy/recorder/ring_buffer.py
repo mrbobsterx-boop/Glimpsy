@@ -33,6 +33,8 @@ from glimpsy.recorder.encoder import Encoder
 log = logging.getLogger(__name__)
 
 THUMB_W, THUMB_H, THUMB_FPS = 64, 36, 2
+PREVIEW_SCALE = 3                      # кадр для окна состояния — в 3 раза больше (192×108), цветной
+PREVIEW_SIZE = (THUMB_W * PREVIEW_SCALE, THUMB_H * PREVIEW_SCALE)
 
 
 @dataclass
@@ -62,6 +64,7 @@ class BufferRun:
         self.dir = run_dir
         self.max_height = max_height
         self.on_frame_diff = on_frame_diff
+        self.latest_preview: bytes | None = None   # последний маленький кадр (RGB, PREVIEW_SIZE)
         self.own_cursor = False          # снято без курсора (его нарисует Glimpsy)
         self.segments: collections.deque[Segment] = collections.deque()
         self.started_at = 0.0
@@ -87,7 +90,7 @@ class BufferRun:
         graph = (
             f"[0:v]{cap.pre_filter}{masks}fps={self.fps},split=2[m][t];"
             f"[m]{scale},{self.encoder.filter_suffix}[enc];"
-            f"[t]fps={THUMB_FPS},scale={THUMB_W}:{THUMB_H},format=gray[th]"
+            f"[t]fps={THUMB_FPS},scale={THUMB_W * PREVIEW_SCALE}:{THUMB_H * PREVIEW_SCALE},format=rgb24[th]"
         )
         return [
             self.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
@@ -99,7 +102,7 @@ class BufferRun:
             "-f", "segment", "-segment_time", "1", "-segment_format", "mpegts",
             "-segment_list", str(self.dir / "list.csv"), "-segment_list_type", "csv",
             str(self.dir / "s_%06d.ts"),
-            "-map", "[th]", "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
+            "-map", "[th]", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
         ]
 
     def start(self) -> None:
@@ -162,7 +165,8 @@ class BufferRun:
     # ---------- чтение данных от FFmpeg ----------
 
     def _read_thumbs(self) -> None:
-        size = THUMB_W * THUMB_H
+        k = PREVIEW_SCALE
+        size = THUMB_W * THUMB_H * k * k * 3
         prev = None
         stdout = self._proc.stdout if self._proc else None
         if stdout is None:
@@ -171,7 +175,11 @@ class BufferRun:
             data = stdout.read(size)
             if not data or len(data) < size:
                 break
-            frame = np.frombuffer(data, dtype=np.uint8).astype(np.int16)
+            self.latest_preview = data             # для окна состояния: что сейчас видит запись
+            rgb = np.frombuffer(data, dtype=np.uint8).reshape(THUMB_H * k, THUMB_W * k, 3)
+            # оценка активности — как раньше, по серому кадру 64×36 (среднее по блокам k×k)
+            gray = rgb.mean(axis=2).reshape(THUMB_H, k, THUMB_W, k).mean(axis=(1, 3))
+            frame = gray.astype(np.int16).ravel()
             if prev is not None and self.on_frame_diff:
                 diff = float(np.abs(frame - prev).mean())   # 0 — ничего не изменилось, 255 — всё
                 try:

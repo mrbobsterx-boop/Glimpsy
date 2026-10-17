@@ -963,6 +963,13 @@ class RecorderEngine(QObject):
         if self._rng.random() < p:
             self._save(now - L, now, priority=False)
 
+    def preview(self) -> bytes | None:
+        """Что сейчас видит главная запись: маленький кадр RGB (ring_buffer.PREVIEW_SIZE) или None."""
+        run = self.run
+        if run is None or self.state not in (State.RECORDING, State.IDLE):
+            return None
+        return run.latest_preview
+
     def _all(self) -> bool:
         """Пишется всё подряд: режим «всё подряд» или включённая горячей клавишей непрерывная запись."""
         return self.plan.record_all or self._cont_on

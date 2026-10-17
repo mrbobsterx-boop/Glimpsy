@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QApplication, QLabel, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
@@ -54,6 +54,8 @@ class TrayController(QObject):
         self.a_status.setEnabled(False)
         self.a_counts = self.menu.addAction("")
         self.a_counts.setEnabled(False)
+        self.menu.addAction(ic("monitor", size=16), "Окно состояния записи…", self.open_status_window)
+        self.status_window = None
         self.menu.addSeparator()
         self.a_pause = self.menu.addAction(ic("pause", size=16), "Пауза", self.engine.toggle_pause)
         self.a_important = self.menu.addAction(ic("star", "#F5C518", 16), "Отметить важный момент",
@@ -102,6 +104,8 @@ class TrayController(QObject):
         engine.assembly_done.connect(self._on_done)
         engine.assembly_failed.connect(self._on_failed)
         self._on_status(self.status)
+        if QSettings("Glimpsy", "status").value("open", False, type=bool):
+            QTimer.singleShot(0, self.open_status_window)     # было открыто в прошлый раз — открыть снова
         self.bind_hotkeys()
         from glimpsy.ui.update import UpdateManager
 
@@ -137,6 +141,8 @@ class TrayController(QObject):
             label = "⏺ Непрерывная запись · " + label
         self.a_status.setText(label)
         self._sync_mode(bool(st.get("continuous")))
+        if getattr(self, "status_window", None) is not None:
+            self.status_window.update_status(st)
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
         self.a_counts.setText(f"Фрагментов: {n} (нужно ~{need})" + (f", важных: {imp}" if imp else ""))
         active = state not in (State.STOPPED, State.ASSEMBLING)
@@ -212,6 +218,18 @@ class TrayController(QObject):
         self.show_message("Запись продолжается", "Когда закончите, новые фрагменты встанут в конец ленты "
                           "этого проекта.")
         return True
+
+    def open_status_window(self) -> None:
+        """Окно «Состояние записи» — можно держать на втором мониторе и видеть, пишется ли сейчас."""
+        from glimpsy.ui.status_window import StatusWindow
+
+        if self.status_window is None:
+            self.status_window = StatusWindow(self.engine, {
+                "start": self.engine.start_session, "pause": self.engine.toggle_pause,
+                "continuous": self.engine.toggle_continuous, "important": self.engine.mark_important,
+                "finish": self._finish, "editor": self.open_editor})
+            self.status_window.update_status(self.status)
+        self.status_window.open()
 
     def _sync_mode(self, continuous: bool | None = None) -> None:
         """Пункты меню: идёт ли непрерывная запись; собирается ли ролик сразу или только в редакторе."""
@@ -416,7 +434,8 @@ class TrayController(QObject):
             self.open_settings()
 
     def _finish(self) -> None:
-        ans = QMessageBox.question(None, "Glimpsy", "Завершить сессию и собрать ролик?")
+        ans = QMessageBox.question(None, "Glimpsy", "Завершить сессию и собрать ролик?" if self.s.auto_video else
+                                   "Завершить запись? Фрагменты откроются в редакторе.")
         if ans == QMessageBox.StandardButton.Yes:
             self.engine.finish()
 
@@ -695,7 +714,8 @@ class TrayController(QObject):
         v.addWidget(self._win_status)
         for text, fn in (("⏸ Пауза / продолжить", self.engine.toggle_pause),
                          ("⭐ Важный момент", self.engine.mark_important),
-                         ("🎬 Собрать ролик", self._finish),
+                         ("■ Завершить запись", self._finish),
+                         ("🖥 Окно состояния записи", self.open_status_window),
                          ("▶ Начать запись", self.engine.start_session),
                          ("🎞 Редактор роликов…", self.open_editor),
                          ("🧹 Очистить кэш…", self.clear_cache),
