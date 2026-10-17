@@ -120,6 +120,9 @@ class RecorderEngine(QObject):
         self.streams: list[StreamSpec] = []      # пусто — весь экран; иначе только эти окна
         self._streams_lock = threading.Lock()
         self._masks: list[tuple[int, int, int, int]] = []   # что закрашивать в записи (суфлёр), в координатах рабочего стола
+        # область экрана: (номер монитора, [x, y, ширина, высота] в долях) — пишется только она.
+        # Выбирается до записи и живёт между сессиями, поэтому — не в _reset_session_fields
+        self.region: tuple[int, list[float]] | None = None
         self._reset_session_fields()
 
     def _reset_session_fields(self) -> None:
@@ -144,6 +147,7 @@ class RecorderEngine(QObject):
         self._active_seconds = 0.0
         self._avg_score = 0.0
         self._last_save_end = 0.0
+        self._saved_at = 0.0                      # когда последний фрагмент лёг на диск (для окна состояния)
         self._fail_count = 0
         self._retry_after = 0.0
         self._last_status: dict = {}
@@ -176,8 +180,6 @@ class RecorderEngine(QObject):
         self._bg_retry: dict[int, float] = {}
         self._screen_active = False               # сейчас главный — поток-экран под курсором
         self._screen_wait = False                 # курсор на экране, который не записывается
-        # область экрана: (номер монитора, [x, y, ширина, высота] в долях) — пишется только она
-        self.region: tuple[int, list[float]] | None = None
 
     # ======================= публичные команды (из интерфейса) =======================
 
@@ -322,7 +324,7 @@ class RecorderEngine(QObject):
                 if not self.encoder.hw:
                     self.notify.emit("Glimpsy", "Аппаратный видеокодек не найден — используется программный. "
                                                   "Запись работает, но нагрузка на процессор будет выше.")
-            self._set_state(State.RECORDING)
+            # «Идёт запись» — только когда кадры с экрана действительно пошли (см. _tick)
             while True:
                 try:
                     cmd = self._cmds.get(timeout=TICK)
@@ -379,7 +381,7 @@ class RecorderEngine(QObject):
             else:
                 if self.activity:
                     self.activity.last_input_time = self.activity.last_screen_change_time = time.time()
-                self._set_state(State.RECORDING)
+                self._set_state(State.STARTING)   # запись снова пойдёт, когда придут первые кадры
         elif kind == "important":
             self._mark_important(cmd[1])
         elif kind == "continuous":
@@ -535,7 +537,13 @@ class RecorderEngine(QObject):
         if self._fail_count and now - self.run.started_at > 10:
             self._fail_count = 0
 
-        self._set_state(State.IDLE if idle else State.RECORDING)
+        # кадры ещё не пошли (только начали или сняли с паузы) — честно «запуск», а не «идёт запись»;
+        # при переходе на другой монитор надпись не мигает
+        flowing = bool(self.run.segments) or self.run.latest_preview is not None
+        if flowing or self.state in (State.RECORDING, State.IDLE):
+            self._set_state(State.IDLE if idle else State.RECORDING)
+        else:
+            self._set_state(State.STARTING)
 
         # --- 6. голос и отложенные сохранения («важные моменты», концы фраз) ---
         self._voice_tick(now)
@@ -1116,6 +1124,7 @@ class RecorderEngine(QObject):
         removed = pool.prune(self.plan.pool_size)
         pool.save()
         self._last_save_end = max(self._last_save_end, we)
+        self._saved_at = time.time()
         log.info("Кандидат #%s: %.1f с, оценка %.2f%s%s%s%s (удалено %s)", cid, we - ws, cand.score,
                  ", ВАЖНЫЙ" if priority and not voice else "", f", РЕЧЬ {voice[0]}.{voice[1]}" if voice else "",
                  ", со звуком" if audio_name else "",
@@ -1368,6 +1377,8 @@ class RecorderEngine(QObject):
             "continuous": self._all(),
             "parallel": [self._stream_names.get(s, str(s)) for s in sorted(self._bg)],
             "region": self.region_label(),
+            "saved_at": self._saved_at,
+            "buffering": self.run is not None and self.run.alive,
         }
         if st != self._last_status or force:
             self._last_status = st

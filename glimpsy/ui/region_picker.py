@@ -72,13 +72,18 @@ def rect_fraction(r: tuple[int, int, int, int], screen: tuple[int, int, int, int
 
 
 def match_monitor(screens: list[tuple[int, int, int, int]], monitors: list[Monitor], i: int) -> Monitor | None:
-    """Какой монитор записи соответствует экрану Qt номер i.
+    """Какой монитор записи соответствует экрану Qt номер i (screens — левый верхний угол как у системы,
+    размер в настоящих пикселях).
 
-    У Qt и у захвата координаты могут отличаться масштабом, но порядок мониторов слева направо
-    (и сверху вниз) один и тот же. Если мониторов разное число — ближайший по середине.
+    Qt при масштабе экрана уменьшает размер, но левый верхний угол оставляет системным — по нему
+    монитор находится точно. Не нашёлся — по порядку слева направо (он у Qt и у захвата один),
+    а если мониторов разное число — ближайший по середине.
     """
     if not monitors or not 0 <= i < len(screens):
         return None
+    exact = [m for m in monitors if (m.x, m.y) == (screens[i][0], screens[i][1])]
+    if len(exact) == 1:
+        return exact[0]
     if len(screens) == len(monitors):
         order = sorted(range(len(screens)), key=lambda k: (screens[k][0], screens[k][1]))
         mons = sorted(monitors, key=lambda m: (m.x, m.y))
@@ -232,6 +237,9 @@ class _Shade(QWidget):
             self.set_selection(QRect(x, y, w, h))
 
     def confirm(self) -> None:
+        # система могла поставить затемнение не на тот экран, куда просили, — берём тот, где оно на самом деле
+        actual = self.screen()
+        index = self.picker.screens.index(actual) if actual in self.picker.screens else self.index
         frac = rect_fraction(self._r(), (0, 0, self.width(), self.height()))
         if frac is None:
             if self.sel.width() >= MIN_PX and self.sel.height() >= MIN_PX:
@@ -239,7 +247,7 @@ class _Shade(QWidget):
             elif self.picker.on_too_small:
                 self.picker.on_too_small()
             return
-        self.picker.choose(self.index, frac)
+        self.picker.choose(index, frac)
 
 
 class RegionPicker(QObject):
@@ -265,7 +273,7 @@ class RegionPicker(QObject):
         out = []
         for sc in self.screens:
             g, k = sc.geometry(), sc.devicePixelRatio() or 1.0
-            out.append((round(g.x() * k), round(g.y() * k), round(g.width() * k), round(g.height() * k)))
+            out.append((g.x(), g.y(), round(g.width() * k), round(g.height() * k)))
         return out
 
     def start(self) -> None:

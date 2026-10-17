@@ -35,8 +35,11 @@ HEADLINES = {
 
 def headline(st: dict) -> tuple[str, str]:
     state = st.get("state", State.STOPPED)
-    if st.get("continuous") and state == State.RECORDING:
+    if st.get("continuous") and state in (State.RECORDING, State.IDLE) and st.get("buffering", True):
         return "● НЕПРЕРЫВНАЯ ЗАПИСЬ", "#E5484D"
+    if state == State.IDLE and st.get("buffering"):
+        # мышь и клавиатуру система не показывает (Wayland) — запись не останавливается, просто тихо
+        return "● ИДЁТ ЗАПИСЬ — на экране ничего не меняется", "#E5484D"
     return HEADLINES.get(state, ("", "#8B8D98"))
 
 
@@ -207,8 +210,14 @@ class StatusWindow(QWidget):
         n = st.get("candidates", 0)
         if n:
             parts.append(f"фрагментов: {n}")
+        if st.get("saved_at") and state not in (State.STOPPED, State.ASSEMBLING):
+            ago = time.time() - st["saved_at"]
+            parts.append("последний сохранён только что" if ago < 3 else f"последний сохранён {elapsed_text(ago)} назад")
         if st.get("important"):
             parts.append(f"важных: {st['important']}")
+        if state in (State.RECORDING, State.IDLE) and not st.get("continuous"):
+            parts.append("режим «кусками»: сохраняются только отдельные моменты — "
+                         "чтобы писать всё, включите «Непрерывная»")
         if st.get("voice"):
             parts.append("🔴 пишется голос")
         if st.get("parallel"):

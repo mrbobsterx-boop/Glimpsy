@@ -173,3 +173,29 @@ def test_grip_and_drag_rect():
     assert drag_rect(r, "move", 5000, -500, (1000, 800)) == (800, 0, 200, 100)     # не уезжает за экран
     assert drag_rect(r, "l", 500, 0, (1000, 800)) == (300 - MIN_PX, 100, MIN_PX, 100)
     assert drag_rect(r, "br", 50, 20, (1000, 800)) == (100, 100, 250, 120)
+
+
+def test_region_survives_session_start():
+    """Область выбирают до записи — начало записи не должно её сбрасывать."""
+    e = _engine()
+    e.set_region((1, [0.5, 0.5, 0.5, 0.5]))
+    e._reset_session_fields()
+    assert e.region == (1, [0.5, 0.5, 0.5, 0.5])
+
+
+def test_monitor_match_by_corner_with_scaling():
+    """Масштаб 150%: Qt уменьшает размер второго экрана, но угол оставляет системным."""
+    from glimpsy.ui.region_picker import match_monitor
+
+    mons = [Monitor(1, 0, 0, 1280, 800), Monitor(2, 1280, 0, 3840, 2160)]
+    screens = [(1280, 0, 3840, 2160), (0, 0, 1280, 800)]
+    assert match_monitor(screens, mons, 0).index == 2 and match_monitor(screens, mons, 1).index == 1
+
+
+def test_headline_is_honest():
+    from glimpsy.ui.status_window import headline
+
+    assert "ИДЁТ ЗАПИСЬ" in headline({"state": State.IDLE, "buffering": True})[0]
+    assert "ПАУЗА" in headline({"state": State.IDLE, "buffering": False})[0]
+    assert "ПАУЗА" in headline({"state": State.PAUSED, "continuous": True})[0]
+    assert "ЗАПУСК" in headline({"state": State.STARTING, "continuous": True})[0]

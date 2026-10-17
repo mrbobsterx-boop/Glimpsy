@@ -140,6 +140,8 @@ class TrayController(QObject):
         self.status = st
         state = st.get("state", State.STOPPED)
         label = st.get("label", "")
+        if state == State.IDLE and st.get("buffering"):
+            label = "Идёт запись (на экране ничего не меняется)"
         if st.get("stream") and state == State.RECORDING:
             label += f" — «{st['stream']}»"
         elif st.get("region") and state == State.RECORDING:
