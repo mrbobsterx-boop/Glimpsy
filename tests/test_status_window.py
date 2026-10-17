@@ -57,6 +57,7 @@ def test_preview_frame_from_buffer_run():
     diffs = []
     run.on_frame_diff = lambda d, t: diffs.append(d)
     run.latest_preview = None
+    run.diff_crop = None
     run._proc = SimpleNamespace(stdout=io.BytesIO(b"".join(frames)))
     run._read_thumbs()
     assert run.latest_preview == frames[-1]

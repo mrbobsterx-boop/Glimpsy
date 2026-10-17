@@ -46,7 +46,7 @@ def elapsed_text(seconds: float) -> str:
 
 
 class StatusWindow(QWidget):
-    """actions — что делают кнопки: start, pause, continuous, important, finish, editor."""
+    """actions — что делают кнопки: start, pause, continuous, important, finish, editor, region, whole."""
 
     def __init__(self, engine, actions: dict[str, Callable[[], None]]) -> None:
         super().__init__(None, Qt.WindowType.Window)
@@ -79,6 +79,12 @@ class StatusWindow(QWidget):
         self.b_star.clicked.connect(lambda _=False: actions["important"]())
         self.b_finish = QPushButton(theme.icon("square", size=16), "  Завершить запись")
         self.b_finish.clicked.connect(lambda _=False: actions["finish"]())
+        self.b_region = QPushButton(theme.icon("focus", size=16), "  Выбрать область…")
+        self.b_region.setToolTip("Выделите мышью часть экрана — записываться будет только она.")
+        self.b_region.clicked.connect(lambda _=False: actions["region"]())
+        self.b_whole = theme.mark(QPushButton(theme.icon("maximize-2", size=16), "  Весь экран"), "ghost")
+        self.b_whole.setToolTip("Снова записывать весь экран, а не выбранную область.")
+        self.b_whole.clicked.connect(lambda _=False: actions["whole"]())
         self.b_editor = theme.mark(QPushButton(theme.icon("film", size=16), "  Редактор…"), "ghost")
         self.b_editor.clicked.connect(lambda _=False: actions["editor"]())
         self.on_top = QCheckBox("Поверх всех окон")
@@ -92,6 +98,9 @@ class StatusWindow(QWidget):
         row2 = QHBoxLayout()
         for b in (self.b_star, self.b_finish):
             row2.addWidget(b)
+        row3 = QHBoxLayout()
+        row3.addWidget(self.b_region, 1)
+        row3.addWidget(self.b_whole)
         bottom = QHBoxLayout()
         bottom.addWidget(self.on_top)
         bottom.addStretch(1)
@@ -106,6 +115,7 @@ class StatusWindow(QWidget):
         lay.addWidget(self.info)
         lay.addLayout(row1)
         lay.addLayout(row2)
+        lay.addLayout(row3)
         lay.addLayout(bottom)
 
         geo = st.value("geometry", None)
@@ -165,6 +175,9 @@ class StatusWindow(QWidget):
         self.big.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {color};")
         if st.get("stream"):
             what = f"Пишется окно «{st['stream']}»"
+        elif st.get("region"):
+            what = (f"Пишется только область {st['region']}" if state in (State.RECORDING, State.IDLE)
+                    else f"Будет писаться только область {st['region']}")
         elif st.get("monitor") and state in (State.RECORDING, State.IDLE):
             what = f"Пишется монитор: {st['monitor']}"
         elif state == State.STOPPED:
@@ -180,6 +193,8 @@ class StatusWindow(QWidget):
         self.b_pause.setText("  Продолжить" if state == State.PAUSED else "  Пауза")
         self.b_pause.setIcon(theme.icon("play" if state == State.PAUSED else "pause", size=16))
         self.b_cont.setChecked(bool(st.get("continuous")))
+        self.b_whole.setVisible(bool(st.get("region")))
+        self.b_region.setText("  Другая область…" if st.get("region") else "  Выбрать область…")
         self._tick()
 
     def _tick(self) -> None:
@@ -205,6 +220,10 @@ class StatusWindow(QWidget):
         if data:
             w, h = PREVIEW_SIZE
             img = QImage(data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+            crop = self.engine.preview_crop() if hasattr(self.engine, "preview_crop") else None
+            if crop:                                 # выбрана область — показываем только её
+                x, y = int(crop[0] * w), int(crop[1] * h)
+                img = img.copy(x, y, max(1, round(crop[2] * w)), max(1, round(crop[3] * h)))
             self.preview.setPixmap(QPixmap.fromImage(img).scaled(
                 self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             self.preview_hint.setVisible(True)

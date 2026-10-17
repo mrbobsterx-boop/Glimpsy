@@ -65,6 +65,7 @@ class BufferRun:
         self.max_height = max_height
         self.on_frame_diff = on_frame_diff
         self.latest_preview: bytes | None = None   # последний маленький кадр (RGB, PREVIEW_SIZE)
+        self.diff_crop: list[float] | None = None  # выбрана область: активность — только в ней
         self.own_cursor = False          # снято без курсора (его нарисует Glimpsy)
         self.segments: collections.deque[Segment] = collections.deque()
         self.started_at = 0.0
@@ -179,8 +180,14 @@ class BufferRun:
             rgb = np.frombuffer(data, dtype=np.uint8).reshape(THUMB_H * k, THUMB_W * k, 3)
             # оценка активности — как раньше, по серому кадру 64×36 (среднее по блокам k×k)
             gray = rgb.mean(axis=2).reshape(THUMB_H, k, THUMB_W, k).mean(axis=(1, 3))
+            crop = self.diff_crop
+            if crop:
+                x0, y0 = int(crop[0] * THUMB_W), int(crop[1] * THUMB_H)
+                x1 = max(x0 + 1, round((crop[0] + crop[2]) * THUMB_W))
+                y1 = max(y0 + 1, round((crop[1] + crop[3]) * THUMB_H))
+                gray = gray[y0:y1, x0:x1]
             frame = gray.astype(np.int16).ravel()
-            if prev is not None and self.on_frame_diff:
+            if prev is not None and prev.shape == frame.shape and self.on_frame_diff:
                 diff = float(np.abs(frame - prev).mean())   # 0 — ничего не изменилось, 255 — всё
                 try:
                     self.on_frame_diff(diff, time.time())

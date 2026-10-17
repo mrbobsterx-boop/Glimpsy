@@ -176,6 +176,8 @@ class RecorderEngine(QObject):
         self._bg_retry: dict[int, float] = {}
         self._screen_active = False               # сейчас главный — поток-экран под курсором
         self._screen_wait = False                 # курсор на экране, который не записывается
+        # область экрана: (номер монитора, [x, y, ширина, высота] в долях) — пишется только она
+        self.region: tuple[int, list[float]] | None = None
 
     # ======================= публичные команды (из интерфейса) =======================
 
@@ -251,6 +253,37 @@ class RecorderEngine(QObject):
             self._cmds.put(("settings", s))
         else:
             self.s, self.plan = s, make_plan(s)
+
+    def set_region(self, region: tuple[int, list[float]] | None) -> None:
+        """Записывать только часть экрана: (номер монитора, [x, y, ширина, высота] в долях). None — весь экран."""
+        self.region = (int(region[0]), [float(v) for v in region[1]]) if region else None
+        run = self.run
+        if run is not None:
+            run.diff_crop = self._region_for(run.monitor)
+        log.info("Область записи: %s", self.region_label() or "весь экран")
+        self._emit_status(time.time(), force=True)
+
+    def region_label(self) -> str:
+        """«1280×720, монитор 1» — для окна состояния. Пусто — пишется весь экран."""
+        if not self.region:
+            return ""
+        idx, (_x, _y, w, h) = self.region
+        mon = next((m for m in self._monitors if m.index == idx), None)
+        size = f"{round(mon.width * w)}×{round(mon.height * h)}" if mon else f"{round(w * 100)}%×{round(h * 100)}%"
+        return f"{size}, монитор {idx}" if len(self._monitors) > 1 else size
+
+    def _region_for(self, mon: Monitor | None) -> list[float] | None:
+        """Какую часть этого монитора вырезать (если выбрана область, а не поток-окно)."""
+        if not self.region or mon is None or self.region[0] != mon.index:
+            return None
+        if self._stream and self._stream not in self._screen_ids():
+            return None                          # поток-окно вырезает своё окно сам
+        return list(self.region[1])
+
+    def preview_crop(self) -> list[float] | None:
+        """Какую часть кадра preview() показывать (выбранная область) — доли [x, y, w, h]."""
+        run = self.run
+        return run.diff_crop if run is not None else None
 
     def set_streams(self, specs: list[StreamSpec]) -> None:
         """Какие окна записывать (до трёх, каждое — в свой ролик). Пустой список — весь экран."""
@@ -477,6 +510,8 @@ class RecorderEngine(QObject):
             self._switch_stream(spec.id)
         elif self._stream:        # поток-окно: снимаем тот монитор, где его окно
             target = streams_mod.monitor_for(self._monitors, self._win_rect) or target
+        elif self.region:         # выбрана область — снимаем её монитор, куда бы ни ушёл курсор
+            target = next((m for m in self._monitors if m.index == self.region[0]), target)
         if target is None:
             return
         if self.run and (self.run.monitor != target):
@@ -842,6 +877,7 @@ class RecorderEngine(QObject):
             self._fail(f"FFmpeg не запустился: {e}", time.time())
             return
         run.own_cursor = capture.cursor_hidden
+        run.diff_crop = self._region_for(monitor)
         self.run = run
         log.info("Запись монитора %s%s", monitor.label, " (курсор рисует Glimpsy)" if run.own_cursor else "")
 
@@ -1060,7 +1096,8 @@ class RecorderEngine(QObject):
                 except OSError:
                     log.exception("Не удалось сохранить звук")
                     audio_name = ""
-        crop = self._crop(run.monitor, ws, we) if self._stream and self._stream not in self._screen_ids() else None
+        crop = (self._crop(run.monitor, ws, we) if self._stream and self._stream not in self._screen_ids()
+                else self._region_for(run.monitor))
         cursor = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
                                       for t, m, x, y in act.cursor_between(ws, we) if m == run.monitor.index], crop)
         clicks = streams_mod.to_crop([[round(t - ws, 2), round(x, 4), round(y, 4)]
@@ -1330,6 +1367,7 @@ class RecorderEngine(QObject):
             "voice": voice,
             "continuous": self._all(),
             "parallel": [self._stream_names.get(s, str(s)) for s in sorted(self._bg)],
+            "region": self.region_label(),
         }
         if st != self._last_status or force:
             self._last_status = st

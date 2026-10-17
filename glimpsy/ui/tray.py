@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -73,6 +74,11 @@ class TrayController(QObject):
         self.streams_menu.aboutToShow.connect(self._fill_streams_menu)
         self.monitor_menu = self.menu.addMenu(ic("monitor", size=16), "Монитор")
         self.monitor_menu.aboutToShow.connect(self._fill_monitor_menu)
+        self.menu.addAction(ic("focus", size=16), "Записывать часть экрана…", self.pick_region)
+        self.a_whole = self.menu.addAction(ic("maximize-2", size=16), "Записывать весь экран",
+                                           lambda: self.set_region(None))
+        self.a_whole.setVisible(False)
+        self._region_picker = None
         self.menu.addAction(ic("type", size=16), "Суфлёр…", lambda: self.prompter().toggle_visible())
         self.menu.addAction(ic("film", size=16), "Редактор роликов…", self.open_editor)
         self.menu.addAction(ic("folder-open", size=16), "Папка с роликами",
@@ -103,6 +109,7 @@ class TrayController(QObject):
         engine.assembly_progress.connect(self._on_progress)
         engine.assembly_done.connect(self._on_done)
         engine.assembly_failed.connect(self._on_failed)
+        self._load_region()
         self._on_status(self.status)
         if QSettings("Glimpsy", "status").value("open", False, type=bool):
             QTimer.singleShot(0, self.open_status_window)     # было открыто в прошлый раз — открыть снова
@@ -135,12 +142,16 @@ class TrayController(QObject):
         label = st.get("label", "")
         if st.get("stream") and state == State.RECORDING:
             label += f" — «{st['stream']}»"
+        elif st.get("region") and state == State.RECORDING:
+            label += f" — область {st['region']}"
         elif st.get("monitor") and state == State.RECORDING:
             label += f" — {st['monitor']}"
         if st.get("continuous") and state in (State.RECORDING, State.IDLE):
             label = "⏺ Непрерывная запись · " + label
         self.a_status.setText(label)
         self._sync_mode(bool(st.get("continuous")))
+        if hasattr(self, "a_whole"):
+            self.a_whole.setVisible(bool(st.get("region")))
         if getattr(self, "status_window", None) is not None:
             self.status_window.update_status(st)
         n, need, imp = st.get("candidates", 0), st.get("needed", 0), st.get("important", 0)
@@ -227,9 +238,56 @@ class TrayController(QObject):
             self.status_window = StatusWindow(self.engine, {
                 "start": self.engine.start_session, "pause": self.engine.toggle_pause,
                 "continuous": self.engine.toggle_continuous, "important": self.engine.mark_important,
-                "finish": self._finish, "editor": self.open_editor})
+                "finish": self._finish, "editor": self.open_editor,
+                "region": self.pick_region, "whole": lambda: self.set_region(None)})
             self.status_window.update_status(self.status)
         self.status_window.open()
+
+    # ---------- часть экрана ----------
+
+    def pick_region(self) -> None:
+        """Затемнить экран и дать выделить мышью область, которую записывать."""
+        from glimpsy.ui.region_picker import RegionPicker
+
+        if self._region_picker is not None:
+            return
+        mons = self._monitor_list()
+        if not mons:
+            self.show_message("Glimpsy", "Не удалось узнать мониторы — область выбрать нельзя.", force=True)
+            return
+        picker = self._region_picker = RegionPicker(mons, self)
+        picker.on_too_small = lambda: self.show_message(
+            "Glimpsy", "Слишком маленькая область — выделите побольше (или Esc для отмены).", force=True)
+
+        def done(mon=None, frac=None) -> None:
+            self._region_picker = None
+            if mon is not None:
+                self.set_region((mon.index, frac))
+
+        picker.picked.connect(done)
+        picker.cancelled.connect(done)
+        picker.start()
+
+    def set_region(self, region) -> None:
+        """Записывать только эту часть экрана (None — весь экран). Запоминается до следующего запуска."""
+        self.engine.set_region(region)
+        st = QSettings("Glimpsy", "status")
+        if region:
+            st.setValue("region", json.dumps([region[0], list(region[1])]))
+            if self.engine.streams and any(not sp.is_screen for sp in self.engine.streams):
+                self.show_message("Glimpsy", "Выбраны окна для записи — пока они пишутся, область не действует. "
+                                  "«Что записывать» → «Обычная запись», чтобы писать область.", force=True)
+        else:
+            st.remove("region")
+
+    def _load_region(self) -> None:
+        raw = QSettings("Glimpsy", "status").value("region", "", type=str)
+        try:
+            idx, frac = json.loads(raw) if raw else (None, None)
+            if idx is not None and len(frac) == 4:
+                self.engine.set_region((int(idx), [float(v) for v in frac]))
+        except (ValueError, TypeError):
+            log.debug("Сохранённая область не читается: %r", raw)
 
     def _sync_mode(self, continuous: bool | None = None) -> None:
         """Пункты меню: идёт ли непрерывная запись; собирается ли ролик сразу или только в редакторе."""
