@@ -386,7 +386,7 @@ def export_cuts(ffmpeg: str, project: Project, clips: list[Clip], joined: Path, 
     lst = work / "chunks.txt"
     lst.write_text("".join(f"file '{p.name}'\n" for p in files), encoding="utf-8")
     _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
-          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(joined)], cancel)
+          "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-movflags", "+faststart", str(joined)], cancel)
     return enc
 
 
@@ -623,7 +623,7 @@ def _compose_layers(ffmpeg: str, project: Project, src: Path, out: Path, texts: 
         chain, mus = music_filter(n, track, total, side)
         parts.append(chain)
         parts.append(f"[{voice}]{mus}amix=inputs=2:duration=first:normalize=0:dropout_transition=0[aout]")
-        amap, acodec = "[aout]", ["-c:a", "aac", "-b:a", "192k"]
+        amap, acodec = "[aout]", ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
     elif audio:
         amap, acodec = "[voice]", ["-c:a", "aac", "-b:a", "160k"]
     else:

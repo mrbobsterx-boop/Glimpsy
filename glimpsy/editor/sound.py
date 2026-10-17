@@ -162,7 +162,7 @@ def process(ffmpeg: str, project, src: Path, out: Path, run: Callable[..., None]
         measured = measure(ffmpeg, src, chain, s["lufs"], cwd)
         graph = (chain + "," if chain else "") + level_filter(s["lufs"], measured) + ",aresample=48000"
     run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-map", "0:v?", "-map", "0:a",
-         "-c:v", "copy", "-af", graph, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)], cwd=cwd)
+         "-c:v", "copy", "-af", graph, "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-movflags", "+faststart", str(out)], cwd=cwd)
     return True
 
 

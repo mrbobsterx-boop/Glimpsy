@@ -47,7 +47,11 @@ class RecordDialog(QDialog):
     cancelled = Signal()               # закрыли, ничего не сохранив
 
     def __init__(self, ffmpeg: str, media_dir: Path, parent=None, mic_opener=None,
-                 camera_input: list[str] | None = None) -> None:
+                 camera_input: list[str] | None = None, script: dict | None = None,
+                 voice_only: bool = False, draft_at: float = 0.0) -> None:
+        """script — состояние суфлёра {"path", "pos", "draft"} (меняется на месте, хранится в проекте);
+        voice_only — озвучка: только голос, каждый раз — новый дубль; draft_at — с какого места
+        показывать немой черновик ролика."""
         super().__init__(parent)
         self.setWindowTitle("Запись")
         self.setMinimumWidth(460)
@@ -65,8 +69,12 @@ class RecordDialog(QDialog):
         self._state = "idle"                     # idle / countdown / recording
         self._t0 = 0.0
 
+        self.script = script if script is not None else {}
+        self._draft_at = draft_at
         title = theme.mark(QLabel("Запись"), "h1")
-        sub = theme.mark(QLabel("Голос ляжет на дорожку «Голос», камера — на «Камеру», с места курсора на ленте."),
+        sub = theme.mark(QLabel("Голос ляжет новым дублем — после того, на котором стоит курсор. Читайте в своём "
+                                "темпе, неудачные места потом вырежете по тексту." if voice_only else
+                                "Голос ляжет на дорожку «Голос», камера — на «Камеру», с места курсора на ленте."),
                          "muted")
         sub.setWordWrap(True)
         self.voice = QCheckBox("Голос (микрофон)")
@@ -116,7 +124,28 @@ class RecordDialog(QDialog):
         self.mute.setChecked(store.value("record/mute", True, type=bool))
         self.mute.setToolTip("Чтобы звук ролика из колонок не попал в микрофон")
 
+        from glimpsy.editor.voice_widgets import DraftView, ScriptView
+
+        self.script_view = ScriptView()
+        self.script_view.setVisible(False)
+        self.script_view.position_changed.connect(lambda i: self.script.__setitem__("pos", i))
+        self.open_text = QPushButton(theme.icon("type", size=16), "  Открыть текст…")
+        self.open_text.setToolTip("Сценарий (.md или .txt) крупно рядом с кнопкой «Стоп». ↑/↓ или щелчок — "
+                                  "какой абзац читаете, колёсико — прокрутка. [Пометки] — мелко и серым.")
+        self.open_text.clicked.connect(self._choose_text)
+        self.draft_view: DraftView | None = None
+        self.open_draft = QPushButton(theme.icon("film", size=16), "  Черновик видео…")
+        self.open_draft.setToolTip("Немой черновик ролика (MP4 из VideoStudio): идёт без звука вместе с записью, "
+                                   "с места курсора на ленте")
+        self.open_draft.clicked.connect(self._choose_draft)
+        self.open_draft.setVisible(voice_only)
+        tools = QHBoxLayout()
+        tools.addWidget(self.open_text)
+        tools.addWidget(self.open_draft)
+        tools.addStretch(1)
+
         form = QFormLayout()
+        form.addRow(tools)
         form.addRow(self.voice)
         form.addRow("Микрофон", self.mic)
         form.addRow("Громкость", self.level)
@@ -138,14 +167,30 @@ class RecordDialog(QDialog):
         row.addWidget(cancel)
         row.addWidget(self.start_btn)
 
-        lay = QVBoxLayout(self)
+        left = QVBoxLayout()
+        left.addWidget(title)
+        left.addWidget(sub)
+        left.addSpacing(6)
+        left.addLayout(form)
+        left.addWidget(self.status)
+        left.addLayout(row)
+        self.side = QVBoxLayout()
+        self.side.addWidget(self.script_view, 1)
+        lay = QHBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 18)
-        lay.addWidget(title)
-        lay.addWidget(sub)
-        lay.addSpacing(6)
-        lay.addLayout(form)
-        lay.addWidget(self.status)
-        lay.addLayout(row)
+        lay.setSpacing(18)
+        lay.addLayout(left)
+        lay.addLayout(self.side, 1)
+        if voice_only:
+            # озвучка — только голос; видео ролика нет, вместо него — черновик
+            self.camera.setChecked(False)
+            for w in (self.camera, self.cam, self.view, self.play_along, self.mute):
+                w.setVisible(False)
+                form.setRowVisible(w, False)
+        if self.script.get("path") and Path(self.script["path"]).exists():
+            self._load_text(Path(self.script["path"]))
+        if voice_only and self.script.get("draft") and Path(self.script["draft"]).exists():
+            self._load_draft(self.script["draft"])
 
         self._timer = QTimer(self, interval=50)
         self._timer.timeout.connect(self._tick)
@@ -153,6 +198,46 @@ class RecordDialog(QDialog):
         self._update_start()
         self._preview_mic()
         self._preview_camera()
+
+    # ---------- суфлёр и черновик видео ----------
+
+    def _choose_text(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.script.get("path") or str(Path.home())
+        f, _ = QFileDialog.getOpenFileName(self, "Текст для суфлёра", start, "Текст (*.md *.txt);;Все файлы (*)")
+        if f:
+            self.script["pos"] = 0
+            self._load_text(Path(f))
+
+    def _load_text(self, path: Path) -> None:
+        try:
+            self.script_view.load_file(path, int(self.script.get("pos", 0)))
+        except OSError as e:
+            self.status.setText(f"⚠ Текст не открылся: {e}")
+            return
+        self.script["path"] = str(path)
+        self.script_view.setVisible(True)
+        self.open_text.setText("  Другой текст…")
+        self.resize(max(self.width(), 1000), max(self.height(), 600))
+
+    def _choose_draft(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        f, _ = QFileDialog.getOpenFileName(self, "Немой черновик ролика", self.script.get("draft") or str(Path.home()),
+                                           "Видео (*.mp4 *.mov *.mkv *.webm);;Все файлы (*)")
+        if f:
+            self._load_draft(f)
+
+    def _load_draft(self, path: str) -> None:
+        from glimpsy.editor.voice_widgets import DraftView
+
+        if self.draft_view is None:
+            self.draft_view = DraftView(self)
+            self.side.insertWidget(0, self.draft_view)
+        self.draft_view.load(path, self._draft_at)
+        self.script["draft"] = path
+        self.open_draft.setText("  Другой черновик…")
 
     # ---------- микрофон до записи: полоска громкости ----------
 
@@ -256,9 +341,15 @@ class RecordDialog(QDialog):
         self._state = "recording"
         self._t0 = time.monotonic()
         self._stamp = stamp
+        if self.draft_view is not None:
+            self.draft_view.play()
+        if self.script_view.isVisible():
+            self.script_view.setFocus()           # ↑/↓ — по абзацам, пока идёт запись
         self.started.emit()
 
     def _finish(self) -> None:
+        if self.draft_view is not None:
+            self.draft_view.stop()
         rec = Recording()
         wall = time.monotonic() - self._t0
         meter, cam = self._meter, self._cam

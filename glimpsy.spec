@@ -45,6 +45,8 @@ binaries += collect_dynamic_libs("ctranslate2")
 hidden += ["onnxruntime"]
 # описание кадров через Claude (по желанию, со своим ключом API)
 hidden += ["anthropic"]
+# озвучка: немой черновик ролика в окне записи
+hidden += ["PySide6.QtMultimediaWidgets"]
 binaries += collect_dynamic_libs("onnxruntime")
 
 a = Analysis(

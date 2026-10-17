@@ -247,4 +247,4 @@ def export(ffmpeg: str, project: Project, clips: list[Clip], plan: Plan, out: Pa
     video = work / "video.mp4"
     run(base + ["-f", "concat", "-safe", "0", "-i", str(vlist), "-c", "copy", str(video)])
     run(base + ["-i", str(video), "-f", "concat", "-safe", "0", "-i", str(alist), "-map", "0:v", "-map", "1:a",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)])
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-movflags", "+faststart", str(out)])

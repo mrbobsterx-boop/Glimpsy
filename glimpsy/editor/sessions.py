@@ -131,7 +131,7 @@ class SessionsDialog(QDialog):
         self.list.itemDoubleClicked.connect(lambda _: self._open())
         self.list.currentRowChanged.connect(lambda _: self._update_buttons())
         self.empty = theme.mark(QLabel("Пока нет ни одной сессии.\nЗапишите и соберите ролик — он появится здесь.\n"
-                                       "Или смонтируйте своё видео — кнопка «Смонтировать видео…» внизу."), "muted")
+                                       "Или откройте своё видео — кнопка «Открыть видео как проект…» внизу."), "muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # поиск по словам во всех проектах
@@ -159,14 +159,19 @@ class SessionsDialog(QDialog):
         self.b_open.clicked.connect(self._open)
         self.b_folder = QPushButton(theme.icon("folder-open", size=16), "  Файлы")
         self.b_folder.clicked.connect(self._show_folder)
-        self.b_video = QPushButton(theme.icon("film", size=16), "  Смонтировать видео…")
-        self.b_video.setToolTip("Своё видео (можно несколько, любой длины): расшифровка речи, монтаж по тексту, "
-                                "вырезание пауз. Исходные файлы не меняются и не копируются.")
+        self.b_video = QPushButton(theme.icon("film", size=16), "  Открыть видео как проект…")
+        self.b_video.setToolTip("Своё видео (одно или несколько, любой длины — например, готовый ролик из "
+                                "VideoStudio): субтитры, главы, обложка, экспорт 9:16, монтаж по тексту. "
+                                "Исходные файлы не меняются и не копируются.")
         self.b_video.clicked.connect(self._new_from_videos)
         self.b_import = QPushButton(theme.icon("folder-open", size=16), "  Открыть проект из файла…")
         self.b_import.setToolTip("Проект, сохранённый на другом компьютере («Экспорт» → «Сохранить проект в файл»)")
         self.b_import.clicked.connect(self._import_package)
         self.ffmpeg = ffmpeg
+        self.b_voice = QPushButton(theme.icon("mic", size=16), "  Новая озвучка…")
+        self.b_voice.setToolTip("Пустой проект только для голоса: запись с суфлёром, чистка, вырезы дублей — "
+                                "и «Экспорт» → «Озвучка для VideoStudio…»")
+        self.b_voice.clicked.connect(self._new_voice)
         self.b_describe = QPushButton(theme.icon("list", size=16), "  Описать все…")
         self.b_describe.setToolTip("Для всех записей: кадр-картинка, речь и описание каждого фрагмента "
                                    "(в файл fragments.md в папке записи)")
@@ -175,12 +180,16 @@ class SessionsDialog(QDialog):
         self.b_delete.clicked.connect(self._delete)
         close = theme.mark(QPushButton("Закрыть"), "ghost")
         close.clicked.connect(self.close)
+        # два ряда: создать / открыть новое — сверху, действия с выбранной записью — снизу
+        create = QHBoxLayout()
+        create.addWidget(self.b_voice)
+        create.addWidget(self.b_video)
+        create.addWidget(self.b_import)
+        create.addStretch(1)
+        create.addWidget(self.b_describe)
         buttons = QHBoxLayout()
         buttons.addWidget(self.b_delete)
         buttons.addWidget(self.b_folder)
-        buttons.addWidget(self.b_video)
-        buttons.addWidget(self.b_import)
-        buttons.addWidget(self.b_describe)
         buttons.addStretch(1)
         buttons.addWidget(close)
         buttons.addWidget(self.b_open)
@@ -208,6 +217,7 @@ class SessionsDialog(QDialog):
         lay.addWidget(self.results, 1)
         lay.addWidget(self.list, 1)
         lay.addWidget(self.empty, 1)
+        lay.addLayout(create)
         lay.addLayout(buttons)
         self.reload()
 
@@ -316,6 +326,18 @@ class SessionsDialog(QDialog):
         d = self._current_dir()
         if d:
             paths.open_in_file_manager(d)
+
+    def _new_voice(self) -> None:
+        """Новая озвучка: пустой проект без записи экрана — сразу в редактор, там «Запись»."""
+        from glimpsy.editor import voiceover
+
+        try:
+            p = voiceover.new_project(projects_root())
+        except OSError as e:
+            QMessageBox.warning(self, "Glimpsy", f"Не удалось создать проект:\n{e}")
+            return
+        self.reload()
+        self.open_project(p.dir)
 
     def _describe_all(self) -> None:
         from glimpsy.editor.describe_dialog import DescribeDialog

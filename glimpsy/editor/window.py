@@ -42,6 +42,7 @@ from glimpsy.editor.text import TextItem, effective_style, load_custom_fonts
 from glimpsy.editor.text_panel import TextPanel
 from glimpsy.editor import transcript as tr
 from glimpsy.editor import translate as mt
+from glimpsy.editor import voiceover
 from glimpsy.editor.overlay import OverlayItem
 from glimpsy.editor.overlay_video import OverlayVideos
 from glimpsy.editor.overlay_panel import OverlayPanel
@@ -273,6 +274,10 @@ class EditorWindow(QMainWindow):
                               self.export_fragments)
         export_menu.addAction(theme.icon("list", size=16), "Описать фрагменты (кадры, речь, Claude)…",
                               self.describe_fragments)
+        a_voice = export_menu.addAction(theme.icon("mic", size=16), "Озвучка для VideoStudio…", self.export_voice)
+        a_voice.setToolTip("Итоговый голос (после вырезов, чистый, −16 LUFS) и время каждого слова — "
+                           "в папку voice/ проекта VideoStudio")
+        a_voice.setVisible(self.project.text_edit)
         export_menu.addAction(theme.icon("folder-open", size=16), "Открыть папку с фрагментами этой записи",
                               lambda: (self._save(), paths.open_in_file_manager(self.project.dir)))
         export_menu.addAction(theme.icon("folder", size=16), "Сохранить проект в файл (для другого компьютера)…",
@@ -1449,8 +1454,26 @@ class EditorWindow(QMainWindow):
             return
         dlg = SubtitlesDialog(self.project.aspect, False, self, words=True)
         if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._after_transcribe = None
             return
         model, lang = dlg.model_key, dlg.language
+        self.project.cuts["asr"] = [model, lang]          # следующие дубли озвучки — этой же моделью, без вопросов
+        self._run_transcribe(todo, model, lang, retime)
+
+    def _transcribe_new(self) -> None:
+        """Озвучка: новый дубль распознаётся сам — той моделью, что выбрали в первый раз."""
+        if self._tr_cancel is not None or not subs.whisper_exe():
+            return
+        todo = [s for s in self._sources() if self.tstore.get(s["src"]) is None]
+        asr = self.project.cuts.get("asr")
+        if not todo:
+            return
+        if not asr or not subs.model_ready(asr[0]):
+            self.transcribe()
+            return
+        self._run_transcribe(todo, asr[0], asr[1], False)
+
+    def _run_transcribe(self, todo: list[dict], model: str, lang: str, retime: bool) -> None:
         bridge = _ExportBridge(self)
         cancel = self._tr_cancel = threading.Event()
         panel = self.text_panel_t
@@ -1463,8 +1486,11 @@ class EditorWindow(QMainWindow):
             self.tstore = tr.TranscriptStore(self.project.dir)
             self._recut()
             self._tr_build()
+            after, self._after_transcribe = getattr(self, "_after_transcribe", None), None
             if msg:
                 QMessageBox.warning(self, "Расшифровка", msg)
+            elif after is not None:
+                after()
 
         bridge.done.connect(finished)
         bridge.failed.connect(finished)
@@ -2665,8 +2691,10 @@ class EditorWindow(QMainWindow):
             self._rec_dialog.show()
             self._rec_dialog.raise_()
             return
+        voice = voiceover.is_voice(self.project)
         dlg = RecordDialog(self.ffmpeg, self.project.dir / "media", self, self.record_mic_opener,
-                           self.record_camera_input)
+                           self.record_camera_input, script=self.project.cuts.setdefault("prompter", {}),
+                           voice_only=voice, draft_at=self.player.t)
         dlg.started.connect(self._on_record_started)
         dlg.recorded.connect(self._on_recorded)
         dlg.cancelled.connect(self._on_record_ended)
@@ -2696,9 +2724,12 @@ class EditorWindow(QMainWindow):
         self.add_recording(rec, self._rec_start)
 
     def add_recording(self, rec, start: float) -> None:
-        """Записанное — на дорожки «Голос» и «Камера», с места start."""
+        """Записанное — на дорожки «Голос» и «Камера», с места start. В озвучке голос — новый дубль."""
         from glimpsy.editor.overlay import camera_item
 
+        if voiceover.is_voice(self.project) and rec.voice is not None:
+            self._add_take(rec.voice, start)
+            return
         stamp = time.strftime("%H:%M")
         self.history.push(self.project.to_dict())
         last = None
@@ -2718,6 +2749,27 @@ class EditorWindow(QMainWindow):
         if last is not None:
             self.timeline.select_overlay(last.id)
         self._layer_changed()
+
+    def _add_take(self, wav: Path, start: float) -> None:
+        """Озвучка: записанный голос — новый дубль после того, на котором стоит курсор; сразу распознаётся."""
+        n = len(self._sources()) + 1
+        out = wav.with_name(f"take_{wav.stem.removeprefix('voice_')}.mp4")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            src = voiceover.take_source(self.ffmpeg, wav, out, f"Дубль {n} · {time.strftime('%H:%M')}")
+        except Exception as e:
+            log.exception("Дубль не сохранился")
+            QMessageBox.warning(self, "Запись", f"Не удалось сохранить дубль:\n{e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.history.push(self.project.to_dict())
+        voiceover.insert_take(self.project, src, start)
+        tr.rebuild_clips(self.project, self.tstore)
+        self._changed()
+        self._tr_build()
+        self.statusBar().showMessage(f"Дубль {n} записан ({src['duration']:.0f} с). Распознаю речь…", 6000)
+        QTimer.singleShot(0, self._transcribe_new)
 
     def show_folders(self) -> None:
         from glimpsy.ui.folders import FoldersDialog, places
@@ -3140,6 +3192,85 @@ class EditorWindow(QMainWindow):
 
         self.exporting = True
         threading.Thread(target=work, daemon=True, name="fragments").start()
+        dlg.show()
+
+    def export_voice(self) -> None:
+        """«Озвучка для VideoStudio»: итоговый голос и время слов — в <проект VideoStudio>/voice/."""
+        if not self._sources():
+            QMessageBox.information(self, "Озвучка", "В проекте ещё нет голоса — запишите его кнопкой «Запись».")
+            return
+        self.player.pause()
+        if any(self.tstore.get(s["src"]) is None for s in self._sources()):
+            if self._tr_cancel is not None:
+                QMessageBox.information(self, "Озвучка", "Идёт распознавание речи — дождитесь конца и повторите.")
+                return
+            self._after_transcribe = self.export_voice      # сначала распознать речь, потом — экспорт
+            if voiceover.is_voice(self.project) and self.project.cuts.get("asr"):
+                self._transcribe_new()
+            else:
+                self.transcribe()
+            return
+        store = QSettings("Glimpsy", "editor")
+        last = store.value("voice/studio_dir", "", type=str)
+        folder = QFileDialog.getExistingDirectory(self, "Папка проекта VideoStudio (там, где project.json)",
+                                                  last or str(Path.home()))
+        if not folder:
+            return
+        folder = Path(folder)
+        if not (folder / "project.json").exists():
+            ans = QMessageBox.question(self, "Озвучка", "В этой папке нет project.json — это точно проект "
+                                       "VideoStudio? Всё равно сохранить озвучку сюда (в папку voice)?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        store.setValue("voice/studio_dir", str(folder))
+        self._save()
+        dlg = QProgressDialog("Подготовка…", None, 0, 1000, self)
+        dlg.setWindowTitle("Озвучка для VideoStudio")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        bridge = _ExportBridge(self)
+        bridge.progress.connect(lambda f, t: (dlg.setValue(int(f * 1000)), dlg.setLabelText(t)))
+        snap = Project(self.project.dir, self.project.name, fps=self.project.fps,
+                       source_video=self.project.source_video)
+        snap.restore(self.project.to_dict())
+
+        def done(path: str) -> None:
+            self.exporting = False
+            dlg.close()
+            try:
+                n = len(json.loads((Path(path) / "words.json").read_text(encoding="utf-8"))["words"])
+            except (OSError, ValueError, KeyError):
+                n = 0
+            box = QMessageBox(self)
+            box.setWindowTitle("Готово")
+            box.setText(f"Озвучка сохранена: {path}\n\nvoice.wav и words.json ({n} слов). Теперь в VideoStudio "
+                        "можно подогнать сцены под голос.")
+            b_open = box.addButton("Открыть папку", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+            box.exec()
+            if box.clickedButton() == b_open:
+                paths.open_in_file_manager(Path(path))
+
+        def failed(msg: str) -> None:
+            self.exporting = False
+            dlg.close()
+            QMessageBox.warning(self, "Озвучка не сохранилась", msg)
+
+        bridge.done.connect(done)
+        bridge.failed.connect(failed)
+
+        def work() -> None:
+            try:
+                out = voiceover.export_package(self.ffmpeg, snap, folder, bridge.progress.emit)
+                bridge.done.emit(str(out))
+            except Exception as e:
+                log.exception("Озвучка не сохранилась")
+                bridge.failed.emit(str(e))
+
+        self.exporting = True
+        threading.Thread(target=work, daemon=True, name="voice-export").start()
         dlg.show()
 
     def describe_fragments(self) -> None:

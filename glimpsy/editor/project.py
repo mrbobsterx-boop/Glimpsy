@@ -414,8 +414,8 @@ class Project:
 
     @property
     def text_edit(self) -> bool:
-        """Проект «монтаж по тексту» (фрагменты строятся из расшифровки)."""
-        return bool(self.cuts.get("sources"))
+        """Проект «монтаж по тексту» (фрагменты строятся из расшифровки). Озвучка — тоже, даже пустая."""
+        return bool(self.cuts.get("sources")) or bool(self.cuts.get("voice"))
 
     @classmethod
     def for_videos(cls, root: Path, files: list[Path], infos: list) -> "Project":
